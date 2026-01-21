@@ -39,7 +39,7 @@ class FeatureExtractor:
 
     def extract_edges(self, image):
         """
-        提取边缘，返回二值边缘图和权重图
+        提取边缘，返回二值边缘图、权重图和mask id图
         """
         # 1. 生成原始掩码
         print("[SAM] Generating masks...")
@@ -51,13 +51,16 @@ class FeatureExtractor:
         final_edge_map = np.zeros((h, w), dtype=np.uint8)
         # 引入注意力权重图，记录每个边缘点的质量
         weight_map = np.zeros((h, w), dtype=np.float32)
+        mask_id_map = np.zeros((h, w), dtype=np.uint16)
+        stability_map = np.zeros((h, w), dtype=np.float32)
         
         # 3. 循环处理每个mask
-        for mask in masks:
+        for idx, mask in enumerate(masks):
             # 提取掩码元数据
             m_bool = mask['segmentation']
             stability = mask['stability_score'] # SAM 的边缘稳定性得分
             bbox = mask['bbox'] # [x, y, w, h]
+            mask_id = mask.get('id', idx + 1)
         
             # 几何过滤逻辑 (空旷场景优先保留长条形结构如护栏、轨道)
             bw, bh = bbox[2], bbox[3]
@@ -69,8 +72,15 @@ class FeatureExtractor:
             if not m.flags['C_CONTIGUOUS']:
                 m = np.ascontiguousarray(m)
 
+            # 使用形态学梯度/Sobel 提取掩码边界（更贴近方案中的边缘提取）
+            grad = cv2.morphologyEx(m, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+            sobel_x = cv2.Sobel(grad, cv2.CV_32F, 1, 0, ksize=3)
+            sobel_y = cv2.Sobel(grad, cv2.CV_32F, 0, 1, ksize=3)
+            edge_strength = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+            edge_strength = (edge_strength > 0).astype(np.uint8) * 255
+
             # 提取物体轮廓
-            contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours, _ = cv2.findContours(edge_strength, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for cnt in contours:
                 # 绘制当前轮廓的临时掩码
@@ -84,7 +94,7 @@ class FeatureExtractor:
                     continue
 
                 # 仅保留高置信度的边界
-                if np.std(pixels) > 10:
+                if np.std(pixels) > 10 and cv2.arcLength(cnt, True) >= 15:
                     # 计算注意力权重：稳定性 * 几何先验加权
                     # 如果是结构化长边缘，赋予更高的注意力权重
                     weight = stability * (1.5 if is_structural else 1.0)
@@ -92,8 +102,15 @@ class FeatureExtractor:
                     cv2.drawContours(final_edge_map, [cnt], -1, 255, 1)
                     # 将权重绘制到权重图中，供后续优化器使用
                     cv2.drawContours(weight_map, [cnt], -1, float(weight), 1)
+
+            # 生成mask id map (保留稳定性更高的掩码)
+            update_mask = m_bool & (stability > stability_map)
+            if np.any(update_mask):
+                mask_id_map[update_mask] = mask_id
+                stability_map[update_mask] = stability
+
+        return final_edge_map, weight_map, mask_id_map
         
-        return final_edge_map, weight_map
 
     def get_distance_transform(self, edge_map):
         """
@@ -124,15 +141,17 @@ class FeatureExtractor:
         返回格式: [(u1, v1, u2, v2, type), ...]
         type: 0=Horizontal, 1=Vertical
         """
-        print("[SAM] Extracting 2D line features...")  
+        print("[SAM] Extracting 2D line features...") 
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) 
         
         # 如果没有提供edge_map，先提取边缘
         if edge_map is None:
-            edge_map, _ = self.extract_edges(image)
+            edge_map, _, _ = self.extract_edges(image)
         
-        # 使用OpenCV的LSD检测器
+        # 使用OpenCV的LSD检测器（基于灰度图）
         lsd = cv2.createLineSegmentDetector(0)
-        lines, _, _, _ = lsd.detect(edge_map)
+        lines, _, _, _ = lsd.detect(gray)
         
         if lines is None:
             print("[SAM] No lines detected")
@@ -143,6 +162,7 @@ class FeatureExtractor:
         h, w = image.shape[:2]
         line_mask = np.zeros((h, w), dtype=np.uint8)
         min_length = 20  # 最小线段长度（像素）
+        top_region = int(h * 0.4)  # 图像上方区域（电缆）
         
         for line in lines:
             x1, y1, x2, y2 = line[0]
@@ -163,6 +183,11 @@ class FeatureExtractor:
                 line_type = 0  # Horizontal
             else:
                 continue  # 跳过斜线
+
+            # 针对性筛选：长直线 + 上方横线（电缆）
+            if line_type == 0:
+                if length < 40 and (y1 + y2) / 2.0 > top_region:
+                    continue
             
             lines_2d.append((x1, y1, x2, y2, line_type))
             cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
@@ -176,12 +201,13 @@ class FeatureExtractor:
         """
         融合 SAM 边缘与 LSD 直线，生成边缘吸引场与权重图
         """
-        edge_map, weight_map = self.extract_edges(image)
+        edge_map, weight_map, mask_id_map = self.extract_edges(image)
         lines_2d, line_mask = self.extract_lines_2d(image, edge_map, return_mask=True)
         fused_edge_map = cv2.bitwise_or(edge_map, line_mask)
         dist_map = self.get_distance_transform(fused_edge_map)
+        dist_map = cv2.GaussianBlur(dist_map, (5, 5), 0)
         weight_map = cv2.GaussianBlur(weight_map, (5, 5), 0)
-        return dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d
+        return dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d, mask_id_map
 
     def process_image(self, image_path, output_dir):
         """
@@ -193,6 +219,8 @@ class FeatureExtractor:
         - xxx_edge_fused.png: 融合边缘图
         - xxx_edge_dist.png: 边缘吸引场 (16-bit PNG)
         - xxx_edge_weight.png: 边缘权重图 (16-bit PNG)
+        - xxx_mask_ids.png: SAM Mask ID图 (16-bit PNG)
+        - xxx_semantic_map.png: 语义ID图 (16-bit PNG)
         """
         print(f"\n[Processing] {image_path}")
 
@@ -207,7 +235,7 @@ class FeatureExtractor:
         output_base = os.path.join(output_dir, filename)
 
         # 1. 生成融合边缘与吸引场
-        dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d = (
+        dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d, mask_id_map = (
             self.build_edge_attraction_field(image)
         )
         cv2.imwrite(output_base + "_edge_map.png", edge_map)
@@ -225,11 +253,16 @@ class FeatureExtractor:
         weight_u16 = weight_norm * 65535.0
         cv2.imwrite(output_base + "_edge_weight.png", weight_u16.astype(np.uint16))
 
+        cv2.imwrite(output_base + "_mask_ids.png", mask_id_map.astype(np.uint16))
+        cv2.imwrite(output_base + "_semantic_map.png", mask_id_map.astype(np.uint16))
+
         print(f"[Saved] {output_base}_edge_map.png")
         print(f"[Saved] {output_base}_line_map.png")
         print(f"[Saved] {output_base}_edge_fused.png")
         print(f"[Saved] {output_base}_edge_dist.png")
         print(f"[Saved] {output_base}_edge_weight.png")
+        print(f"[Saved] {output_base}_mask_ids.png")
+        print(f"[Saved] {output_base}_semantic_map.png")
 
         # 2. 提取2D线特征
         with open(output_base + "_lines_2d.txt", 'w') as f:

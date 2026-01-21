@@ -67,6 +67,57 @@ struct CalibHistory {
 
 static CalibHistory g_calib_history;
 
+bool LoadCalibHistory(const std::string& history_file, CalibHistory& history) {
+    if (history_file.empty()) {
+        return false;
+    }
+    std::ifstream file(history_file);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    history.rotation_history.clear();
+    history.translation_history.clear();
+    history.score_history.clear();
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::stringstream ss(line);
+        double rx, ry, rz, tx, ty, tz, score;
+        if (ss >> rx >> ry >> rz >> tx >> ty >> tz >> score) {
+            history.rotation_history.emplace_back(rx, ry, rz);
+            history.translation_history.emplace_back(tx, ty, tz);
+            history.score_history.push_back(score);
+        }
+    }
+    return !history.rotation_history.empty();
+}
+
+bool SaveCalibHistory(const std::string& history_file, const CalibHistory& history) {
+    if (history_file.empty()) {
+        return false;
+    }
+    std::ofstream file(history_file);
+    if (!file.is_open()) {
+        return false;
+    }
+    file << "# rx ry rz tx ty tz score\n";
+    for (size_t i = 0; i < history.rotation_history.size(); ++i) {
+        const auto& r = history.rotation_history[i];
+        const auto& t = history.translation_history[i];
+        double score = 0.0;
+        if (i < history.score_history.size()) {
+            score = history.score_history[i];
+        }
+        file << r.x() << " " << r.y() << " " << r.z() << " "
+             << t.x() << " " << t.y() << " " << t.z() << " " << score << "\n";
+    }
+    return true;
+}
+
 struct LabelStats {
     double mean_intensity = 0.0;
     double var_intensity = 0.0;
@@ -133,47 +184,7 @@ std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& point
         if (n.norm() > 1e-6) {
         n.normalize();
         }
-        std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
-                                          const cv::Mat& semantic_map,
-                                          const Eigen::Matrix3d& K,
-                                          int W, int H,
-                                          const Eigen::Matrix3d& R,
-                                          const Eigen::Vector3d& t) {
-    int max_label = 0;
-    if (semantic_map.type() == CV_16U) {
-        double min_v = 0.0;
-        double max_v = 0.0;
-        cv::minMaxLoc(semantic_map, &min_v, &max_v);
-        max_label = static_cast<int>(max_v);
-    } else if (semantic_map.type() == CV_8U) {
-        max_label = 255;
-    } else if (semantic_map.type() == CV_32S) {
-        double min_v = 0.0;
-        double max_v = 0.0;
-        cv::minMaxLoc(semantic_map, &min_v, &max_v);
-        max_label = static_cast<int>(max_v);
-    }
-
-    std::vector<double> sum_intensity(max_label + 1, 0.0);
-    std::vector<double> sum_intensity_sq(max_label + 1, 0.0);
-    std::vector<Eigen::Vector3d> sum_normal(max_label + 1, Eigen::Vector3d::Zero());
-    std::vector<int> counts(max_label + 1, 0);
-
-    for (const auto& pt : points) {
-        int u, v;
-        if (!Project(pt.p, K, R, t, u, v, W, H)) continue;
-        int img_label = 0;
-        if (semantic_map.type() == CV_16U) img_label = semantic_map.at<ushort>(v, u);
-        else if (semantic_map.type() == CV_8U) img_label = semantic_map.at<uchar>(v, u);
-        else if (semantic_map.type() == CV_32S) img_label = semantic_map.at<int>(v, u);
-
-        if (img_label <= 0 || img_label > max_label) continue;
-        sum_intensity[img_label] += pt.intensity;
-        sum_intensity_sq[img_label] += pt.intensity * pt.intensity;
-        Eigen::Vector3d n = pt.normal;
-        if (n.norm() > 1e-6) {
-            n.normalize();
-        }
+       
         sum_normal[img_label] += n;
         counts[img_label] += 1;
     }
@@ -499,9 +510,9 @@ struct EdgeConsistencyCost {
 // 主程序
 // ========================================
 int main(int argc, char** argv) {
-    if (argc != 10 && argc != 11) {
+    if (argc != 10 && argc != 11 && argc != 12) {
         std::cerr << "Usage: ./optimizer <lidar_feature_base> <sam_feature_base> <calib_file> "
-                  << "<init_rx> <init_ry> <init_rz> <init_tx> <init_ty> <init_tz> [output_file]" << std::endl;
+                  << "<init_rx> <init_ry> <init_rz> <init_tx> <init_ty> <init_tz> [output_file] [history_file]" << std::endl;
         
         return -1;
     }
@@ -512,8 +523,12 @@ int main(int argc, char** argv) {
     double r_curr[3] = {std::atof(argv[4]), std::atof(argv[5]), std::atof(argv[6])};
     double t_curr[3] = {std::atof(argv[7]), std::atof(argv[8]), std::atof(argv[9])};
     std::string output_file;
+    std::string history_file;
     if (argc == 11) {
         output_file = argv[10];
+    } else if (argc == 12) {
+        output_file = argv[10];
+        history_file = argv[11];
     }
 
     std::cout << "=== EdgeCalib v2.0 - Two-Stage Calibration ===" << std::endl;
@@ -522,6 +537,18 @@ int main(int argc, char** argv) {
     std::cout << "Calib file: " << (calib_file.empty() ? "(default)" : calib_file) << std::endl;
     std::cout << "Initial R: [" << r_curr[0] << ", " << r_curr[1] << ", " << r_curr[2] << "]" << std::endl;
     std::cout << "Initial T: [" << t_curr[0] << ", " << t_curr[1] << ", " << t_curr[2] << "]" << std::endl;
+    if (!history_file.empty()) {
+        std::cout << "History file: " << history_file << std::endl;
+    }
+
+    if (!history_file.empty()) {
+        if (LoadCalibHistory(history_file, g_calib_history)) {
+            std::cout << "  Loaded history with " << g_calib_history.rotation_history.size()
+                      << " entries." << std::endl;
+        } else {
+            std::cout << "  No existing history loaded." << std::endl;
+        }
+    }
 
     // ========================================
     // 1. 加载数据
@@ -726,6 +753,12 @@ int main(int argc, char** argv) {
     
     // 更新历史记录
     g_calib_history.push(r_result, t_result, best_score);
+    if (!history_file.empty()) {
+        if (!SaveCalibHistory(history_file, g_calib_history)) {
+            std::cerr << "[Warning] Failed to save calibration history to: " << history_file << std::endl;
+        }
+    }
+
 
     // ========================================
     // 5. 保存结果

@@ -3,6 +3,8 @@
 #include <string>
 #include <fstream>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 // PCL Headers
 #include <pcl/io/pcd_io.h>
@@ -17,6 +19,109 @@
 #include <pcl/common/pca.h>
 #include <pcl/ModelCoefficients.h>
 #include <pcl/registration/ndt.h>
+
+// ========================================
+// 深度不连续性边缘提取 (README2.0 第二阶段 2.2)
+// 使用球面投影构建深度图并检测邻域跳变
+// ========================================
+struct DepthEdgeResult {
+    std::vector<bool> edge_flags;
+    int edge_count = 0;
+};
+
+DepthEdgeResult DetectDepthDiscontinuityEdges(
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+    int width = 1024,
+    int height = 64,
+    float v_fov_up_deg = 2.0f,
+    float v_fov_down_deg = -24.9f,
+    float depth_jump_threshold = 0.5f) {
+    DepthEdgeResult result;
+    if (!cloud || cloud->empty()) {
+        return result;
+    }
+
+    const float v_fov_up = v_fov_up_deg * static_cast<float>(M_PI) / 180.0f;
+    const float v_fov_down = v_fov_down_deg * static_cast<float>(M_PI) / 180.0f;
+    const float v_fov_total = std::abs(v_fov_down) + std::abs(v_fov_up);
+
+    std::vector<float> range_image(width * height, std::numeric_limits<float>::infinity());
+    std::vector<int> index_image(width * height, -1);
+
+    for (size_t i = 0; i < cloud->size(); ++i) {
+        const auto& p = cloud->points[i];
+        float depth = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        if (!std::isfinite(depth) || depth <= 1e-3f) {
+            continue;
+        }
+
+        float yaw = std::atan2(p.y, p.x);
+        float pitch = std::asin(p.z / depth);
+
+        float proj_x = 0.5f * (1.0f - yaw / static_cast<float>(M_PI));
+        float proj_y = 1.0f - (pitch + std::abs(v_fov_down)) / v_fov_total;
+
+        int u = static_cast<int>(proj_x * width);
+        int v = static_cast<int>(proj_y * height);
+
+        if (u < 0 || u >= width || v < 0 || v >= height) {
+            continue;
+        }
+
+        int idx = v * width + u;
+        if (depth < range_image[idx]) {
+            range_image[idx] = depth;
+            index_image[idx] = static_cast<int>(i);
+        }
+    }
+
+    result.edge_flags.assign(cloud->size(), false);
+
+    auto mark_edge = [&](int idx_a, int idx_b) {
+        if (idx_a >= 0) {
+            result.edge_flags[static_cast<size_t>(idx_a)] = true;
+        }
+        if (idx_b >= 0) {
+            result.edge_flags[static_cast<size_t>(idx_b)] = true;
+        }
+    };
+
+    for (int v = 0; v < height; ++v) {
+        for (int u = 0; u < width; ++u) {
+            int idx = v * width + u;
+            int idx_center = index_image[idx];
+            if (idx_center < 0) {
+                continue;
+            }
+
+            float range_center = range_image[idx];
+
+            if (u + 1 < width) {
+                int idx_right = index_image[idx + 1];
+                if (idx_right >= 0) {
+                    float diff = std::abs(range_center - range_image[idx + 1]);
+                    if (diff > depth_jump_threshold) {
+                        mark_edge(idx_center, idx_right);
+                    }
+                }
+            }
+
+            if (v + 1 < height) {
+                int idx_down = index_image[idx + width];
+                if (idx_down >= 0) {
+                    float diff = std::abs(range_center - range_image[idx + width]);
+                    if (diff > depth_jump_threshold) {
+                        mark_edge(idx_center, idx_down);
+                    }
+                }
+            }
+        }
+    }
+
+    result.edge_count = static_cast<int>(std::count(result.edge_flags.begin(), result.edge_flags.end(), true));
+    return result;
+}
+
 
 // IOUtils 用于加载 KITTI bin 文件到 PCL 点云
 namespace LocalIO {
@@ -144,6 +249,91 @@ struct PointWithWeight {
     
     PointWithWeight(const pcl::PointXYZI& p, double w) : point(p), weight(w) {}
 };
+
+struct RangeImageMapping {
+    int rows = 64;
+    int cols = 1024;
+    float min_el = -0.25f;
+    float max_el = 0.45f;
+};
+
+struct RangeImageData {
+    int rows;
+    int cols;
+    std::vector<float> ranges;
+    std::vector<int> indices;
+};
+
+RangeImageData BuildRangeImage(const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+                               const RangeImageMapping& cfg) {
+    RangeImageData data;
+    data.rows = cfg.rows;
+    data.cols = cfg.cols;
+    data.ranges.assign(cfg.rows * cfg.cols, std::numeric_limits<float>::infinity());
+    data.indices.assign(cfg.rows * cfg.cols, -1);
+
+    for (size_t i = 0; i < cloud->size(); ++i) {
+        const auto& p = cloud->points[i];
+        float range = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        if (!std::isfinite(range) || range < 1e-3f) continue;
+
+        float az = std::atan2(p.y, p.x);
+        float el = std::atan2(p.z, std::sqrt(p.x * p.x + p.y * p.y));
+
+        float col_f = (az + static_cast<float>(M_PI)) / (2.0f * static_cast<float>(M_PI)) * cfg.cols;
+        float row_f = (el - cfg.min_el) / (cfg.max_el - cfg.min_el) * cfg.rows;
+
+        int col = static_cast<int>(std::floor(col_f));
+        int row = static_cast<int>(std::floor(row_f));
+        if (row < 0 || row >= cfg.rows || col < 0 || col >= cfg.cols) continue;
+
+        int idx = row * cfg.cols + col;
+        if (range < data.ranges[idx]) {
+            data.ranges[idx] = range;
+            data.indices[idx] = static_cast<int>(i);
+        }
+    }
+    return data;
+}
+
+std::vector<bool> DetectDepthDiscontinuities(
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+    float depth_threshold = 0.5f) {
+    RangeImageMapping cfg;
+    RangeImageData range_img = BuildRangeImage(cloud, cfg);
+    std::vector<bool> is_edge(cloud->size(), false);
+
+    const int rows = range_img.rows;
+    const int cols = range_img.cols;
+
+    auto idx = [cols](int r, int c) { return r * cols + c; };
+    const int dr[4] = {-1, 1, 0, 0};
+    const int dc[4] = {0, 0, -1, 1};
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            int center_idx = range_img.indices[idx(r, c)];
+            float center_range = range_img.ranges[idx(r, c)];
+            if (center_idx < 0 || !std::isfinite(center_range)) continue;
+
+            for (int k = 0; k < 4; ++k) {
+                int rn = r + dr[k];
+                int cn = c + dc[k];
+                if (rn < 0 || rn >= rows || cn < 0 || cn >= cols) continue;
+
+                int nbr_idx = range_img.indices[idx(rn, cn)];
+                float nbr_range = range_img.ranges[idx(rn, cn)];
+                if (nbr_idx < 0 || !std::isfinite(nbr_range)) continue;
+
+                if (std::abs(center_range - nbr_range) > depth_threshold) {
+                    is_edge[center_idx] = true;
+                    is_edge[nbr_idx] = true;
+                }
+            }
+        }
+    }
+    return is_edge;
+}
 
 // 优化版本：接受配准后的点云列表和降采样后的当前点云
 std::vector<double> ComputeTemporalConsistencyOptimized(
@@ -283,9 +473,17 @@ int main(int argc, char** argv) {
     std::cout << "  Downsampled to " << cloud_ds->size() << " points" << std::endl;
 
     // ========================================
-    // 阶段4: 法向量估计
+    // 阶段4: 深度不连续性边缘提取 (README2.0 第二阶段 2.2)
     // ========================================
-    std::cout << "\n[Stage 3] Computing normals..." << std::endl;
+
+    std::cout << "\n[Stage 4] Depth discontinuity edge extraction..." << std::endl;
+    DepthEdgeResult depth_edges = DetectDepthDiscontinuityEdges(cloud_ds, 1024, 64, 2.0f, -24.9f, 0.5f);
+    std::cout << "  Edge points detected: " << depth_edges.edge_count << std::endl;
+
+    // ========================================
+    // 阶段5: 法向量估计
+    // ========================================
+    std::cout << "\n[Stage 5] Computing normals..." << std::endl;
     pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
     pcl::NormalEstimation<pcl::PointXYZI, pcl::Normal> ne;
     pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>());
@@ -296,7 +494,7 @@ int main(int argc, char** argv) {
     std::cout << "  Computed normals for " << normals->size() << " points" << std::endl;
 
     // ========================================
-    // 阶段5: 时空一致性加权 (README2.0 第二阶段 2.3)
+    // 阶段6: 时空一致性加权 (README2.0 第二阶段 2.3)
     // 优化版本：使用NDT配准后的点云，只对降采样后的点计算权重
     // ========================================
     std::vector<double> temporal_weights = ComputeTemporalConsistencyOptimized(
@@ -305,10 +503,11 @@ int main(int argc, char** argv) {
         0.5
     );
 
+
     // ========================================
-    // 阶段6: PCA几何分类与标签生成
+    // 阶段7: PCA几何分类与标签生成
     // ========================================
-    std::cout << "\n[Stage 4] PCA-based semantic labeling..." << std::endl;
+    std::cout << "\n[Stage 7] PCA-based semantic labeling..." << std::endl;
     const int LABEL_UNKNOWN = 0;
     const int LABEL_ROAD = 1;
     const int LABEL_VEGETATION = 2;
@@ -362,6 +561,9 @@ int main(int argc, char** argv) {
         if (i < temporal_weights.size()) {
             temporal_weight = temporal_weights[i];
         }
+        if (i < edge_flags.size() && edge_flags[i]) {
+            temporal_weight = std::min(1.0, temporal_weight * 1.2);
+        }
 
         // 5. 构建 PointFeature
         PointFeature pf;
@@ -376,9 +578,9 @@ int main(int argc, char** argv) {
     }
 
     // ========================================
-    // 阶段7: 保存点特征
+    // 阶段8: 保存点特征
     // ========================================
-    std::cout << "\n[Stage 5] Saving point features..." << std::endl;
+    std::cout << "\n[Stage 8] Saving point features..." << std::endl;
     std::ofstream out_pts(out_base + "_points.txt");
     if (!out_pts.is_open()) {
         std::cerr << "[Error] Cannot create output file: " << out_base << "_points.txt" << std::endl;
@@ -397,11 +599,32 @@ int main(int argc, char** argv) {
     std::cout << "  Stats: Road=" << stats[LABEL_ROAD] 
               << ", Veg=" << stats[LABEL_VEGETATION] 
               << ", Struct=" << stats[LABEL_STRUCTURE] << std::endl;
+
+    // ========================================
+    // 阶段9: 保存边缘点特征 (深度不连续性)
+    // ========================================
+    std::cout << "\n[Stage 9] Saving depth edge points..." << std::endl;
+    std::ofstream out_edges(out_base + "_edge_points.txt");
+    if (!out_edges.is_open()) {
+        std::cerr << "[Warning] Cannot create edge output file: " << out_base << "_edge_points.txt" << std::endl;
+    } else {
+        out_edges << "# Depth Edge Points: x y z intensity\n";
+        int saved_edges = 0;
+        for (size_t i = 0; i < cloud_ds->size(); ++i) {
+            if (!depth_edges.edge_flags.empty() && depth_edges.edge_flags[i]) {
+                const auto& p = cloud_ds->points[i];
+                out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
+                saved_edges++;
+            }
+        }
+        out_edges.close();
+        std::cout << "  Saved " << saved_edges << " edge points." << std::endl;
+    }
     
     // ========================================
-    // 阶段8: 提取3D线特征 (铁轨 + 立柱)
+    // 阶段10: 提取3D线特征 (铁轨 + 立柱)
     // ========================================
-    std::cout << "\n[Stage 6] Extracting 3D line features..." << std::endl;
+    std::cout << "\n[Stage 10] Extracting 3D line features..." << std::endl;
     std::vector<Line3D> lines;
     
     // 8.1 提取铁轨 (Ground Parallel Lines)
@@ -536,6 +759,7 @@ int main(int argc, char** argv) {
     std::cout << "\n=== Extraction Complete ===" << std::endl;
     std::cout << "Output files:" << std::endl;
     std::cout << "  - " << out_base << "_points.txt" << std::endl;
+    std::cout << "  - " << out_base << "_edge_points.txt" << std::endl;
     std::cout << "  - " << out_base << "_lines_3d.txt" << std::endl;
     
     return 0;
