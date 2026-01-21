@@ -67,6 +67,15 @@ struct CalibHistory {
 
 static CalibHistory g_calib_history;
 
+struct LabelStats {
+    double mean_intensity = 0.0;
+    double var_intensity = 0.0;
+    Eigen::Vector3d mean_normal = Eigen::Vector3d::Zero();
+    int count = 0;
+
+    bool valid() const { return count > 10; }
+};
+
 // ========================================
 // 工具函数
 // ========================================
@@ -82,6 +91,111 @@ bool LoadCalib(const std::string& calib_file, Eigen::Matrix3d& K, Eigen::Matrix3
     R_rect = Eigen::Matrix3d::Identity(); 
     return true; 
 }
+
+std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
+                                        const cv::Mat& semantic_map,
+                                        const Eigen::Matrix3d& K,
+                                        int W, int H,
+                                        const Eigen::Matrix3d& R,
+                                        const Eigen::Vector3d& t) {
+    int max_label = 0;
+    if (semantic_map.type() == CV_16U) {
+        double min_v = 0.0;
+        double max_v = 0.0;
+        cv::minMaxLoc(semantic_map, &min_v, &max_v);
+        max_label = static_cast<int>(max_v);
+    } else if (semantic_map.type() == CV_8U) {
+        max_label = 255;
+    } else if (semantic_map.type() == CV_32S) {
+        double min_v = 0.0;
+        double max_v = 0.0;
+        cv::minMaxLoc(semantic_map, &min_v, &max_v);
+        max_label = static_cast<int>(max_v);
+    }
+
+    std::vector<double> sum_intensity(max_label + 1, 0.0);
+    std::vector<double> sum_intensity_sq(max_label + 1, 0.0);
+    std::vector<Eigen::Vector3d> sum_normal(max_label + 1, Eigen::Vector3d::Zero());
+    std::vector<int> counts(max_label + 1, 0);
+
+    for (const auto& pt : points) {
+        int u, v;
+        if (!Project(pt.p, K, R, t, u, v, W, H)) continue;
+        int img_label = 0;
+        if (semantic_map.type() == CV_16U) img_label = semantic_map.at<ushort>(v, u);
+        else if (semantic_map.type() == CV_8U) img_label = semantic_map.at<uchar>(v, u);
+        else if (semantic_map.type() == CV_32S) img_label = semantic_map.at<int>(v, u);
+
+        if (img_label <= 0 || img_label > max_label) continue;
+        sum_intensity[img_label] += pt.intensity;
+        sum_intensity_sq[img_label] += pt.intensity * pt.intensity;
+        Eigen::Vector3d n = pt.normal;
+        if (n.norm() > 1e-6) {
+        n.normalize();
+        }
+        std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
+                                          const cv::Mat& semantic_map,
+                                          const Eigen::Matrix3d& K,
+                                          int W, int H,
+                                          const Eigen::Matrix3d& R,
+                                          const Eigen::Vector3d& t) {
+    int max_label = 0;
+    if (semantic_map.type() == CV_16U) {
+        double min_v = 0.0;
+        double max_v = 0.0;
+        cv::minMaxLoc(semantic_map, &min_v, &max_v);
+        max_label = static_cast<int>(max_v);
+    } else if (semantic_map.type() == CV_8U) {
+        max_label = 255;
+    } else if (semantic_map.type() == CV_32S) {
+        double min_v = 0.0;
+        double max_v = 0.0;
+        cv::minMaxLoc(semantic_map, &min_v, &max_v);
+        max_label = static_cast<int>(max_v);
+    }
+
+    std::vector<double> sum_intensity(max_label + 1, 0.0);
+    std::vector<double> sum_intensity_sq(max_label + 1, 0.0);
+    std::vector<Eigen::Vector3d> sum_normal(max_label + 1, Eigen::Vector3d::Zero());
+    std::vector<int> counts(max_label + 1, 0);
+
+    for (const auto& pt : points) {
+        int u, v;
+        if (!Project(pt.p, K, R, t, u, v, W, H)) continue;
+        int img_label = 0;
+        if (semantic_map.type() == CV_16U) img_label = semantic_map.at<ushort>(v, u);
+        else if (semantic_map.type() == CV_8U) img_label = semantic_map.at<uchar>(v, u);
+        else if (semantic_map.type() == CV_32S) img_label = semantic_map.at<int>(v, u);
+
+        if (img_label <= 0 || img_label > max_label) continue;
+        sum_intensity[img_label] += pt.intensity;
+        sum_intensity_sq[img_label] += pt.intensity * pt.intensity;
+        Eigen::Vector3d n = pt.normal;
+        if (n.norm() > 1e-6) {
+            n.normalize();
+        }
+        sum_normal[img_label] += n;
+        counts[img_label] += 1;
+    }
+
+    std::vector<LabelStats> stats(max_label + 1);
+    for (int i = 1; i <= max_label; ++i) {
+        if (counts[i] == 0) continue;
+        stats[i].count = counts[i];
+        stats[i].mean_intensity = sum_intensity[i] / counts[i];
+        double mean_sq = sum_intensity_sq[i] / counts[i];
+        stats[i].var_intensity = std::max(0.0, mean_sq - stats[i].mean_intensity * stats[i].mean_intensity);
+        Eigen::Vector3d mean_n = sum_normal[i];
+        if (mean_n.norm() > 1e-6) {
+            mean_n.normalize();
+        }
+        stats[i].mean_normal = mean_n;
+    }
+
+    return stats;
+}
+
+
 
 bool Project(const Eigen::Vector3d& p_lidar, const Eigen::Matrix3d& K, 
              const Eigen::Matrix3d& R, const Eigen::Vector3d& t, 
@@ -274,6 +388,7 @@ struct EdgeConsistencyCost {
                         const std::vector<int>* indices,
                         const cv::Mat* dist_map,
                         const cv::Mat* semantic_map,
+                        const std::vector<LabelStats>* label_stats,
                         const Eigen::Matrix3d& K,
                         int W, int H,
                         double w_edge,
@@ -282,6 +397,7 @@ struct EdgeConsistencyCost {
           indices_(indices),
           dist_map_(dist_map),
           semantic_map_(semantic_map),
+          label_stats_(label_stats),
           K_(K),
           W_(W),
           H_(H),
@@ -333,7 +449,24 @@ struct EdgeConsistencyCost {
                 } else if (semantic_map_->type() == CV_32S) {
                     img_label = semantic_map_->at<int>(v, u);
                 }
-                consistency_error = (img_label == pt.label) ? 0.0 : 1.0;
+
+                if (pt.label != 0 && img_label != pt.label) {
+                    consistency_error += 1.0;
+                }
+
+                if (label_stats_ && img_label >= 0 && img_label < static_cast<int>(label_stats_->size())) {
+                    const auto& stats = (*label_stats_)[img_label];
+                    if (stats.valid()) {
+                        double std_intensity = std::sqrt(stats.var_intensity) + 1e-3;
+                        double intensity_error = std::abs(pt.intensity - stats.mean_intensity) / std_intensity;
+                        Eigen::Vector3d n = pt.normal;
+                        if (n.norm() > 1e-6) {
+                            n.normalize();
+                        }
+                        double normal_error = 1.0 - std::max(-1.0, std::min(1.0, n.dot(stats.mean_normal)));
+                        consistency_error += intensity_error + normal_error;
+                    }
+                }
             }
 
             double weight = pt.weight;
@@ -353,6 +486,7 @@ struct EdgeConsistencyCost {
     const std::vector<int>* indices_;
     const cv::Mat* dist_map_;
     const cv::Mat* semantic_map_;
+    const std::vector<LabelStats>* label_stats_;
     Eigen::Matrix3d K_;
     int W_;
     int H_;
@@ -509,11 +643,19 @@ int main(int argc, char** argv) {
 
         const double w_edge = 1.0;
         const double w_consistency = 1.0;
+        std::vector<LabelStats> label_stats;
+        if (!semantic_map.empty()) {
+            Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
+            Eigen::Matrix3d R_mat;
+            ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
+            label_stats = ComputeLabelStats(points, semantic_map, K, W, H, R_mat, t_vec);
+        }
         auto* cost = new EdgeConsistencyCost(
             &points,
             &sample_indices,
             edge_dist.empty() ? nullptr : &edge_dist,
             semantic_map.empty() ? nullptr : &semantic_map,
+            label_stats.empty() ? nullptr : &label_stats,
             K,
             W,
             H,
@@ -525,6 +667,24 @@ int main(int argc, char** argv) {
             new ceres::HuberLoss(1.0),
             r_curr,
             t_curr);
+
+        if (!lines3d.empty() && !lines2d.empty()) {
+            std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
+            for (const auto& l3d : lines3d) {
+                auto* line_cost = new LineReprojectionError(
+                    l3d,
+                    lines2d,
+                    K(0, 0),
+                    K(1, 1),
+                    K(0, 2),
+                    K(1, 2));
+                problem.AddResidualBlock(
+                    new ceres::NumericDiffCostFunction<LineReprojectionError, ceres::CENTRAL, 1, 3, 3>(line_cost),
+                    new ceres::HuberLoss(1.0),
+                    r_curr,
+                    t_curr);
+            }
+        }
 
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_SCHUR;
