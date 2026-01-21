@@ -52,18 +52,28 @@ namespace LocalIO {
 
 // ========================================
 // 新增：NDT多帧融合函数 (README2.0 第二阶段 2.1)
+// 优化版本：返回融合点云和配准后的点云列表（用于时空一致性计算）
 // ========================================
-pcl::PointCloud<pcl::PointXYZI>::Ptr FuseMultiFrameNDT(
+struct NDTFusionResult {
+    pcl::PointCloud<pcl::PointXYZI>::Ptr fused_cloud;
+    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> aligned_frames;  // 配准后的历史帧
+};
+
+NDTFusionResult FuseMultiFrameNDT(
     const std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr>& frames) 
 {
+    NDTFusionResult result;
+    
     if (frames.empty()) {
         std::cerr << "[Error] No frames to fuse" << std::endl;
-        return nullptr;
+        return result;
     }
     
     if (frames.size() == 1) {
         std::cout << "[Info] Single frame, no fusion needed" << std::endl;
-        return frames[0];
+        result.fused_cloud = frames[0];
+        // 单帧情况，没有历史帧
+        return result;
     }
     
     std::cout << "\n[NDT Fusion] Fusing " << frames.size() << " frames..." << std::endl;
@@ -106,21 +116,27 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr FuseMultiFrameNDT(
             std::cout << "    Converged! Fitness score: " << fitness_score << std::endl;
             // std::cout << "    Transformation:\n" << transformation << std::endl;
             
+            // 保存配准后的点云（用于时空一致性计算）
+            result.aligned_frames.push_back(aligned);
+            
             // 将配准后的点云加入融合结果
             *fused += *aligned;
         } else {
             std::cout << "    [Warning] NDT did not converge, using raw alignment" << std::endl;
-            // 即使不收敛，也尝试添加（可能帧间变化太小）
+            // 即使不收敛，也保存原始点云（可能帧间变化太小）
+            result.aligned_frames.push_back(source);
             *fused += *source;
         }
     }
     
+    result.fused_cloud = fused;
     std::cout << "[NDT Fusion] Complete. Total points: " << fused->size() << std::endl;
-    return fused;
+    return result;
 }
 
 // ========================================
 // 新增：时空一致性加权 (README2.0 第二阶段 2.3)
+// 优化版本：使用NDT配准后的点云，预先构建KD-Tree
 // ========================================
 struct PointWithWeight {
     pcl::PointXYZI point;
@@ -129,56 +145,66 @@ struct PointWithWeight {
     PointWithWeight(const pcl::PointXYZI& p, double w) : point(p), weight(w) {}
 };
 
-std::vector<PointWithWeight> ComputeTemporalConsistency(
-    const std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr>& frames,
+// 优化版本：接受配准后的点云列表和降采样后的当前点云
+std::vector<double> ComputeTemporalConsistencyOptimized(
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& current_downsampled,
+    const std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr>& aligned_frames,
     double position_threshold = 0.5)  // 位置一致性阈值 (m)
 {
-    std::vector<PointWithWeight> weighted_points;
+    std::vector<double> weights;
+    weights.reserve(current_downsampled->size());
     
-    if (frames.empty()) return weighted_points;
-    
-    std::cout << "\n[Temporal Filter] Computing spatial-temporal consistency..." << std::endl;
-    
-    // 使用当前帧（最后一帧）的点
-    pcl::PointCloud<pcl::PointXYZI>::Ptr current_frame = frames.back();
-    
-    if (frames.size() == 1) {
+    if (aligned_frames.empty() || !current_downsampled) {
         // 单帧情况，所有点权重为1.0
-        for (const auto& p : current_frame->points) {
-            weighted_points.emplace_back(p, 1.0);
-        }
-        std::cout << "  Single frame, all weights = 1.0" << std::endl;
-        return weighted_points;
+        weights.assign(current_downsampled->size(), 1.0);
+        return weights;
     }
     
-    // 构建KD-Tree用于邻域搜索
-    pcl::KdTreeFLANN<pcl::PointXYZI> kdtree;
-    kdtree.setInputCloud(current_frame);
+    std::cout << "\n[Temporal Filter] Computing spatial-temporal consistency..." << std::endl;
+    std::cout << "  Current points: " << current_downsampled->size() << std::endl;
+    std::cout << "  Historical frames: " << aligned_frames.size() << std::endl;
+    
+    if (aligned_frames.size() == 0) {
+        // 单帧情况，所有点权重为1.0
+        weights.assign(current_downsampled->size(), 1.0);
+        std::cout << "  Single frame, all weights = 1.0" << std::endl;
+        return weights;
+    }
+    
+    // 优化1: 预先为所有历史帧构建KD-Tree（一次性构建）
+    std::vector<pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr> hist_kdtrees;
+    hist_kdtrees.reserve(aligned_frames.size());
+    
+    std::cout << "  Pre-building KD-Trees for " << aligned_frames.size() << " historical frames..." << std::endl;
+    for (size_t i = 0; i < aligned_frames.size(); ++i) {
+        pcl::KdTreeFLANN<pcl::PointXYZI>::Ptr kdtree(new pcl::KdTreeFLANN<pcl::PointXYZI>);
+        kdtree->setInputCloud(aligned_frames[i]);
+        hist_kdtrees.push_back(kdtree);
+    }
+    std::cout << "  KD-Trees built." << std::endl;
     
     int static_count = 0, dynamic_count = 0;
+    int processed = 0;
     
-    for (const auto& p : current_frame->points) {
+    // 优化2: 只对降采样后的点计算权重
+    for (const auto& p : current_downsampled->points) {
         // 统计该点在历史帧中的出现次数
         int appearance_count = 1;  // 当前帧算一次
         
-        for (size_t i = 0; i < frames.size() - 1; ++i) {
-            pcl::PointCloud<pcl::PointXYZI>::Ptr hist_frame = frames[i];
-            
-            // 在历史帧中搜索邻近点
+        // 优化3: 使用预先构建的KD-Tree
+        for (size_t i = 0; i < hist_kdtrees.size(); ++i) {
             std::vector<int> indices;
             std::vector<float> distances;
             
-            pcl::KdTreeFLANN<pcl::PointXYZI> hist_kdtree;
-            hist_kdtree.setInputCloud(hist_frame);
-            
-            if (hist_kdtree.radiusSearch(p, position_threshold, indices, distances) > 0) {
+            if (hist_kdtrees[i]->radiusSearch(p, position_threshold, indices, distances) > 0) {
                 appearance_count++;
             }
         }
         
         // 计算权重: 出现次数越多，权重越高（表示静态物体）
-        // weight = appearance_count / total_frames
-        double weight = static_cast<double>(appearance_count) / frames.size();
+        // weight = appearance_count / (total_frames + 1)  // +1 是当前帧
+        double weight = static_cast<double>(appearance_count) / (aligned_frames.size() + 1);
+        weights.push_back(weight);
         
         // 分类统计
         if (weight > 0.7) {
@@ -187,13 +213,16 @@ std::vector<PointWithWeight> ComputeTemporalConsistency(
             dynamic_count++;
         }
         
-        weighted_points.emplace_back(p, weight);
+        processed++;
+        if (processed % 10000 == 0) {
+            std::cout << "  Processed " << processed << " / " << current_downsampled->size() << " points..." << std::endl;
+        }
     }
     
     std::cout << "  Static points (weight > 0.7): " << static_count << std::endl;
     std::cout << "  Dynamic points (weight <= 0.7): " << dynamic_count << std::endl;
     
-    return weighted_points;
+    return weights;
 }
 
 int main(int argc, char** argv) {
@@ -235,11 +264,12 @@ int main(int argc, char** argv) {
     // ========================================
     // 阶段2: NDT多帧融合增密 (README2.0 第二阶段 2.1)
     // ========================================
-    pcl::PointCloud<pcl::PointXYZI>::Ptr fused_cloud = FuseMultiFrameNDT(frames);
-    if (!fused_cloud) {
+    NDTFusionResult fusion_result = FuseMultiFrameNDT(frames);
+    if (!fusion_result.fused_cloud) {
         std::cerr << "[Error] Frame fusion failed" << std::endl;
         return -1;
     }
+    pcl::PointCloud<pcl::PointXYZI>::Ptr fused_cloud = fusion_result.fused_cloud;
     
     // ========================================
     // 阶段3: 降采样
@@ -267,8 +297,13 @@ int main(int argc, char** argv) {
 
     // ========================================
     // 阶段5: 时空一致性加权 (README2.0 第二阶段 2.3)
+    // 优化版本：使用NDT配准后的点云，只对降采样后的点计算权重
     // ========================================
-    std::vector<PointWithWeight> weighted_points = ComputeTemporalConsistency(frames, 0.5);
+    std::vector<double> temporal_weights = ComputeTemporalConsistencyOptimized(
+        cloud_ds, 
+        fusion_result.aligned_frames, 
+        0.5
+    );
 
     // ========================================
     // 阶段6: PCA几何分类与标签生成
@@ -324,8 +359,8 @@ int main(int argc, char** argv) {
 
         // 4. 获取时空一致性权重
         double temporal_weight = 1.0;
-        if (i < weighted_points.size()) {
-            temporal_weight = weighted_points[i].weight;
+        if (i < temporal_weights.size()) {
+            temporal_weight = temporal_weights[i];
         }
 
         // 5. 构建 PointFeature

@@ -68,12 +68,12 @@ class EdgeCalibPipeline:
         checkpoint = self.config['sam']['checkpoint_path']
         
         for frame_id in self.frame_ids:
-            img_path = os.path.join(image_dir, f"{frame_id:06d}.png")
+            img_path = os.path.join(image_dir, f"{frame_id:010d}.png")
             if not os.path.exists(img_path):
                 print(f"[Warning] 图像不存在: {img_path}")
                 continue
             
-            print(f"\n处理帧 {frame_id:06d}...")
+            print(f"\n处理帧 {frame_id:010d}...")
             cmd = [
                 "python", "python/run_sam.py",
                 "--image", img_path,
@@ -102,17 +102,17 @@ class EdgeCalibPipeline:
                     fusion_frames.append(self.frame_ids[j])
             
             # 构建点云文件路径
-            bin_paths = [os.path.join(velodyne_dir, f"{fid:06d}.bin") for fid in fusion_frames]
+            bin_paths = [os.path.join(velodyne_dir, f"{fid:010d}.bin") for fid in fusion_frames]
             
             # 检查文件存在性
             if not all(os.path.exists(p) for p in bin_paths):
-                print(f"[Warning] 部分点云文件不存在，跳过帧 {frame_id:06d}")
+                print(f"[Warning] 部分点云文件不存在，跳过帧 {frame_id:010d}")
                 continue
             
-            output_base = os.path.join(output_dir, f"{frame_id:06d}")
+            output_base = os.path.join(output_dir, f"{frame_id:010d}")
             
-            print(f"\n处理帧 {frame_id:06d}，融合 {len(bin_paths)} 帧...")
-            print(f"  融合帧: {[f'{fid:06d}' for fid in fusion_frames]}")
+            print(f"\n处理帧 {frame_id:010d}，融合 {len(bin_paths)} 帧...")
+            print(f"  融合帧: {[f'{fid:010d}' for fid in fusion_frames]}")
             
             # 调用C++程序
             cmd = ["./build/lidar_extractor", *bin_paths, output_base]
@@ -135,16 +135,16 @@ class EdgeCalibPipeline:
         init_t = self.config['calibration']['initial_extrinsic']['translation']
         
         for frame_id in self.frame_ids:
-            feature_base = os.path.join(lidar_dir, f"{frame_id:06d}")
-            sam_base = os.path.join(sam_dir, f"{frame_id:06d}")
-            output_file = os.path.join(calib_dir, f"{frame_id:06d}_calib_result.txt")
+            feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
+            sam_base = os.path.join(sam_dir, f"{frame_id:010d}")
+            output_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
             
             # 检查特征文件是否存在
             if not os.path.exists(f"{feature_base}_points.txt"):
-                print(f"[Warning] 特征文件不存在，跳过帧 {frame_id:06d}")
+                print(f"[Warning] 特征文件不存在，跳过帧 {frame_id:010d}")
                 continue
             
-            print(f"\n优化帧 {frame_id:06d}...")
+            print(f"\n优化帧 {frame_id:010d}...")
             
             # 调用C++优化器
             cmd = [
@@ -172,13 +172,13 @@ class EdgeCalibPipeline:
         visual_dir = self.config['data']['visual_output_dir']
         
         for frame_id in self.frame_ids:
-            img_path = os.path.join(image_dir, f"{frame_id:06d}.png")
-            feature_base = os.path.join(lidar_dir, f"{frame_id:06d}")
-            calib_file = os.path.join(calib_dir, f"{frame_id:06d}_calib_result.txt")
-            output_path = os.path.join(visual_dir, f"{frame_id:06d}_result.png")
+            img_path = os.path.join(image_dir, f"{frame_id:010d}.png")
+            feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
+            calib_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
+            output_path = os.path.join(visual_dir, f"{frame_id:010d}_result.png")
             
             if not os.path.exists(calib_file):
-                print(f"[Warning] 标定结果不存在，跳过帧 {frame_id:06d}")
+                print(f"[Warning] 标定结果不存在，跳过帧 {frame_id:010d}")
                 continue
             
             # 读取标定结果
@@ -187,7 +187,7 @@ class EdgeCalibPipeline:
                 r_vec = lines[1].strip().split()
                 t_vec = lines[2].strip().split()
             
-            print(f"可视化帧 {frame_id:06d}...")
+            print(f"可视化帧 {frame_id:010d}...")
             cmd = [
                 "python", "visual_result.py",
                 "--img", img_path,

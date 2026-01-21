@@ -267,14 +267,108 @@ struct LineReprojectionError {
 };
 
 // ========================================
+// Ceres优化：边缘吸引场 + 语义一致性 (README2.0 第三阶段 3.2)
+// ========================================
+struct EdgeConsistencyCost {
+    EdgeConsistencyCost(const std::vector<PointFeature>* points,
+                        const std::vector<int>* indices,
+                        const cv::Mat* dist_map,
+                        const cv::Mat* semantic_map,
+                        const Eigen::Matrix3d& K,
+                        int W, int H,
+                        double w_edge,
+                        double w_consistency)
+        : points_(points),
+          indices_(indices),
+          dist_map_(dist_map),
+          semantic_map_(semantic_map),
+          K_(K),
+          W_(W),
+          H_(H),
+          w_edge_(w_edge),
+          w_consistency_(w_consistency) {}
+
+    bool operator()(const double* const r, const double* const t, double* residual) const {
+        double total_error = 0.0;
+        int visible_count = 0;
+
+        double rot[9];
+        ceres::AngleAxisToRotationMatrix(r, rot);
+
+        for (int idx : *indices_) {
+            const auto& pt = (*points_)[idx];
+            if (pt.label == 0) continue;
+
+            Eigen::Vector3d p_cam;
+            p_cam.x() = rot[0] * pt.p.x() + rot[1] * pt.p.y() + rot[2] * pt.p.z() + t[0];
+            p_cam.y() = rot[3] * pt.p.x() + rot[4] * pt.p.y() + rot[5] * pt.p.z() + t[1];
+            p_cam.z() = rot[6] * pt.p.x() + rot[7] * pt.p.y() + rot[8] * pt.p.z() + t[2];
+
+            if (p_cam.z() < 0.1) continue;
+
+            Eigen::Vector3d uv = K_ * p_cam;
+            int u = static_cast<int>(uv.x() / uv.z());
+            int v = static_cast<int>(uv.y() / uv.z());
+            if (u < 0 || u >= W_ || v < 0 || v >= H_) continue;
+
+            double edge_error = 0.0;
+            if (dist_map_ && !dist_map_->empty()) {
+                if (dist_map_->type() == CV_16U) {
+                    edge_error = static_cast<double>(dist_map_->at<ushort>(v, u)) / 65535.0;
+                } else if (dist_map_->type() == CV_32F) {
+                    edge_error = static_cast<double>(dist_map_->at<float>(v, u));
+                } else if (dist_map_->type() == CV_64F) {
+                    edge_error = dist_map_->at<double>(v, u);
+                }
+                edge_error = std::min(std::max(edge_error, 0.0), 1.0);
+            }
+
+            double consistency_error = 0.0;
+            if (semantic_map_ && !semantic_map_->empty()) {
+                int img_label = 0;
+                if (semantic_map_->type() == CV_16U) {
+                    img_label = semantic_map_->at<ushort>(v, u);
+                } else if (semantic_map_->type() == CV_8U) {
+                    img_label = semantic_map_->at<uchar>(v, u);
+                } else if (semantic_map_->type() == CV_32S) {
+                    img_label = semantic_map_->at<int>(v, u);
+                }
+                consistency_error = (img_label == pt.label) ? 0.0 : 1.0;
+            }
+
+            double weight = pt.weight;
+            total_error += weight * (w_edge_ * edge_error + w_consistency_ * consistency_error);
+            visible_count++;
+        }
+
+        if (visible_count < 50) {
+            residual[0] = 1e3;
+        } else {
+            residual[0] = total_error / static_cast<double>(visible_count);
+        }
+        return true;
+    }
+
+    const std::vector<PointFeature>* points_;
+    const std::vector<int>* indices_;
+    const cv::Mat* dist_map_;
+    const cv::Mat* semantic_map_;
+    Eigen::Matrix3d K_;
+    int W_;
+    int H_;
+    double w_edge_;
+    double w_consistency_;
+};
+
+
+// ========================================
 // 主程序
 // ========================================
 int main(int argc, char** argv) {
-    if (argc != 10) {
+    if (argc != 10 && argc != 11) {
         std::cerr << "Usage: ./optimizer <lidar_feature_base> <sam_feature_base> <calib_file> "
-                  << "<init_rx> <init_ry> <init_rz> <init_tx> <init_ty> <init_tz>" << std::endl;
-        std::cerr << "Example: ./optimizer result/lidar_features/000000 result/sam_features/000000 "
-                  << "data/calib.txt 0.0 0.0 0.0 0.0 -0.3 1.8" << std::endl;
+                  << "<init_rx> <init_ry> <init_rz> <init_tx> <init_ty> <init_tz> [output_file]" << std::endl;
+        
         return -1;
     }
     
@@ -283,6 +377,10 @@ int main(int argc, char** argv) {
     std::string calib_file = argv[3];
     double r_curr[3] = {std::atof(argv[4]), std::atof(argv[5]), std::atof(argv[6])};
     double t_curr[3] = {std::atof(argv[7]), std::atof(argv[8]), std::atof(argv[9])};
+    std::string output_file;
+    if (argc == 11) {
+        output_file = argv[10];
+    }
 
     std::cout << "=== EdgeCalib v2.0 - Two-Stage Calibration ===" << std::endl;
     std::cout << "LiDAR features: " << lidar_base << std::endl;
@@ -345,47 +443,46 @@ int main(int argc, char** argv) {
     // ========================================
     // 2. 粗标定 (Coarse Search)
     // ========================================
-    std::cout << "\n[Stage 2] Coarse Calibration (Random Search)..." << std::endl;
+    std::cout << "\n[Stage 2] Coarse Calibration (Grid Search)..." << std::endl;
     double best_score = -1e9;
     double best_r[3], best_t[3];
     
-    std::default_random_engine rng(42);
-    std::uniform_real_distribution<double> dist_ang(-0.15, 0.15); // ±8.6度
-    std::uniform_real_distribution<double> dist_pos(-0.8, 0.8);   // ±0.8m
+    const double angle_range = 0.15;  // ±8.6度
+    const double angle_step = 0.01;   // ~0.57度
+    int iter = 0;
+    const int steps = static_cast<int>(std::floor((2.0 * angle_range) / angle_step)) + 1;
+    const int total_iters = steps * steps * steps;
+
+    for (double rx = r_curr[0] - angle_range; rx <= r_curr[0] + angle_range + 1e-9; rx += angle_step) {
+        for (double ry = r_curr[1] - angle_range; ry <= r_curr[1] + angle_range + 1e-9; ry += angle_step) {
+            for (double rz = r_curr[2] - angle_range; rz <= r_curr[2] + angle_range + 1e-9; rz += angle_step) {
+                double r_try[3] = {rx, ry, rz};
+                double t_try[3] = {t_curr[0], t_curr[1], t_curr[2]};
+
+                Eigen::Vector3d t_vec(t_try[0], t_try[1], t_try[2]);
+                Eigen::Matrix3d R_mat;
+                ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
+
+                double score = 0.0;
+                if (!edge_dist.empty()) {
+                    score = EdgeAttractionScore(points, edge_dist, edge_weight, K, W, H, R_mat, t_vec);
+                } else {
+                    score = SemanticScore(points, semantic_map, K, W, H, R_mat, t_vec);
+                }
+
+                if (score > best_score) {
+                    best_score = score;
+                    std::copy(r_try, r_try + 3, best_r);
+                    std::copy(t_try, t_try + 3, best_t);
+                }
+
+                iter++;
+                if (iter % 200 == 0) {
+                    std::cout << "  Iter " << iter << "/" << total_iters
+                              << ", Best Score: " << best_score << std::endl;
+                }
+            }
     
-    const int COARSE_ITERATIONS = 1000;
-    for(int i=0; i<COARSE_ITERATIONS; ++i) {
-        double r_try[3] = {
-            r_curr[0] + dist_ang(rng), 
-            r_curr[1] + dist_ang(rng), 
-            r_curr[2] + dist_ang(rng)
-        };
-        double t_try[3] = {
-            t_curr[0] + dist_pos(rng), 
-            t_curr[1] + dist_pos(rng), 
-            t_curr[2] + dist_pos(rng)
-        };
-        
-        Eigen::Vector3d t_vec(t_try[0], t_try[1], t_try[2]);
-        Eigen::Matrix3d R_mat;
-        ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
-        
-        double score = 0.0;
-        if (!edge_dist.empty()) {
-            score = EdgeAttractionScore(points, edge_dist, edge_weight, K, W, H, R_mat, t_vec);
-        } else {
-            score = SemanticScore(points, semantic_map, K, W, H, R_mat, t_vec);
-        }
-        
-        if (score > best_score) {
-            best_score = score;
-            std::copy(r_try, r_try+3, best_r);
-            std::copy(t_try, t_try+3, best_t);
-        }
-        
-        if ((i+1) % 200 == 0) {
-            std::cout << "  Iter " << (i+1) << "/" << COARSE_ITERATIONS 
-                      << ", Best Score: " << best_score << std::endl;
         }
     }
     
@@ -399,18 +496,35 @@ int main(int argc, char** argv) {
     // ========================================
     // 3. 精细优化 (Fine Refinement)
     // ========================================
-    if (!lines3d.empty() && !lines2d.empty()) {
+    if (!edge_dist.empty() || !semantic_map.empty()) {
         std::cout << "\n[Stage 3] Fine Calibration (Ceres Optimization)..." << std::endl;
         ceres::Problem problem;
         
-        for (const auto& l3 : lines3d) {
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<LineReprojectionError, 1, 3, 3>(
-                    new LineReprojectionError(l3, lines2d, K(0,0), K(1,1), K(0,2), K(1,2))),
-                new ceres::HuberLoss(5.0),
-                r_curr, t_curr
-            );
+        std::vector<int> sample_indices;
+        sample_indices.reserve(points.size());
+        const int stride = std::max<int>(1, static_cast<int>(points.size() / 5000));
+        for (size_t i = 0; i < points.size(); i += stride) {
+            sample_indices.push_back(static_cast<int>(i));
         }
+
+        const double w_edge = 1.0;
+        const double w_consistency = 1.0;
+        auto* cost = new EdgeConsistencyCost(
+            &points,
+            &sample_indices,
+            edge_dist.empty() ? nullptr : &edge_dist,
+            semantic_map.empty() ? nullptr : &semantic_map,
+            K,
+            W,
+            H,
+            w_edge,
+            w_consistency);
+
+        problem.AddResidualBlock(
+            new ceres::NumericDiffCostFunction<EdgeConsistencyCost, ceres::CENTRAL, 1, 3, 3>(cost),
+            new ceres::HuberLoss(1.0),
+            r_curr,
+            t_curr);
 
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_SCHUR;
@@ -424,7 +538,7 @@ int main(int argc, char** argv) {
         std::cout << "  Final R: [" << r_curr[0] << ", " << r_curr[1] << ", " << r_curr[2] << "]" << std::endl;
         std::cout << "  Final T: [" << t_curr[0] << ", " << t_curr[1] << ", " << t_curr[2] << "]" << std::endl;
     } else {
-        std::cout << "\n[Stage 3] Skipped (no line features for fine optimization)" << std::endl;
+        std::cout << "\n[Stage 3] Skipped (no edge field or semantic map for fine optimization)" << std::endl;
     }
 
     // ========================================
@@ -459,13 +573,22 @@ int main(int argc, char** argv) {
     std::cout << "\n[Stage 5] Saving results..." << std::endl;
     
     // 从lidar_base路径提取帧ID，保存到calib目录
-    std::string output_file = lidar_base + "_calib_result.txt";
+    if (output_file.empty()) {
+        output_file = lidar_base + "_calib_result.txt";
+        
+        // 替换lidar_features为calibration
+        size_t pos = output_file.find("lidar_features");
+        if (pos != std::string::npos) {
+            output_file.replace(pos, 14, "calibration");
+        }
+    }
+    //std::string output_file = lidar_base + "_calib_result.txt";
     
     // 替换lidar_features为calibration
-    size_t pos = output_file.find("lidar_features");
-    if (pos != std::string::npos) {
-        output_file.replace(pos, 14, "calibration");
-    }
+    //size_t pos = output_file.find("lidar_features");
+    //if (pos != std::string::npos) {
+        //output_file.replace(pos, 14, "calibration");
+   // }
     
     std::ofstream result_file(output_file);
     if (result_file.is_open()) {

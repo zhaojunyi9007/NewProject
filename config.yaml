@@ -5,10 +5,10 @@
 # ========================================
 data:
   # KITTI格式数据路径
-  velodyne_dir: "data/velodyne_points/data"   # 点云数据目录
-  image_dir: "data/image_02/data"             # 图像数据目录
-  calib_file: "data/calib_cam_to_cam.txt"     # 标定文件（可选，留空使用默认内参）
-  
+  velodyne_dir: "/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data"   # 点云数据目录
+  image_dir: "/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/image_02/data"             # 图像数据目录
+  calib_file: "/gz-data/dataset/2011_09_26/calib_cam_to_cam.txt"     # 标定文件（可选，留空使用默认内参）
+
   # 输出路径（所有结果统一保存在result目录下）
   result_dir: "result"
   
@@ -27,7 +27,7 @@ frames:
   
   # 当mode="select"时，指定要处理的帧ID列表
   # 例如: [0, 10, 20, 30] 表示处理第0, 10, 20, 30帧
-  frame_ids: [0, 1, 2]
+  frame_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   
   # 多帧融合配置
   fusion_window: 3  # 每次融合的帧数 (Three-in-one: 当前帧 + 前N-1帧)
@@ -36,7 +36,7 @@ frames:
 # SAM 特征提取配置
 # ========================================
 sam:
-  checkpoint_path: "checkpoints/sam_vit_h_4b8939.pth"
+  checkpoint_path: "/gz-data/model/sam_vit_h_4b8939.pth"
   model_type: "vit_h"
   points_per_side: 16  # 16x16 网格提示
   pred_iou_thresh: 0.86
