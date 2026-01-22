@@ -188,6 +188,49 @@ bool Project(const Eigen::Vector3d& p_lidar, const Eigen::Matrix3d& K,
     return (u >= 0 && u < W && v >= 0 && v < H);
 }
 
+//Debug
+//-------------------------------------------------------
+struct ProjectionDebugStats {
+    int total = 0;
+    int behind = 0;
+    int out_of_bounds = 0;
+    int in_bounds = 0;
+    int labeled = 0;
+    int unlabeled = 0;
+};
+
+ProjectionDebugStats CountProjectionStats(const std::vector<PointFeature>& points,
+                                          const Eigen::Matrix3d& K,
+                                          const Eigen::Matrix3d& R,
+                                          const Eigen::Vector3d& t,
+                                          int W, int H) {
+    ProjectionDebugStats stats;
+    for (const auto& pt : points) {
+        stats.total++;
+        if (pt.label == 0) {
+            stats.unlabeled++;
+        } else {
+            stats.labeled++;
+        }
+        Eigen::Vector3d p_cam = R * pt.p + t;
+        if (p_cam.z() < 0.1) {
+            stats.behind++;
+            continue;
+        }
+        Eigen::Vector3d uv = K * p_cam;
+        int u = static_cast<int>(uv.x() / uv.z());
+        int v = static_cast<int>(uv.y() / uv.z());
+        if (u >= 0 && u < W && v >= 0 && v < H) {
+            stats.in_bounds++;
+        } else {
+            stats.out_of_bounds++;
+        }
+    }
+    return stats;
+}
+
+//-------------------------------------------------------
+
 std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
                                         const cv::Mat& semantic_map,
                                         const Eigen::Matrix3d& K,
@@ -604,6 +647,36 @@ int main(int argc, char** argv) {
     Eigen::Matrix3d K; 
     Eigen::Matrix3d R_rect;
     LoadCalib(calib_file, K, R_rect);
+
+    // ========================================
+    // Debug信息输出
+    // ========================================
+
+    if (std::getenv("EDGECALIB_DEBUG")) {
+        Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
+        Eigen::Matrix3d R_mat;
+        ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
+        auto stats = CountProjectionStats(points, K, R_mat, t_vec, W, H);
+        std::cout << "[Debug] Projection stats (initial pose): total=" << stats.total
+                  << ", labeled=" << stats.labeled
+                  << ", unlabeled=" << stats.unlabeled
+                  << ", in_bounds=" << stats.in_bounds
+                  << ", behind=" << stats.behind
+                  << ", out_of_bounds=" << stats.out_of_bounds
+                  << std::endl;
+        if (!semantic_map.empty()) {
+            std::cout << "[Debug] Semantic map max label: " << GetMaxLabel(semantic_map)
+                      << ", type=" << semantic_map.type() << std::endl;
+        }
+        if (!edge_dist.empty()) {
+            std::cout << "[Debug] Edge dist type: " << edge_dist.type()
+                      << ", size=" << edge_dist.cols << "x" << edge_dist.rows << std::endl;
+        }
+        if (!edge_weight.empty()) {
+            std::cout << "[Debug] Edge weight type: " << edge_weight.type()
+                      << ", size=" << edge_weight.cols << "x" << edge_weight.rows << std::endl;
+        }
+    }
 
     // ========================================
     // 2. 粗标定 (Coarse Search)
