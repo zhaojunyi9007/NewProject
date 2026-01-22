@@ -8,6 +8,7 @@ def load_kitti_calib(calib_file):
     """
     加载KITTI标定文件
     如果文件不存在或解析失败，返回默认值
+    支持P2:和P_rect_02:格式
     """
     if not calib_file or not os.path.exists(calib_file):
         print("[Warning] Using default camera intrinsics (KITTI typical values)")
@@ -19,15 +20,20 @@ def load_kitti_calib(calib_file):
     try:
         with open(calib_file, 'r') as f:
             for line in f:
-                if line.startswith('P2:'):
-                    values = list(map(float, line.strip().split()[1:]))
-                    if len(values) == 12:
-                        # P2 是 3x4 投影矩阵，提取左上3x3作为内参
-                        K = np.array([[values[0], values[1], values[2]],
-                                      [values[4], values[5], values[6]],
-                                      [values[8], values[9], values[10]]])
-                        print(f"[Info] Loaded camera intrinsics from {calib_file}")
-                        return K
+                # 支持P2:和P_rect_02:格式
+                if line.startswith('P2:') or line.startswith('P_rect_02:'):
+                    # 提取key和values
+                    parts = line.split(':')
+                    if len(parts) >= 2:
+                        values_str = parts[1].strip()
+                        values = list(map(float, values_str.split()))
+                        if len(values) == 12:
+                            # P2 是 3x4 投影矩阵，提取左上3x3作为内参
+                            K = np.array([[values[0], values[1], values[2]],
+                                          [values[4], values[5], values[6]],
+                                          [values[8], values[9], values[10]]])
+                            print(f"[Info] Loaded camera intrinsics from {calib_file}")
+                            return K
     except Exception as e:
         print(f"[Error] Failed to parse calibration file: {e}")
     
@@ -83,6 +89,11 @@ def load_features(feature_base):
 def project_3d_lines(img, lines_3d, K, R, t):
     """
     将3D线投影到图像上
+    
+    投影公式（与C++代码一致）:
+    1. 坐标变换: p_cam = R @ p_lidar + t  (LiDAR坐标系 -> 相机坐标系)
+    2. 投影: uv = K @ p_cam
+    3. 像素坐标: u = uv[0]/uv[2], v = uv[1]/uv[2]
     """
     if not lines_3d:
         return img
@@ -94,15 +105,15 @@ def project_3d_lines(img, lines_3d, K, R, t):
         p2 = np.array([line[3], line[4], line[5]])
         l_type = int(line[6])
         
-        # Transform
+        # Transform: LiDAR坐标系 -> 相机坐标系
         p1_c = R @ p1 + t
         p2_c = R @ p2 + t
         
-        # 检查点是否在相机前方
+        # 检查点是否在相机前方（z > 0.1）
         if p1_c[2] < 0.1 or p2_c[2] < 0.1: 
             continue
         
-        # Project
+        # Project: 3D点 -> 2D像素坐标
         uv1 = K @ p1_c
         u1, v1 = int(uv1[0]/uv1[2]), int(uv1[1]/uv1[2])
         
@@ -123,7 +134,14 @@ def project_3d_lines(img, lines_3d, K, R, t):
 def project_points(img, points, K, R, t, subsample=5):
     """
     将3D点投影到图像上
-    subsample: 每隔几个点绘制一次，避免图像过于密集
+    
+    投影公式（与C++代码一致）:
+    1. 坐标变换: p_cam = R @ p_lidar + t  (LiDAR坐标系 -> 相机坐标系)
+    2. 投影: uv = K @ p_cam
+    3. 像素坐标: u = uv[0]/uv[2], v = uv[1]/uv[2]
+    
+    Args:
+        subsample: 每隔几个点绘制一次，避免图像过于密集
     """
     if not points:
         return img
@@ -137,12 +155,14 @@ def project_points(img, points, K, R, t, subsample=5):
             continue
         
         p = np.array([pt[0], pt[1], pt[2]])
+        # Transform: LiDAR坐标系 -> 相机坐标系
         p_c = R @ p + t
         
-        # 检查点是否在相机前方
+        # 检查点是否在相机前方（z > 0.1）
         if p_c[2] < 0.1: 
             continue
         
+        # Project: 3D点 -> 2D像素坐标
         uv = K @ p_c
         u, v = int(uv[0]/uv[2]), int(uv[1]/uv[2])
         
@@ -306,13 +326,37 @@ Examples:
     t_vec = None
     
     if args.r_vec is None or args.t_vec is None:
+        # 尝试多个可能的标定结果文件路径
+        # 1. 直接在feature_base同目录
         calib_result_file = f"{args.feature_base}_calib_result.txt"
         result = load_calib_result(calib_result_file)
+        
+        # 2. 如果在lidar_features目录，尝试从calibration目录读取
+        if result is None:
+            feature_dir = os.path.dirname(args.feature_base)
+            if feature_dir and 'lidar_features' in feature_dir:
+                # 替换lidar_features为calibration
+                calib_dir = feature_dir.replace('lidar_features', 'calibration')
+                frame_id = os.path.basename(args.feature_base)
+                calib_result_file = os.path.join(calib_dir, f"{frame_id}_calib_result.txt")
+                result = load_calib_result(calib_result_file)
+        
+        # 3. 如果在result目录下，尝试从calibration子目录读取
+        if result is None:
+            feature_dir = os.path.dirname(args.feature_base)
+            if feature_dir:
+                # 尝试在result目录下查找calibration子目录
+                result_dir = os.path.dirname(feature_dir) if os.path.basename(feature_dir) in ['lidar_features', 'sam_features'] else feature_dir
+                calib_dir = os.path.join(result_dir, 'calibration')
+                frame_id = os.path.basename(args.feature_base)
+                calib_result_file = os.path.join(calib_dir, f"{frame_id}_calib_result.txt")
+                result = load_calib_result(calib_result_file)
         
         if result is not None:
             r_vec, t_vec = result
         else:
-            print(f"[Warning] Calibration result file not found or invalid: {calib_result_file}")
+            print(f"[Warning] Calibration result file not found or invalid")
+            print(f"[Warning] Tried: {args.feature_base}_calib_result.txt")
             print("[Warning] Using default values (identity transform)")
             r_vec = np.array([0.0, 0.0, 0.0])
             t_vec = np.array([0.0, 0.0, 0.0])
@@ -340,12 +384,25 @@ Examples:
     img = add_legend(img)
 
     # 6. 保存结果
-    # 如果没有指定输出路径，自动生成到result目录
+    # 如果没有指定输出路径，自动生成到result/visualization目录
     if not args.output:
         # 提取frame_id
         frame_id = os.path.basename(args.feature_base)
-        output_dir = os.path.dirname(args.feature_base) if os.path.dirname(args.feature_base) else "result"
-        args.output = os.path.join(output_dir, f"visual_{frame_id}.png")
+        feature_dir = os.path.dirname(args.feature_base)
+        
+        # 尝试找到result目录
+        if feature_dir:
+            # 如果在lidar_features或sam_features目录下，向上找到result目录
+            if os.path.basename(feature_dir) in ['lidar_features', 'sam_features']:
+                result_dir = os.path.dirname(feature_dir)
+                output_dir = os.path.join(result_dir, 'visualization')
+            else:
+                # 否则使用feature_dir的父目录或当前目录
+                output_dir = os.path.join(feature_dir, 'visualization') if feature_dir else 'result/visualization'
+        else:
+            output_dir = 'result/visualization'
+        
+        args.output = os.path.join(output_dir, f"{frame_id}_result.png")
     
     # 确保输出目录存在
     output_dir = os.path.dirname(args.output)

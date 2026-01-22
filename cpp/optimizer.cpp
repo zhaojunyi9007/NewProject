@@ -176,6 +176,18 @@ bool LoadCalib(const std::string& calib_file, Eigen::Matrix3d& K, Eigen::Matrix3
     return true; 
 }
 
+// Project声明
+bool Project(const Eigen::Vector3d& p_lidar, const Eigen::Matrix3d& K, 
+            const Eigen::Matrix3d& R, const Eigen::Vector3d& t, 
+            int& u, int& v, int W, int H) {
+    Eigen::Vector3d p_cam = R * p_lidar + t;
+    if (p_cam.z() < 0.1) return false;
+    Eigen::Vector3d uv = K * p_cam;
+    u = static_cast<int>(uv.x() / uv.z());
+    v = static_cast<int>(uv.y() / uv.z());
+    return (u >= 0 && u < W && v >= 0 && v < H);
+}
+
 std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
                                         const cv::Mat& semantic_map,
                                         const Eigen::Matrix3d& K,
@@ -226,16 +238,7 @@ std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& point
 }
 
 
-bool Project(const Eigen::Vector3d& p_lidar, const Eigen::Matrix3d& K, 
-             const Eigen::Matrix3d& R, const Eigen::Vector3d& t, 
-             int& u, int& v, int W, int H) {
-    Eigen::Vector3d p_cam = R * p_lidar + t;
-    if (p_cam.z() < 0.1) return false;
-    Eigen::Vector3d uv = K * p_cam;
-    u = static_cast<int>(uv.x() / uv.z());
-    v = static_cast<int>(uv.y() / uv.z());
-    return (u >= 0 && u < W && v >= 0 && v < H);
-}
+
 
 // ========================================
 // 语义兼容性打分
