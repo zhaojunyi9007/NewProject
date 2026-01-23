@@ -241,6 +241,29 @@ ProjectionDebugStats CountProjectionStats(const std::vector<PointFeature>& point
     return stats;
 }
 
+std::vector<PointFeature> FilterPointsInView(const std::vector<PointFeature>& points,
+                                             const Eigen::Matrix3d& K,
+                                             const Eigen::Matrix3d& R,
+                                             const Eigen::Vector3d& t,
+                                             int W, int H,
+                                             int margin = 20) {
+    std::vector<PointFeature> filtered;
+    filtered.reserve(points.size());
+    for (const auto& pt : points) {
+        Eigen::Vector3d p_cam = R * pt.p + t;
+        if (p_cam.z() < 0.1) {
+            continue;
+        }
+        Eigen::Vector3d uv = K * p_cam;
+        int u = static_cast<int>(uv.x() / uv.z());
+        int v = static_cast<int>(uv.y() / uv.z());
+        if (u >= -margin && u < W + margin && v >= -margin && v < H + margin) {
+            filtered.push_back(pt);
+        }
+    }
+    return filtered;
+}
+
 //-------------------------------------------------------
 
 std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
@@ -751,6 +774,22 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::vector<PointFeature> points_for_opt = points;
+    if (std::getenv("EDGECALIB_PREFILTER")) {
+        Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
+        Eigen::Matrix3d R_mat;
+        ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
+        auto filtered = FilterPointsInView(points, K, R_mat, t_vec, W, H);
+        if (!filtered.empty()) {
+            std::cout << "[Info] Prefiltered points in view: " << filtered.size()
+                      << " / " << points.size() << std::endl;
+            points_for_opt = std::move(filtered);
+        } else {
+            std::cout << "[Warning] Prefiltering removed all points; using original set."
+                      << std::endl;
+        }
+    }
+
     // ========================================
     // 2. 粗标定 (Coarse Search)
     // ========================================
@@ -794,10 +833,11 @@ int main(int argc, char** argv) {
                 double score = 0.0;
                 if (use_semantic) {
                     // README2.0.md要求：最大化Mask内强度一致性（方差最小）
-                    score = MaskIntensityVarianceScore(points, semantic_map, K, W, H, R_mat, t_vec);
+                    //score = MaskIntensityVarianceScore(points, semantic_map, K, W, H, R_mat, t_vec);
+                    score = MaskIntensityVarianceScore(points_for_opt, semantic_map, K, W, H, R_mat, t_vec);
                 } else if (use_edge) {
                     // 备用方案：边缘吸引场
-                    score = EdgeAttractionScore(points, edge_dist, edge_weight, K, W, H, R_mat, t_vec);
+                    score = EdgeAttractionScore(points_for_opt, edge_dist, edge_weight, K, W, H, R_mat, t_vec);
                 }else{
                     score = -1e6;
                 }
@@ -833,12 +873,12 @@ int main(int argc, char** argv) {
         
         // 采样点云以提高效率（最多5000个点）
         std::vector<int> sample_indices;
-        sample_indices.reserve(points.size());
-        const int stride = std::max<int>(1, static_cast<int>(points.size() / 5000));
-        for (size_t i = 0; i < points.size(); i += stride) {
+        sample_indices.reserve(points_for_opt.size());
+        const int stride = std::max<int>(1, static_cast<int>(points_for_opt.size() / 5000));
+        for (size_t i = 0; i < points_for_opt.size(); i += stride) {
             sample_indices.push_back(static_cast<int>(i));
         }
-        std::cout << "  Sampled " << sample_indices.size() << " points from " << points.size() << " total points" << std::endl;
+        std::cout << "  Sampled " << sample_indices.size() << " points from " << points_for_opt.size() << " total points" << std::endl;
 
         // 混合Loss权重：α * E_geo + β * E_sem (README2.0.md公式)
         const double w_edge = 1.0;         // α: 几何误差权重
@@ -849,10 +889,10 @@ int main(int argc, char** argv) {
             Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
             Eigen::Matrix3d R_mat;
             ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
-            label_stats = ComputeLabelStats(points, semantic_map, K, W, H, R_mat, t_vec);
+            label_stats = ComputeLabelStats(points_for_opt, semantic_map, K, W, H, R_mat, t_vec);
         }
         auto* cost = new EdgeConsistencyCost(
-            &points,
+            &points_for_opt,
             &sample_indices,
             edge_dist.empty() ? nullptr : &edge_dist,
             semantic_map.empty() ? nullptr : &semantic_map,

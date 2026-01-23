@@ -7,7 +7,7 @@ data:
   # KITTI格式数据路径
   velodyne_dir: "/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data"   # 点云数据目录
   image_dir: "/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/image_02/data"             # 图像数据目录
-  calib_file: "/gz-data/dataset/2011_09_26/calib_cam_to_cam.txt"     # 标定文件（可选，留空使用默认内参）
+  calib_file: "/gz-data/dataset/2011_09_26/calib_cam_to_cam.txt"     # 标定文件
   velo_to_cam_file: "/gz-data/dataset/2011_09_26/calib_velo_to_cam.txt"  # LiDAR->Camera外参文件
 
   # 输出路径（所有结果统一保存在result目录下）
@@ -28,7 +28,7 @@ frames:
   
   # 当mode="select"时，指定要处理的帧ID列表
   # 例如: [0, 10, 20, 30] 表示处理第0, 10, 20, 30帧
-  frame_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  frame_ids: [0, 1, 2, 3, 4, 5]
   
   # 多帧融合配置
   fusion_window: 3  # 每次融合的帧数 (Three-in-one: 当前帧 + 前N-1帧)
