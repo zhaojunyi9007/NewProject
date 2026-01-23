@@ -11,7 +11,14 @@ def load_kitti_calib(calib_file):
     支持P2:和P_rect_02:格式
     """
     if not calib_file or not os.path.exists(calib_file):
-        print("[Warning] Using default camera intrinsics (KITTI typical values)")
+        print("[Warning] No calib_file provided; using default camera intrinsics (KITTI typical values)")
+        K = np.array([[721.5, 0, 609.5],
+                      [0, 721.5, 172.8],
+                      [0, 0, 1]])
+        return K
+
+    if not os.path.exists(calib_file):
+        print(f"[Warning] calib_file not found: {calib_file}; using default camera intrinsics")
         K = np.array([[721.5, 0, 609.5],
                       [0, 721.5, 172.8],
                       [0, 0, 1]])
@@ -20,6 +27,7 @@ def load_kitti_calib(calib_file):
     try:
         with open(calib_file, 'r') as f:
             for line in f:
+                line = line.strip()
                 # 支持P2:和P_rect_02:格式
                 if line.startswith('P2:') or line.startswith('P_rect_02:'):
                     # 提取key和values
@@ -295,6 +303,10 @@ Examples:
 
     print("=== HSR Lidar-Camera Calibration Visualization ===")
     print("")
+    if args.calib_file:
+        print(f"[Info] calib_file provided: {args.calib_file}")
+    else:
+        print("[Warning] calib_file not provided; using default intrinsics unless auto-loaded")
     
     # 读取图像
     if not os.path.exists(args.img):
