@@ -30,6 +30,10 @@ struct DepthEdgeResult {
     int edge_count = 0;
 };
 
+//作用：通过球面投影构建深度图，对相邻像素深度差做阈值判断，标记深度跳变点为边缘。
+//输入：点云、投影图尺寸、视场角与深度差阈值。
+//输出：DepthEdgeResult，包含每个点是否为边缘及边缘类型。
+//调用关系：在 main 阶段 4 被调用，结果用于后续权重提升与保存边缘点文件。
 DepthEdgeResult DetectDepthDiscontinuityEdges(
     const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
     int width = 1024,
@@ -37,6 +41,8 @@ DepthEdgeResult DetectDepthDiscontinuityEdges(
     float v_fov_up_deg = 2.0f,
     float v_fov_down_deg = -24.9f,
     float depth_jump_threshold = 0.5f) {
+    // 输入: cloud(点云), 视场与深度阈值参数
+    // 输出: DepthEdgeResult(边缘标记/类型/数量)
     DepthEdgeResult result;
     if (!cloud || cloud->empty()) {
         return result;
@@ -160,8 +166,8 @@ namespace LocalIO {
 }
 
 // ========================================
-// 新增：NDT多帧融合函数 (README2.0 第二阶段 2.1)
-// 优化版本：返回融合点云和配准后的点云列表（用于时空一致性计算）
+// 作用：对多帧点云进行 NDT 配准和融合，输出融合点云与对齐后的历史帧列表。
+// 调用：main 阶段 2 调用，融合点云用于后续降采样和特征提取；aligned_frames 用于时空一致性计算。
 // ========================================
 struct NDTFusionResult {
     pcl::PointCloud<pcl::PointXYZI>::Ptr fused_cloud;
@@ -474,7 +480,6 @@ std::vector<double> ComputeTemporalConsistencyOptimized(
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: ./lidar_extractor <kitti_bin_path_1> [<kitti_bin_path_2> ...] <output_base_path>" << std::endl;
-        std::cerr << "Example: ./lidar_extractor data/velodyne/000000.bin data/velodyne/000001.bin result/lidar_features/000001" << std::endl;
         return -1;
     }
 

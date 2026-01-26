@@ -8,49 +8,58 @@ def load_kitti_calib(calib_file):
     """
     加载KITTI标定文件
     如果文件不存在或解析失败，返回默认值
-    支持P2:和P_rect_02:格式
+    支持P2/P_rect_02和R0_rect/R_rect_00格式
     """
+    default_k = np.array([[721.5, 0, 609.5],
+                          [0, 721.5, 172.8],
+                          [0, 0, 1]])
+    default_r_rect = np.eye(3)
+    default_p_rect = np.array([[721.5, 0, 609.5, 0.0],
+                               [0, 721.5, 172.8, 0.0],
+                               [0, 0, 1, 0.0]])
+
     if not calib_file or not os.path.exists(calib_file):
         print("[Warning] No calib_file provided; using default camera intrinsics (KITTI typical values)")
-        K = np.array([[721.5, 0, 609.5],
-                      [0, 721.5, 172.8],
-                      [0, 0, 1]])
-        return K
-
-    if not os.path.exists(calib_file):
-        print(f"[Warning] calib_file not found: {calib_file}; using default camera intrinsics")
-        K = np.array([[721.5, 0, 609.5],
-                      [0, 721.5, 172.8],
-                      [0, 0, 1]])
-        return K
+        
+        return default_k, default_r_rect, default_p_rect
     
     try:
+        K = None
+        R_rect = None
+        P_rect = None
+
         with open(calib_file, 'r') as f:
             for line in f:
                 line = line.strip()
                 # 支持P2:和P_rect_02:格式
-                if line.startswith('P2:') or line.startswith('P_rect_02:'):
-                    # 提取key和values
+                if line.startswith('P2:') or line.startswith('P_rect_02:'):                    
                     parts = line.split(':')
                     if len(parts) >= 2:
                         values_str = parts[1].strip()
                         values = list(map(float, values_str.split()))
                         if len(values) == 12:
-                            # P2 是 3x4 投影矩阵，提取左上3x3作为内参
-                            K = np.array([[values[0], values[1], values[2]],
-                                          [values[4], values[5], values[6]],
-                                          [values[8], values[9], values[10]]])
-                            print(f"[Info] Loaded camera intrinsics from {calib_file}")
-                            return K
+                            P_rect = np.array(values, dtype=np.float64).reshape(3, 4)
+                            K = P_rect[:, :3].copy()
+                elif line.startswith('R0_rect:') or line.startswith('R_rect_00:'):
+                    parts = line.split(':')
+                    if len(parts) >= 2:
+                        values_str = parts[1].strip()
+                        values = list(map(float, values_str.split()))
+                        if len(values) == 9:
+                            R_rect = np.array(values, dtype=np.float64).reshape(3, 3)
+        if K is None or P_rect is None:
+            raise ValueError("P2/P_rect_02 not found in calibration file.")
+        if R_rect is None:
+            R_rect = default_r_rect
+        print(f"[Info] Loaded camera intrinsics and rectification from {calib_file}")
+        return K, R_rect, P_rect
+                            
     except Exception as e:
         print(f"[Error] Failed to parse calibration file: {e}")
     
-    # 返回默认值
+
     print("[Warning] Using default camera intrinsics")
-    K = np.array([[721.5, 0, 609.5],
-                  [0, 721.5, 172.8],
-                  [0, 0, 1]])
-    return K
+    return default_k, default_r_rect, default_p_rect
 
 def load_features(feature_base):
     """
@@ -94,14 +103,14 @@ def load_features(feature_base):
     
     return points, lines_3d
 
-def project_3d_lines(img, lines_3d, K, R, t):
+def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t):
     """
     将3D线投影到图像上
-    
-    投影公式（与C++代码一致）:
+    投影公式(使用KITTI官方方法):
     1. 坐标变换: p_cam = R @ p_lidar + t  (LiDAR坐标系 -> 相机坐标系)
-    2. 投影: uv = K @ p_cam
-    3. 像素坐标: u = uv[0]/uv[2], v = uv[1]/uv[2]
+    2. 整流: p_rect = R_rect @ p_cam
+    3. 投影: uv = P_rect @ [p_rect; 1]
+    4. 像素坐标: u = uv[0]/uv[2], v = uv[1]/uv[2]   
     """
     if not lines_3d:
         return img
@@ -116,16 +125,18 @@ def project_3d_lines(img, lines_3d, K, R, t):
         # Transform: LiDAR坐标系 -> 相机坐标系
         p1_c = R @ p1 + t
         p2_c = R @ p2 + t
+        p1_rect = R_rect @ p1_c
+        p2_rect = R_rect @ p2_c
         
         # 检查点是否在相机前方（z > 0.1）
-        if p1_c[2] < 0.1 or p2_c[2] < 0.1: 
+        if p1_rect[2] < 0.1 or p2_rect[2] < 0.1: 
             continue
         
         # Project: 3D点 -> 2D像素坐标
-        uv1 = K @ p1_c
+        uv1 = P_rect @ np.hstack([p1_rect, 1.0])
         u1, v1 = int(uv1[0]/uv1[2]), int(uv1[1]/uv1[2])
         
-        uv2 = K @ p2_c
+        uv2 = P_rect @ np.hstack([p2_rect, 1.0])
         u2, v2 = int(uv2[0]/uv2[2]), int(uv2[1]/uv2[2])
         
         # 检查投影点是否在图像范围内
@@ -139,15 +150,16 @@ def project_3d_lines(img, lines_3d, K, R, t):
     
     return img
 
-def project_points(img, points, K, R, t, subsample=5):
+def project_points(img, points, K, R_rect, P_rect, R, t, subsample=5):
     """
     将3D点投影到图像上
     
-    投影公式（与C++代码一致）:
+    投影公式(使用KITTI官方方法):
     1. 坐标变换: p_cam = R @ p_lidar + t  (LiDAR坐标系 -> 相机坐标系)
-    2. 投影: uv = K @ p_cam
-    3. 像素坐标: u = uv[0]/uv[2], v = uv[1]/uv[2]
-    
+    2. 整流: p_rect = R_rect @ p_cam
+    3. 投影: uv = P_rect @ [p_rect; 1]
+    4. 像素坐标: u = uv[0]/uv[2], v = uv[1]/uv[2]
+
     Args:
         subsample: 每隔几个点绘制一次，避免图像过于密集
     """
@@ -165,13 +177,14 @@ def project_points(img, points, K, R, t, subsample=5):
         p = np.array([pt[0], pt[1], pt[2]])
         # Transform: LiDAR坐标系 -> 相机坐标系
         p_c = R @ p + t
+        p_rect = R_rect @ p_c
         
         # 检查点是否在相机前方（z > 0.1）
-        if p_c[2] < 0.1: 
+        if p_rect[2] < 0.1: 
             continue
         
         # Project: 3D点 -> 2D像素坐标
-        uv = K @ p_c
+        uv = P_rect @ np.hstack([p_rect, 1.0])
         u, v = int(uv[0]/uv[2]), int(uv[1]/uv[2])
         
         if 0 <= u < w and 0 <= v < h:
@@ -328,9 +341,11 @@ Examples:
         print(f"[Info] Expected files: {args.feature_base}_points.txt, {args.feature_base}_lines_3d.txt")
         return 1
 
-    # 2. 加载相机内参
-    K = load_kitti_calib(args.calib_file)
+    # 2. 加载相机内参/整流/投影矩阵
+    K, R_rect, P_rect = load_kitti_calib(args.calib_file)
     print(f"[Info] Camera intrinsics K:\n{K}")
+    print(f"[Info] Rectification R_rect:\n{R_rect}")
+    print(f"[Info] Projection P_rect:\n{P_rect}")
 
     # 3. 准备外参
     # 尝试从标定结果文件读取
@@ -386,11 +401,11 @@ Examples:
     
     # 先画点 (作为背景)
     if points:
-        img = project_points(img, points, K, R, t_vec, subsample=args.subsample)
+        img = project_points(img, points, K, R_rect, P_rect, R, t_vec, subsample=args.subsample)
     
     # 再画线 (更显眼)
     if lines_3d:
-        img = project_3d_lines(img, lines_3d, K, R, t_vec)
+        img = project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t_vec)
 
     # 5. 添加图例
     img = add_legend(img)

@@ -83,7 +83,10 @@ namespace IOUtils {
     bool LoadLines2D(const std::string& filepath, std::vector<Line2D>& lines);
     
     // 加载 KITTI 标定文件
-    bool LoadKittiCalib(const std::string& calib_file, Eigen::Matrix3d& K);
+    bool LoadKittiCalib(const std::string& calib_file,
+                        Eigen::Matrix3d& K,
+                        Eigen::Matrix3d& R_rect,
+                        Eigen::Matrix<double, 3, 4>& P_rect);
 }
 
 #endif // COMMON_H
