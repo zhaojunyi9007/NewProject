@@ -210,8 +210,11 @@ namespace IOUtils {
         return true;
     }
     
-    // 加载 KITTI 标定文件 (仅读取 P2 和 R0_rect)
-    bool LoadKittiCalib(const std::string& calib_file, Eigen::Matrix3d& K) {
+    // 加载 KITTI 标定文件 (读取 P2/P_rect_02 和 R0_rect/R_rect_00)
+    bool LoadKittiCalib(const std::string& calib_file,
+                        Eigen::Matrix3d& K,
+                        Eigen::Matrix3d& R_rect,
+                        Eigen::Matrix<double, 3, 4>& P_rect) {
         std::ifstream file(calib_file);
         if (!file.is_open()) {
             std::cerr << "[Error] Cannot open calibration file: " << calib_file << std::endl;
@@ -219,7 +222,8 @@ namespace IOUtils {
         }
         
         std::string line;
-        bool found_p2 = false;
+        bool found_p = false;
+        bool found_r = false;
         
         std::string key;
         while (std::getline(file, line)) {
@@ -245,25 +249,52 @@ namespace IOUtils {
                 }
                 
                 if (parse_success) {
+                    P_rect << p[0], p[1], p[2], p[3],
+                              p[4], p[5], p[6], p[7],
+                              p[8], p[9], p[10], p[11];
                     // K from projection matrix P2 (3x4)
                     // P2 = K * [R|t], usually top-left 3x3 is K if rectified
                     K << p[0], p[1], p[2],
                          p[4], p[5], p[6],
                          p[8], p[9], p[10];
-                    found_p2 = true;
-                    break;
+                    found_p = true;
                 } else {
                     std::cerr << "[Error] Failed to parse P2 line: " << line << std::endl;
                     return false;
                 }
+                continue;
+            }
+
+            if (line.find("R0_rect:") == 0 || line.find("R_rect_00:") == 0) {
+                std::stringstream ss(line.substr(line.find(":") + 1));
+                double r[9];
+                bool parse_success = true;
+                for (int i = 0; i < 9; ++i) {
+                    if (!(ss >> r[i])) {
+                        parse_success = false;
+                        break;
+                    }
+                }
+                if (!parse_success) {
+                    std::cerr << "[Error] Failed to parse R_rect line: " << line << std::endl;
+                    return false;
+                }
+                R_rect << r[0], r[1], r[2],
+                          r[3], r[4], r[5],
+                          r[6], r[7], r[8];
+                found_r = true;
+
             }
         }
         
         file.close();
         
-        if (!found_p2) {
+        if (!found_p) {
             std::cerr << "[Error] P2 matrix not found in calibration file" << std::endl;
             return false;
+        }
+         if (!found_r) {
+            R_rect = Eigen::Matrix3d::Identity();
         }
         
         return true;

@@ -167,21 +167,23 @@ inline float GetDistanceValue(const cv::Mat& dist_map, int u, int v) {
 bool LoadCalib(const std::string& calib_file,
                Eigen::Matrix3d& K,
                Eigen::Matrix3d& R_rect,
+               Eigen::Matrix<double, 3, 4>& P_rect,
                bool* used_default = nullptr) {
     if (used_default) {
         *used_default = false;
     }
-    if (!calib_file.empty() && IOUtils::LoadKittiCalib(calib_file, K)) {
-        R_rect = Eigen::Matrix3d::Identity();
+    if (!calib_file.empty() && IOUtils::LoadKittiCalib(calib_file, K, R_rect, P_rect)) {
         return true;
     }
     
     // 如果文件为空或加载失败，使用默认值
     std::cerr << "[Warning] Using default calibration parameters" << std::endl;
     K << 721.5, 0, 609.5, 0, 721.5, 172.8, 0, 0, 1;
-    //R_rect = Eigen::Matrix3d::Identity(); 
-    //return true;
+
     R_rect = Eigen::Matrix3d::Identity();
+    P_rect << K(0, 0), K(0, 1), K(0, 2), 0.0,
+              K(1, 0), K(1, 1), K(1, 2), 0.0,
+              K(2, 0), K(2, 1), K(2, 2), 0.0;
     if (used_default) {
         *used_default = true;
     }
@@ -189,12 +191,19 @@ bool LoadCalib(const std::string& calib_file,
 }
 
 // Project声明
-bool Project(const Eigen::Vector3d& p_lidar, const Eigen::Matrix3d& K, 
-            const Eigen::Matrix3d& R, const Eigen::Vector3d& t, 
+bool Project(const Eigen::Vector3d& p_lidar,
+            const Eigen::Matrix3d& R_rect,
+            const Eigen::Matrix<double, 3, 4>& P_rect,
+            const Eigen::Matrix3d& R,
+            const Eigen::Vector3d& t,
             int& u, int& v, int W, int H) {
     Eigen::Vector3d p_cam = R * p_lidar + t;
-    if (p_cam.z() < 0.1) return false;
-    Eigen::Vector3d uv = K * p_cam;
+ 
+    Eigen::Vector3d p_rect = R_rect * p_cam;
+    if (p_rect.z() < 0.1) return false;
+    Eigen::Vector4d p_rect_h;
+    p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+    Eigen::Vector3d uv = P_rect * p_rect_h;
     u = static_cast<int>(uv.x() / uv.z());
     v = static_cast<int>(uv.y() / uv.z());
     return (u >= 0 && u < W && v >= 0 && v < H);
@@ -212,7 +221,8 @@ struct ProjectionDebugStats {
 };
 
 ProjectionDebugStats CountProjectionStats(const std::vector<PointFeature>& points,
-                                          const Eigen::Matrix3d& K,
+                                          const Eigen::Matrix3d& R_rect,
+                                          const Eigen::Matrix<double, 3, 4>& P_rect,
                                           const Eigen::Matrix3d& R,
                                           const Eigen::Vector3d& t,
                                           int W, int H) {
@@ -225,11 +235,14 @@ ProjectionDebugStats CountProjectionStats(const std::vector<PointFeature>& point
             stats.labeled++;
         }
         Eigen::Vector3d p_cam = R * pt.p + t;
-        if (p_cam.z() < 0.1) {
+        Eigen::Vector3d p_rect = R_rect * p_cam;
+        if (p_rect.z() < 0.1) {
             stats.behind++;
             continue;
         }
-        Eigen::Vector3d uv = K * p_cam;
+        Eigen::Vector4d p_rect_h;
+        p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+        Eigen::Vector3d uv = P_rect * p_rect_h;
         int u = static_cast<int>(uv.x() / uv.z());
         int v = static_cast<int>(uv.y() / uv.z());
         if (u >= 0 && u < W && v >= 0 && v < H) {
@@ -242,7 +255,8 @@ ProjectionDebugStats CountProjectionStats(const std::vector<PointFeature>& point
 }
 
 std::vector<PointFeature> FilterPointsInView(const std::vector<PointFeature>& points,
-                                             const Eigen::Matrix3d& K,
+                                             const Eigen::Matrix3d& R_rect,
+                                             const Eigen::Matrix<double, 3, 4>& P_rect,
                                              const Eigen::Matrix3d& R,
                                              const Eigen::Vector3d& t,
                                              int W, int H,
@@ -251,10 +265,13 @@ std::vector<PointFeature> FilterPointsInView(const std::vector<PointFeature>& po
     filtered.reserve(points.size());
     for (const auto& pt : points) {
         Eigen::Vector3d p_cam = R * pt.p + t;
-        if (p_cam.z() < 0.1) {
+        Eigen::Vector3d p_rect = R_rect * p_cam;
+        if (p_rect.z() < 0.1) {
             continue;
         }
-        Eigen::Vector3d uv = K * p_cam;
+        Eigen::Vector4d p_rect_h;
+        p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+        Eigen::Vector3d uv = P_rect * p_rect_h;
         int u = static_cast<int>(uv.x() / uv.z());
         int v = static_cast<int>(uv.y() / uv.z());
         if (u >= -margin && u < W + margin && v >= -margin && v < H + margin) {
@@ -268,7 +285,8 @@ std::vector<PointFeature> FilterPointsInView(const std::vector<PointFeature>& po
 
 std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& points,
                                         const cv::Mat& semantic_map,
-                                        const Eigen::Matrix3d& K,
+                                        const Eigen::Matrix3d& R_rect,
+                                        const Eigen::Matrix<double, 3, 4>& P_rect,
                                         int W, int H,
                                         const Eigen::Matrix3d& R,
                                         const Eigen::Vector3d& t) {
@@ -282,7 +300,7 @@ std::vector<LabelStats> ComputeLabelStats(const std::vector<PointFeature>& point
 
     for (const auto& pt : points) {
         int u, v;
-        if (!Project(pt.p, K, R, t, u, v, W, H)) continue;
+        if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) continue;
 
         int img_label = GetSemanticLabel(semantic_map, u, v);
         if (img_label <= 0 || img_label > max_label) continue;
@@ -337,7 +355,9 @@ double GetSemanticCompatibility(int pc_label, int img_label) {
 
 double MaskIntensityVarianceScore(const std::vector<PointFeature>& points,
                                     const cv::Mat& semantic_map,
-                                    const Eigen::Matrix3d& K, int W, int H,
+                                    const Eigen::Matrix3d& R_rect,
+                                    const Eigen::Matrix<double, 3, 4>& P_rect,
+                                    int W, int H,
                                     const Eigen::Matrix3d& R, const Eigen::Vector3d& t) {
     if (semantic_map.empty()) return -1e6;
 
@@ -350,7 +370,7 @@ double MaskIntensityVarianceScore(const std::vector<PointFeature>& points,
     
     for (const auto& pt : points) {        
         int u, v;
-        if (!Project(pt.p, K, R, t, u, v, W, H)) continue;
+        if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) continue;
 
         int img_label = GetSemanticLabel(semantic_map, u, v);
 
@@ -383,7 +403,9 @@ double MaskIntensityVarianceScore(const std::vector<PointFeature>& points,
 double EdgeAttractionScore(const std::vector<PointFeature>& points,
                            const cv::Mat& dist_map,
                            const cv::Mat& weight_map,
-                           const Eigen::Matrix3d& K, int W, int H,
+                           const Eigen::Matrix3d& R_rect,
+                           const Eigen::Matrix<double, 3, 4>& P_rect,
+                           int W, int H,
                            const Eigen::Matrix3d& R, const Eigen::Vector3d& t) {
     if (dist_map.empty()) return -1e6;
     double total_score = 0.0;
@@ -393,7 +415,7 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
         if (pt.label == 0) continue;  // 跳过未标记点
         
         int u, v;
-        if (!Project(pt.p, K, R, t, u, v, W, H)) {
+       if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) {
             continue;
         }
 
@@ -421,9 +443,11 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
 // Ceres优化：3D-2D线匹配
 // ========================================
 struct LineReprojectionError {
-    LineReprojectionError(const Line3D& l3d, const std::vector<Line2D>& l2ds, 
-                          const double fx, const double fy, const double cx, const double cy)
-        : l3d_(l3d), l2ds_(l2ds), fx_(fx), fy_(fy), cx_(cx), cy_(cy) {}
+    LineReprojectionError(const Line3D& l3d,
+                          const std::vector<Line2D>& l2ds,
+                          const Eigen::Matrix3d& R_rect,
+                          const Eigen::Matrix<double, 3, 4>& P_rect)
+        : l3d_(l3d), l2ds_(l2ds), R_rect_(R_rect), P_rect_(P_rect) {}
 
     template <typename T>
     bool operator()(const T* const r, const T* const t, T* residual) const {
@@ -437,14 +461,25 @@ struct LineReprojectionError {
         p1[0] += t[0]; p1[1] += t[1]; p1[2] += t[2];
         p2[0] += t[0]; p2[1] += t[1]; p2[2] += t[2];
 
-        // 2. Project to Image
-        if (p1[2] < T(0.1) || p2[2] < T(0.1)) {
+        // 2. Rectify + Project to Image
+        Eigen::Matrix<T, 3, 1> p1_cam(p1[0], p1[1], p1[2]);
+        Eigen::Matrix<T, 3, 1> p2_cam(p2[0], p2[1], p2[2]);
+        Eigen::Matrix<T, 3, 1> p1_rect = R_rect_.cast<T>() * p1_cam;
+        Eigen::Matrix<T, 3, 1> p2_rect = R_rect_.cast<T>() * p2_cam;
+
+        if (p1_rect[2] < T(0.1) || p2_rect[2] < T(0.1)) {
             residual[0] = T(0.0); return true; // Behind camera
         }
-        T u1 = (p1[0] * T(fx_) / p1[2]) + T(cx_);
-        T v1 = (p1[1] * T(fy_) / p1[2]) + T(cy_);
-        T u2 = (p2[0] * T(fx_) / p2[2]) + T(cx_);
-        T v2 = (p2[1] * T(fy_) / p2[2]) + T(cy_);
+        Eigen::Matrix<T, 4, 1> p1_h(p1_rect[0], p1_rect[1], p1_rect[2], T(1.0));
+        Eigen::Matrix<T, 4, 1> p2_h(p2_rect[0], p2_rect[1], p2_rect[2], T(1.0));
+        Eigen::Matrix<T, 3, 4> P_rect_t = P_rect_.cast<T>();
+        Eigen::Matrix<T, 3, 1> uv1 = P_rect_t * p1_h;
+        Eigen::Matrix<T, 3, 1> uv2 = P_rect_t * p2_h;
+
+        T u1 = uv1[0] / uv1[2];
+        T v1 = uv1[1] / uv1[2];
+        T u2 = uv2[0] / uv2[2];
+        T v2 = uv2[1] / uv2[2];
 
         // 3. Data Association & Error Calculation
         T min_dist = T(1000.0);
@@ -483,7 +518,8 @@ struct LineReprojectionError {
 
     Line3D l3d_;
     std::vector<Line2D> l2ds_;
-    double fx_, fy_, cx_, cy_;
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
 };
 
 // ========================================
@@ -495,7 +531,8 @@ struct EdgeConsistencyCost {
                         const cv::Mat* dist_map,
                         const cv::Mat* semantic_map,
                         const std::vector<LabelStats>* label_stats,
-                        const Eigen::Matrix3d& K,
+                        const Eigen::Matrix3d& R_rect,
+                        const Eigen::Matrix<double, 3, 4>& P_rect,
                         int W, int H,
                         double w_edge,
                         double w_consistency)
@@ -504,7 +541,8 @@ struct EdgeConsistencyCost {
           dist_map_(dist_map),
           semantic_map_(semantic_map),
           label_stats_(label_stats),
-          K_(K),
+          R_rect_(R_rect),
+          P_rect_(P_rect),
           W_(W),
           H_(H),
           w_edge_(w_edge),
@@ -526,9 +564,13 @@ struct EdgeConsistencyCost {
             p_cam.y() = rot[3] * pt.p.x() + rot[4] * pt.p.y() + rot[5] * pt.p.z() + t[1];
             p_cam.z() = rot[6] * pt.p.x() + rot[7] * pt.p.y() + rot[8] * pt.p.z() + t[2];
 
-            if (p_cam.z() < 0.1) continue;
+            Eigen::Vector3d p_rect = R_rect_ * p_cam;
+            if (p_rect.z() < 0.1) continue;
 
-            Eigen::Vector3d uv = K_ * p_cam;
+            Eigen::Vector4d p_rect_h;
+            p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+            Eigen::Vector3d uv = P_rect_ * p_rect_h;
+
             int u = static_cast<int>(uv.x() / uv.z());
             int v = static_cast<int>(uv.y() / uv.z());
             if (u < 0 || u >= W_ || v < 0 || v >= H_) continue;
@@ -580,7 +622,9 @@ struct EdgeConsistencyCost {
     const cv::Mat* dist_map_;
     const cv::Mat* semantic_map_;
     const std::vector<LabelStats>* label_stats_;
-    Eigen::Matrix3d K_;
+
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
     int W_;
     int H_;
     double w_edge_;
@@ -681,9 +725,10 @@ int main(int argc, char** argv) {
     // 加载内参
     Eigen::Matrix3d K; 
     Eigen::Matrix3d R_rect;
+    Eigen::Matrix<double, 3, 4> P_rect;
     //LoadCalib(calib_file, K, R_rect);
     bool calib_used_default = false;
-    LoadCalib(calib_file, K, R_rect, &calib_used_default);
+    LoadCalib(calib_file, K, R_rect, P_rect, &calib_used_default);
 
     // ========================================
     // Debug信息输出
@@ -693,7 +738,7 @@ int main(int argc, char** argv) {
         Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
         Eigen::Matrix3d R_mat;
         ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
-        auto stats = CountProjectionStats(points, K, R_mat, t_vec, W, H);
+        auto stats = CountProjectionStats(points, R_rect, P_rect, R_mat, t_vec, W, H);
         const double in_bounds_ratio = stats.total > 0
                                            ? static_cast<double>(stats.in_bounds) / static_cast<double>(stats.total)
                                            : 0.0;
@@ -779,7 +824,7 @@ int main(int argc, char** argv) {
         Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
         Eigen::Matrix3d R_mat;
         ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
-        auto filtered = FilterPointsInView(points, K, R_mat, t_vec, W, H);
+        auto filtered = FilterPointsInView(points, R_rect, P_rect, R_mat, t_vec, W, H);
         if (!filtered.empty()) {
             std::cout << "[Info] Prefiltered points in view: " << filtered.size()
                       << " / " << points.size() << std::endl;
@@ -833,11 +878,11 @@ int main(int argc, char** argv) {
                 double score = 0.0;
                 if (use_semantic) {
                     // README2.0.md要求：最大化Mask内强度一致性（方差最小）
-                    //score = MaskIntensityVarianceScore(points, semantic_map, K, W, H, R_mat, t_vec);
-                    score = MaskIntensityVarianceScore(points_for_opt, semantic_map, K, W, H, R_mat, t_vec);
+                    //score = MaskIntensityVarianceScore(points, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
+                    score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
                 } else if (use_edge) {
                     // 备用方案：边缘吸引场
-                    score = EdgeAttractionScore(points_for_opt, edge_dist, edge_weight, K, W, H, R_mat, t_vec);
+                    score = EdgeAttractionScore(points_for_opt, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
                 }else{
                     score = -1e6;
                 }
@@ -889,7 +934,7 @@ int main(int argc, char** argv) {
             Eigen::Vector3d t_vec(t_curr[0], t_curr[1], t_curr[2]);
             Eigen::Matrix3d R_mat;
             ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
-            label_stats = ComputeLabelStats(points_for_opt, semantic_map, K, W, H, R_mat, t_vec);
+            label_stats = ComputeLabelStats(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
         }
         auto* cost = new EdgeConsistencyCost(
             &points_for_opt,
@@ -897,7 +942,8 @@ int main(int argc, char** argv) {
             edge_dist.empty() ? nullptr : &edge_dist,
             semantic_map.empty() ? nullptr : &semantic_map,
             label_stats.empty() ? nullptr : &label_stats,
-            K,
+            R_rect,
+            P_rect,
             W,
             H,
             w_edge,
@@ -915,10 +961,8 @@ int main(int argc, char** argv) {
                 auto* line_cost = new LineReprojectionError(
                     l3d,
                     lines2d,
-                    K(0, 0),
-                    K(1, 1),
-                    K(0, 2),
-                    K(1, 2));
+                    R_rect,
+                    P_rect);                    
                 problem.AddResidualBlock(
                     new ceres::NumericDiffCostFunction<LineReprojectionError, ceres::CENTRAL, 1, 3, 3>(line_cost),
                     new ceres::HuberLoss(1.0),
