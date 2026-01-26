@@ -66,10 +66,18 @@ def main() -> int:
     parser.add_argument("--calib_file", required=True, help="KITTI calib_cam_to_cam.txt")
     parser.add_argument("--r_vec", nargs=3, type=float, required=True, help="Rotation vector (rx ry rz) in radians.")
     parser.add_argument("--t_vec", nargs=3, type=float, required=True, help="Translation vector (tx ty tz) in meters.")
+    parser.add_argument(
+        "--skip_rectification",
+        action="store_true",
+        help="Skip applying R_rect (assume extrinsic already in rectified camera frame).",
+    )
     parser.add_argument("--axis_len", type=float, default=10.0, help="Axis length in LiDAR meters.")
     args = parser.parse_args()
 
     K, R_rect, P_rect = load_kitti_calib(args.calib_file)
+    if args.skip_rectification:
+        print("[Info] Skipping rectification (R_rect = Identity)")
+        R_rect = np.eye(3, dtype=np.float64)
     r_vec = np.array(args.r_vec, dtype=np.float64)
     t_vec = np.array(args.t_vec, dtype=np.float64)
     R, _ = cv2.Rodrigues(r_vec)

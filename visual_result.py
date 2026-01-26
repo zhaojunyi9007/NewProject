@@ -307,6 +307,8 @@ Examples:
                         help="Rotation Vector (rx ry rz) in radians. If not provided, will try to load from <feature_base>_calib_result.txt")
     parser.add_argument("--t_vec", type=float, nargs=3, default=None, 
                         help="Translation Vector (tx ty tz) in meters. If not provided, will try to load from <feature_base>_calib_result.txt")
+    parser.add_argument("--skip_rectification", action="store_true",
+                    help="Skip applying R_rect (assume extrinsic already in rectified camera frame).")                    
     parser.add_argument("--output", type=str, default="", 
                         help="Output image path (default: result/visual_<frame_id>.png)")
     parser.add_argument("--subsample", type=int, default=5, 
@@ -343,6 +345,9 @@ Examples:
 
     # 2. 加载相机内参/整流/投影矩阵
     K, R_rect, P_rect = load_kitti_calib(args.calib_file)
+    if args.skip_rectification:
+        print("[Info] Skipping rectification (R_rect = Identity)")
+        R_rect = np.eye(3)
     print(f"[Info] Camera intrinsics K:\n{K}")
     print(f"[Info] Rectification R_rect:\n{R_rect}")
     print(f"[Info] Projection P_rect:\n{P_rect}")
