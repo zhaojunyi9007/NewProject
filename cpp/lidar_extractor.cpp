@@ -675,8 +675,13 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < cloud_ds->size(); ++i) {
             if (!depth_edges.edge_flags.empty() && depth_edges.edge_flags[i]) {
                 const auto& p = cloud_ds->points[i];
-                out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
-                saved_edges++;
+
+                if (labeled_points[i].label == 2) continue;
+                
+                if (p.z > -1.4) {
+                    out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
+                    saved_edges++;
+                }
             }
         }
         out_edges.close();

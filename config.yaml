@@ -28,7 +28,7 @@ frames:
   
   # 当mode="select"时，指定要处理的帧ID列表
   # 例如: [0, 10, 20, 30] 表示处理第0, 10, 20, 30帧
-  frame_ids: [0, 1, 2, 3, 4, 5]
+  frame_ids: [0]
   
   # 多帧融合配置
   fusion_window: 3  # 每次融合的帧数 (Three-in-one: 当前帧 + 前N-1帧)
@@ -58,7 +58,7 @@ lidar:
   
   # 地面区域 (铁轨提取)
   ground_z_min: -3.0
-  ground_z_max: -1.2
+  ground_z_max: -1.5
   rail_ransac_threshold: 0.15  # RANSAC容差 (m)
   rail_max_lines: 2  # 最多提取铁轨数量
   

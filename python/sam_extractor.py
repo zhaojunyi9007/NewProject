@@ -33,6 +33,7 @@ class FeatureExtractor:
             stability_score_thresh=0.92,
             crop_n_layers=1,
             crop_n_points_downscale_factor=2,
+            min_mask_region_area=500,
         )
         
         print(f"[SAM] Model loaded successfully")
@@ -94,7 +95,7 @@ class FeatureExtractor:
                     continue
 
                 # 仅保留高置信度的边界
-                if np.std(pixels) > 10 and cv2.arcLength(cnt, True) >= 15:
+                if np.std(pixels) > 10 and cv2.arcLength(cnt, True) >= 80:
                     # 计算注意力权重：稳定性 * 几何先验加权
                     # 如果是结构化长边缘，赋予更高的注意力权重
                     weight = stability * (1.5 if is_structural else 1.0)
@@ -184,11 +185,25 @@ class FeatureExtractor:
             else:
                 continue  # 跳过斜线
 
-            # 针对性筛选：长直线 + 上方横线（电缆）
-            if line_type == 0:
-                if length < 40 and (y1 + y2) / 2.0 > top_region:
-                    continue
+            # ===== 新增的严厉过滤逻辑 =====
+            # 计算这条线的中心点Y坐标
+            mid_y = (y1 + y2) / 2.0
             
+            # 判断线在图像的下半部(地面)还是上半部(天空/建筑)
+            if mid_y > h * 0.5: 
+                # 【情况A：在地面】
+                # 地面上有很多斑马线、阴影。我们只想要铁轨！
+                # 铁轨通常很长，所以把长度小于 80 像素的短线全部干掉。
+                if length < 80:
+                    continue 
+            else:
+                # 【情况B：在天上或背景里】
+                # 天上的横线可能是电缆，但也可能是树枝。把小于 40 的短横线干掉。
+                if line_type == 0 and length < 40: 
+                    continue
+            # ==============================
+            
+            # 如果能活过上面的重重过滤，才把它加进最终的特征里
             lines_2d.append((x1, y1, x2, y2, line_type))
             cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
         

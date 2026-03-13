@@ -129,8 +129,16 @@ def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t):
         p2_rect = R_rect @ p2_c
         
         # 检查点是否在相机前方（z > 0.1）
-        if p1_rect[2] < 0.1 or p2_rect[2] < 0.1: 
-            continue
+        if p1_rect[2] < 0.1 and p2_rect[2] < 0.1:
+            continue # 如果两个端点都在相机后面，才跳过
+
+        # 如果只有一个点在后面，按比例把它截断在相机前方 (z=0.1) 处
+        if p1_rect[2] < 0.1:
+            ratio = (0.1 - p2_rect[2]) / (p1_rect[2] - p2_rect[2])
+            p1_rect = p2_rect + ratio * (p1_rect - p2_rect)
+        elif p2_rect[2] < 0.1:
+            ratio = (0.1 - p1_rect[2]) / (p2_rect[2] - p1_rect[2])
+            p2_rect = p1_rect + ratio * (p2_rect - p1_rect)
         
         # Project: 3D点 -> 2D像素坐标
         uv1 = P_rect @ np.hstack([p1_rect, 1.0])

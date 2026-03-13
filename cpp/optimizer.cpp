@@ -128,6 +128,31 @@ struct LabelStats {
 };
 
 // ========================================
+// 专属边缘点加载器 (解决 4 列数据解析失败问题)
+// ========================================
+std::vector<PointFeature> LoadEdgePointsCustom(const std::string& filename) {
+    std::vector<PointFeature> pts;
+    std::ifstream fin(filename);
+    std::string line;
+    while (std::getline(fin, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::stringstream ss(line);
+        double x, y, z, val;
+        // 尝试读取前4列: x y z val
+        if (ss >> x >> y >> z >> val) {
+            PointFeature pt;
+            pt.p = Eigen::Vector3d(x, y, z);
+            pt.intensity = val;
+            pt.weight = 1.0; // 【关键】：强行设置权重为 1.0，防止得分为 0
+            pt.label = 1;    // 伪造标签，避免被后续逻辑过滤
+            pts.push_back(pt);
+        }
+    }
+    return pts;
+}
+
+
+// ========================================
 // 工具函数
 // ========================================
 int GetMaxLabel(const cv::Mat& semantic_map) {
@@ -412,18 +437,25 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
     int visible_count = 0;
 
     for (const auto& pt : points) {
-        if (pt.label == 0) continue;  // 跳过未标记点
+        //if (pt.label == 0) continue;  // 跳过未标记点
         
         int u, v;
-       if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) {
-            continue;
-        }
+       //if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) {
+            //continue;
+        //}
 
         // 读取距离场值
         float dist_value = GetDistanceValue(dist_map, u, v);
+        float edge_weight = 1.0f;
+        if (!weight_map.empty()) {
+            edge_weight = GetDistanceValue(weight_map, u, v);
+            if (edge_weight < 0.05f) edge_weight = 1.0f; // 如果边缘权重图太黑失效，强制给 1.0
+        }
+
+        dist_value = std::min(std::max(dist_value, 0.0f), 1.0f);
 
         // 读取边缘权重值
-        float edge_weight = GetDistanceValue(weight_map, u, v);
+        //float edge_weight = GetDistanceValue(weight_map, u, v);
 
         dist_value = std::min(std::max(dist_value, 0.0f), 1.0f);
         edge_weight = std::min(std::max(edge_weight, 0.0f), 1.0f);
@@ -552,17 +584,18 @@ struct EdgeConsistencyCost {
         double total_error = 0.0;
         int visible_count = 0;
 
-        double rot[9];
-        ceres::AngleAxisToRotationMatrix(r, rot);
-
         for (int idx : *indices_) {
             const auto& pt = (*points_)[idx];
-            if (pt.label == 0) continue;
+            //if (pt.label == 0) continue;
+
+            double p_raw[3] = { pt.p.x(), pt.p.y(), pt.p.z() };
+            double p_rotated[3];
+            ceres::AngleAxisRotatePoint(r, p_raw, p_rotated);
 
             Eigen::Vector3d p_cam;
-            p_cam.x() = rot[0] * pt.p.x() + rot[1] * pt.p.y() + rot[2] * pt.p.z() + t[0];
-            p_cam.y() = rot[3] * pt.p.x() + rot[4] * pt.p.y() + rot[5] * pt.p.z() + t[1];
-            p_cam.z() = rot[6] * pt.p.x() + rot[7] * pt.p.y() + rot[8] * pt.p.z() + t[2];
+            p_cam.x() = p_rotated[0] + t[0];
+            p_cam.y() = p_rotated[1] + t[1];
+            p_cam.z() = p_rotated[2] + t[2];
 
             Eigen::Vector3d p_rect = R_rect_ * p_cam;
             if (p_rect.z() < 0.1) continue;
@@ -712,6 +745,15 @@ int main(int argc, char** argv) {
         return -1;
     }
     std::cout << "  Loaded " << points.size() << " point features" << std::endl;
+
+    // 加载专门用于边缘匹配的 edge_points
+    std::vector<PointFeature> edge_points = LoadEdgePointsCustom(lidar_base + "_edge_points.txt");
+    if (edge_points.empty()) {
+        std::cerr << "[Warning] Still failed to load edge points!" << std::endl;
+        edge_points = points; // 降级
+    } else {
+        std::cout << "  Loaded " << edge_points.size() << " edge points (Custom Loader)" << std::endl;
+    }
     
     // 加载线特征
     std::vector<Line3D> lines3d;
@@ -841,20 +883,38 @@ int main(int argc, char** argv) {
     std::cout << "\n[Stage 2] Coarse Calibration (Grid Search)..." << std::endl;
     
     // 根据README2.0.md第三阶段要求：优先使用语义方差评分（Calib-Anything逻辑）
-    bool use_semantic = !semantic_map.empty();
     bool use_edge = !edge_dist.empty();
+    bool use_semantic = !semantic_map.empty();
     
-    if (use_semantic) {
-        std::cout << "  Strategy: Mask Intensity Variance Minimization (Calib-Anything)" << std::endl;
-    } else if (use_edge) {
+    if (use_edge) {
         std::cout << "  Strategy: Edge Attraction Field (EdgeCalib)" << std::endl;
+        use_semantic = false; // 如果有边缘场，粗搜阶段禁用语义搜索
+    } else if (use_semantic) {
+        std::cout << "  Strategy: Mask Intensity Variance Minimization (Calib-Anything)" << std::endl;
     } else {
         std::cerr << "[Error] No scoring method available!" << std::endl;
         return -1;
     }
+
+   // 先计算初始位置的得分，以此为基准，避免直接接受错误边界    
+    double best_r[3] = {r_curr[0], r_curr[1], r_curr[2]};
+    double best_t[3] = {t_curr[0], t_curr[1], t_curr[2]};
+    Eigen::Vector3d init_t_vec(t_curr[0], t_curr[1], t_curr[2]);
+    Eigen::Matrix3d init_R_mat;
+    ceres::AngleAxisToRotationMatrix(r_curr, init_R_mat.data());
     
-    double best_score = -1e9;
-    double best_r[3], best_t[3];
+    double best_score = -1e8;
+    if (use_edge) {
+        // 【修改 3.1】：将 points_for_opt 替换为 edge_points
+        best_score = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, init_R_mat, init_t_vec);
+    } else if (use_semantic) {
+        best_score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, init_R_mat, init_t_vec);
+    }
+
+    std::cout << "  Initial Pose Score: " << best_score << std::endl;
+    if (best_score <= -1e5) {
+        std::cout << "  [Warning] Initial score is very low (-1e6). Points might not project into valid areas or visible count < 50." << std::endl;
+    }
     
     const double angle_range = 0.15;  // radians, ±8.6 degrees
     const double angle_step = 0.01;   // radians, ~0.57 degrees
@@ -875,26 +935,23 @@ int main(int argc, char** argv) {
                 Eigen::Matrix3d R_mat;
                 ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
 
-                double score = 0.0;
-                if (use_semantic) {
-                    // README2.0.md要求：最大化Mask内强度一致性（方差最小）
-                    //score = MaskIntensityVarianceScore(points, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
+                double score = -1e6;
+                if (use_edge) {
+                    score = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
+                } else if (use_semantic) {
                     score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
-                } else if (use_edge) {
-                    // 备用方案：边缘吸引场
-                    score = EdgeAttractionScore(points_for_opt, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
-                }else{
-                    score = -1e6;
                 }
 
-                if (score > best_score) {
+
+                // 【修复核心 2】：只有得分有效 (大于-1e5) 且优于当前最好成绩，才更新
+                if (score > best_score && score > -1e5) {
                     best_score = score;
                     std::copy(r_try, r_try + 3, best_r);
                     std::copy(t_try, t_try + 3, best_t);
                 }
 
                 iter++;
-                if (iter % 200 == 0) {
+                if (iter % 2000 == 0) {
                     std::cout << "  Progress: " << iter << "/" << total_iters
                               << " (" << (iter * 100 / total_iters) << "%), Best Score: " << best_score << std::endl;
                 }
@@ -918,16 +975,16 @@ int main(int argc, char** argv) {
         
         // 采样点云以提高效率（最多5000个点）
         std::vector<int> sample_indices;
-        sample_indices.reserve(points_for_opt.size());
-        const int stride = std::max<int>(1, static_cast<int>(points_for_opt.size() / 5000));
-        for (size_t i = 0; i < points_for_opt.size(); i += stride) {
+        sample_indices.reserve(edge_points.size());
+        const int stride = std::max<int>(1, static_cast<int>(edge_points.size() / 5000));
+        for (size_t i = 0; i < edge_points.size(); i += stride) {
             sample_indices.push_back(static_cast<int>(i));
         }
-        std::cout << "  Sampled " << sample_indices.size() << " points from " << points_for_opt.size() << " total points" << std::endl;
+        std::cout << "  Sampled " << sample_indices.size() << " points from " << edge_points.size() << " edge points" << std::endl;
 
         // 混合Loss权重：α * E_geo + β * E_sem (README2.0.md公式)
         const double w_edge = 1.0;         // α: 几何误差权重
-        const double w_consistency = 1.0;  // β: 语义一致性权重
+        const double w_consistency = 0.0;  // β: 语义一致性权重
         std::cout << "  Loss weights: w_edge=" << w_edge << ", w_consistency=" << w_consistency << std::endl;
         std::vector<LabelStats> label_stats;
         if (!semantic_map.empty()) {
@@ -937,11 +994,13 @@ int main(int argc, char** argv) {
             label_stats = ComputeLabelStats(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
         }
         auto* cost = new EdgeConsistencyCost(
-            &points_for_opt,
+            &edge_points,
             &sample_indices,
             edge_dist.empty() ? nullptr : &edge_dist,
-            semantic_map.empty() ? nullptr : &semantic_map,
-            label_stats.empty() ? nullptr : &label_stats,
+            nullptr,
+            nullptr,
+            //semantic_map.empty() ? nullptr : &semantic_map,
+            //label_stats.empty() ? nullptr : &label_stats,
             R_rect,
             P_rect,
             W,
@@ -955,7 +1014,7 @@ int main(int argc, char** argv) {
             r_curr,
             t_curr);
 
-        if (!lines3d.empty() && !lines2d.empty()) {
+        /*if (!lines3d.empty() && !lines2d.empty()) {
             std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
             for (const auto& l3d : lines3d) {
                 auto* line_cost = new LineReprojectionError(
@@ -970,6 +1029,8 @@ int main(int argc, char** argv) {
                     t_curr);
             }
         }
+        */
+        
 
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_SCHUR;
