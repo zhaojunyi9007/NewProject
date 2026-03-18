@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # 1. 加载 SAM 提取的纯边缘图 (黑底白边)
-sam_edge_img = cv2.imread("result/sam_features/0000000000_edge_map.png")
+sam_edge_img = cv2.imread("result/sam_features/0000000089_edge_map.png")
 
 # 2. 加载优化出的最终外参 (从你的日志中复制的)
 r_vec = np.array([1.20155, -1.19339, 1.17018])
@@ -23,7 +23,7 @@ R_rect = np.array([
 
 # 4. 加载 LiDAR 专门提取的 edge_points (4列格式)
 pts_3d = []
-with open("result/lidar_features/0000000000_edge_points.txt", "r") as f:
+with open("result/lidar_features/0000000089_edge_points.txt", "r") as f:
     for line in f:
         if not line.strip() or line.strip().startswith('#'):
             continue

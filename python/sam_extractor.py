@@ -56,12 +56,30 @@ class FeatureExtractor:
         stability_map = np.zeros((h, w), dtype=np.float32)
         
         # 3. 循环处理每个mask
+        image_area = h * w
         for idx, mask in enumerate(masks):
             # 提取掩码元数据
             m_bool = mask['segmentation']
             stability = mask['stability_score'] # SAM 的边缘稳定性得分
             bbox = mask['bbox'] # [x, y, w, h]
             mask_id = mask.get('id', idx + 1)
+
+            x, y, bw, bh = bbox
+            area = mask.get('area', bw * bh)
+            image_area = h * w
+            
+            # 过滤1：超大面积背景（大马路、天空），如果超过图像15%直接丢弃
+            if area > image_area * 0.15:
+                continue
+            # 过滤2：极小噪点（细碎树叶）
+            if area < 500:
+                continue
+            # 过滤3：纯天上物体（物体最底端 y+bh 都在图像上半部，多为树冠）
+            if (y + bh) < h * 0.3:
+                continue
+            # 过滤4：地面扁平物体（马路上的巨大横向阴影、斑马线）
+            if y > h * 0.5 and bw > bh * 3:
+                continue
         
             # 几何过滤逻辑 (空旷场景优先保留长条形结构如护栏、轨道)
             bw, bh = bbox[2], bbox[3]
@@ -218,7 +236,14 @@ class FeatureExtractor:
         """
         edge_map, weight_map, mask_id_map = self.extract_edges(image)
         lines_2d, line_mask = self.extract_lines_2d(image, edge_map, return_mask=True)
+        
         fused_edge_map = cv2.bitwise_or(edge_map, line_mask)
+        h_img, w_img = fused_edge_map.shape
+        # 强制抹黑顶部 20% (纯天空和树顶边缘)
+        fused_edge_map[0:int(h_img * 0.20), :] = 0
+        # 强制抹黑底部 20% (本车引擎盖、近处地面的车道线)
+        fused_edge_map[int(h_img * 0.80):h_img, :] = 0
+
         dist_map = self.get_distance_transform(fused_edge_map)
         dist_map = cv2.GaussianBlur(dist_map, (5, 5), 0)
         weight_map = cv2.GaussianBlur(weight_map, (5, 5), 0)

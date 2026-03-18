@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 # 1. 加载原图
-img = cv2.imread("dataset/0000000000.png")  # 请确保路径正确
+img = cv2.imread("/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/image_02/data/0000000089.png")  # 请确保路径正确
 
 # 2. 加载真值外参
 r_vec = np.array([1.20135, -1.19308, 1.21013])
@@ -14,14 +14,14 @@ P_rect = np.array([[721.5377, 0., 609.5593, 44.85728], [0., 721.5377, 172.854, 0
 R_rect = np.array([[0.9999239, 0.00983776, -0.00744505], [-0.0098698, 0.9999421, -0.00427846], [0.00740253, 0.00435161, 0.9999631]])
 
 # 4. 绘制 SAM 提取的 2D 蓝线 (目标)
-with open("result/sam_features/0000000000_lines_2d.txt", "r") as f:
+with open("result/sam_features/0000000089_lines_2d.txt", "r") as f:
     for line in f:
         if line.startswith("#"): continue
         u1, v1, u2, v2, _ = map(float, line.split())
         cv2.line(img, (int(u1), int(v1)), (int(u2), int(v2)), (255, 0, 0), 2) # 蓝色
 
 # 5. 投影 LiDAR 提取的 3D 绿线/红线 (源)
-with open("result/lidar_features/0000000000_lines_3d.txt", "r") as f:
+with open("result/lidar_features/0000000089_lines_3d.txt", "r") as f:
     for line in f:
         if line.startswith("#"): continue
         x1, y1, z1, x2, y2, z2, l_type = map(float, line.split())

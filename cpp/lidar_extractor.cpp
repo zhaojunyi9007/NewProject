@@ -575,6 +575,7 @@ int main(int argc, char** argv) {
     const int LABEL_VEGETATION = 2;
     const int LABEL_STRUCTURE = 3;
 
+    std::vector<int> point_labels_1to1(cloud_ds->size(), LABEL_UNKNOWN);
     std::vector<PointFeature> labeled_points;
     double search_radius = 0.5; // PCA 搜索半径 0.5m
     int stats[5] = {0};
@@ -617,6 +618,8 @@ int main(int argc, char** argv) {
         } else if (scattering > 0.3) {
             if (p_pcl.z > -1.0) label = LABEL_VEGETATION; // 高处散乱点是植被
         }
+        // 【新增】：将算出的标签存入严格对齐的数组中
+        point_labels_1to1[i] = label;
 
         // 4. 获取时空一致性权重
         double temporal_weight = 1.0;
@@ -667,6 +670,11 @@ int main(int argc, char** argv) {
     // ========================================
     std::cout << "\n[Stage 9] Saving depth edge points..." << std::endl;
     std::ofstream out_edges(out_base + "_edge_points.txt");
+
+    // 日志统计变量
+    int count_total = 0, count_veg = 0, count_ground = 0;
+    int keep_unknown = 0, keep_road = 0, keep_struct = 0;
+
     if (!out_edges.is_open()) {
         std::cerr << "[Warning] Cannot create edge output file: " << out_base << "_edge_points.txt" << std::endl;
     } else {
@@ -675,8 +683,24 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < cloud_ds->size(); ++i) {
             if (!depth_edges.edge_flags.empty() && depth_edges.edge_flags[i]) {
                 const auto& p = cloud_ds->points[i];
+                int label = point_labels_1to1[i];
 
-                if (labeled_points[i].label == 2) continue;
+                // 过滤1：抛弃植被 (树叶)
+                if (label == 2) {
+                    count_veg++;
+                    continue;
+                }
+                
+                // 过滤2：抛弃地面 (把阈值提高到 -1.2，确保彻底杀死路面噪点)
+                if (p.z <= -1.2) {
+                    count_ground++;
+                    continue;
+                }
+
+                // 统计存活下来的点到底是什么身份
+                if (label == 0) keep_unknown++;
+                else if (label == 1) keep_road++;
+                else if (label == 3) keep_struct++;
                 
                 if (p.z > -1.4) {
                     out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
@@ -686,6 +710,14 @@ int main(int argc, char** argv) {
         }
         out_edges.close();
         std::cout << "  Saved " << saved_edges << " edge points." << std::endl;
+
+        // 打印诊断日志
+        std::cout << "  [DEBUG] Total Raw Edges: " << count_total << std::endl;
+        std::cout << "  [DEBUG] Removed Vegetation: " << count_veg << std::endl;
+        std::cout << "  [DEBUG] Removed Ground (z <= -1.2): " << count_ground << std::endl;
+        std::cout << "  [DEBUG] Kept Edges: " << saved_edges << std::endl;
+        std::cout << "          -> Unknown (Label 0): " << keep_unknown << " (可能是噪点或锐角车框)" << std::endl;
+        std::cout << "          -> Structure (Label 3): " << keep_struct << " (高质量物理边缘!)" << std::endl;
     }
     
     // ========================================
