@@ -69,7 +69,7 @@ def load_features(feature_base):
     lines_3d = []
     
     # 加载点特征
-    points_file = feature_base + "_points.txt"
+    points_file = feature_base + "_edge_points.txt"
     if os.path.exists(points_file):
         try:
             with open(points_file, 'r') as f:

@@ -188,6 +188,37 @@ inline float GetDistanceValue(const cv::Mat& dist_map, int u, int v) {
     return 1.0f;
 }
 
+// ==========================================
+// 【新增代码】
+// ==========================================
+inline double BilinearInterpolate(const cv::Mat& img, double x, double y) {
+    int x1 = static_cast<int>(std::floor(x));
+    int y1 = static_cast<int>(std::floor(y));
+    int x2 = x1 + 1;
+    int y2 = y1 + 1;
+
+    if (x1 < 0 || x2 >= img.cols || y1 < 0 || y2 >= img.rows) {
+        if (x1 >= 0 && x1 < img.cols && y1 >= 0 && y1 < img.rows) return GetDistanceValue(img, x1, y1);
+        return 1.0; 
+    }
+
+    double v11 = GetDistanceValue(img, x1, y1);
+    double v12 = GetDistanceValue(img, x1, y2);
+    double v21 = GetDistanceValue(img, x2, y1);
+    double v22 = GetDistanceValue(img, x2, y2);
+
+    double wx = x - x1;
+    double wy = y - y1;
+
+    double top = v11 * (1.0 - wx) + v21 * wx;
+    double bot = v12 * (1.0 - wx) + v22 * wx;
+
+    return top * (1.0 - wy) + bot * wy;
+}
+// ==========================================
+// 【新增结束】
+// ==========================================
+
 //bool LoadCalib(const std::string& calib_file, Eigen::Matrix3d& K, Eigen::Matrix3d& R_rect) {
 bool LoadCalib(const std::string& calib_file,
                Eigen::Matrix3d& K,
@@ -664,6 +695,61 @@ struct EdgeConsistencyCost {
     double w_consistency_;
 };
 
+struct SinglePointEdgeCost {
+    SinglePointEdgeCost(const PointFeature& pt,
+                        const cv::Mat* dist_map,
+                        const Eigen::Matrix3d& R_rect,
+                        const Eigen::Matrix<double, 3, 4>& P_rect,
+                        int W, int H)
+        : pt_(pt), dist_map_(dist_map), R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H) {}
+
+    bool operator()(const double* const r, const double* const t, double* residual) const {
+        double p_raw[3] = { pt_.p.x(), pt_.p.y(), pt_.p.z() };
+        double p_rotated[3];
+        ceres::AngleAxisRotatePoint(r, p_raw, p_rotated);
+
+        Eigen::Vector3d p_cam;
+        p_cam.x() = p_rotated[0] + t[0];
+        p_cam.y() = p_rotated[1] + t[1];
+        p_cam.z() = p_rotated[2] + t[2];
+
+        Eigen::Vector3d p_rect = R_rect_ * p_cam;
+        if (p_rect.z() < 0.1) {
+            residual[0] = 0.0; 
+            return true;
+        }
+
+        Eigen::Vector4d p_rect_h;
+        p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+        Eigen::Vector3d uv = P_rect_ * p_rect_h;
+
+        // 使用浮点数坐标，不要取整！
+        double u_f = uv.x() / uv.z();
+        double v_f = uv.y() / uv.z();
+
+        if (u_f < 0 || u_f >= W_ - 1 || v_f < 0 || v_f >= H_ - 1) {
+            residual[0] = 0.0;
+            return true;
+        }
+
+        double edge_error = 0.0;
+        if (dist_map_ && !dist_map_->empty()) {
+            edge_error = BilinearInterpolate(*dist_map_, u_f, v_f);
+            edge_error = std::min(std::max(edge_error, 0.0), 1.0);
+        }
+
+        residual[0] = edge_error * pt_.weight;
+        return true;
+    }
+
+    PointFeature pt_;
+    const cv::Mat* dist_map_;
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
+    int W_;
+    int H_;
+};
+
 
 // ========================================
 // 主程序
@@ -993,28 +1079,31 @@ int main(int argc, char** argv) {
             ceres::AngleAxisToRotationMatrix(r_curr, R_mat.data());
             label_stats = ComputeLabelStats(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
         }
-        auto* cost = new EdgeConsistencyCost(
-            &edge_points,
-            &sample_indices,
-            edge_dist.empty() ? nullptr : &edge_dist,
-            nullptr,
-            nullptr,
-            //semantic_map.empty() ? nullptr : &semantic_map,
-            //label_stats.empty() ? nullptr : &label_stats,
-            R_rect,
-            P_rect,
-            W,
-            H,
-            w_edge,
-            w_consistency);
 
-        problem.AddResidualBlock(
-            new ceres::NumericDiffCostFunction<EdgeConsistencyCost, ceres::CENTRAL, 1, 3, 3>(cost),
-            new ceres::HuberLoss(1.0),
-            r_curr,
-            t_curr);
+        int valid_points_added = 0;
+        for (int idx : sample_indices) {
+            const auto& pt = edge_points[idx];
+            auto* single_cost = new SinglePointEdgeCost(
+                pt,
+                edge_dist.empty() ? nullptr : &edge_dist,
+                R_rect,
+                P_rect,
+                W,
+                H
+            );
+            
+            problem.AddResidualBlock(
+                new ceres::NumericDiffCostFunction<SinglePointEdgeCost, ceres::CENTRAL, 1, 3, 3>(single_cost),
+                new ceres::HuberLoss(0.1), // 阈值缩小到0.1，防噪点
+                r_curr,
+                t_curr
+            );
+            valid_points_added++;
+        }
+        std::cout << "  Added " << valid_points_added << " individual residual blocks to Ceres." << std::endl;
+        
 
-        /*if (!lines3d.empty() && !lines2d.empty()) {
+        if (!lines3d.empty() && !lines2d.empty()) {
             std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
             for (const auto& l3d : lines3d) {
                 auto* line_cost = new LineReprojectionError(
@@ -1029,13 +1118,15 @@ int main(int argc, char** argv) {
                     t_curr);
             }
         }
-        */
+        
         
 
         ceres::Solver::Options options;
         options.linear_solver_type = ceres::DENSE_SCHUR;
         options.minimizer_progress_to_stdout = false;
         options.max_num_iterations = 100;
+
+        problem.SetParameterBlockConstant(t_curr);
         
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
