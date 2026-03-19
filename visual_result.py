@@ -61,27 +61,51 @@ def load_kitti_calib(calib_file):
     print("[Warning] Using default camera intrinsics")
     return default_k, default_r_rect, default_p_rect
 
-def load_features(feature_base):
+def load_features(feature_base, point_source="edge"):
     """
     加载点特征和线特征
     """
     points = []
     lines_3d = []
     
-    # 加载点特征
-    points_file = feature_base + "_edge_points.txt"
-    if os.path.exists(points_file):
+    # 加载点特征：
+    # 1) 优先使用 _points.txt（Stage 8 标准输出：x y z i nx ny nz label weight）
+    # 2) 若不存在则回退到 _edge_points.txt（Stage 9 输出：x y z intensity）
+    edge_file = feature_base + "_edge_points.txt"
+    all_file = feature_base + "_points.txt"
+
+    if point_source == "all":
+        points_candidates = [all_file, edge_file]
+    elif point_source == "auto":
+        points_candidates = [edge_file, all_file]
+    else:  # 默认 edge
+        points_candidates = [edge_file, all_file]
+    
+    points_file_used = None
+    for points_file in points_candidates:
+        if not os.path.exists(points_file):
+            continue
         try:
             with open(points_file, 'r') as f:
                 for line in f:
                     if line.strip() and not line.startswith('#'):
                         vals = list(map(float, line.strip().split()))
-                        if len(vals) >= 7:  # x y z i nx ny nz [label] [weight]
-                            # 只取前7个值(x y z i nx ny nz)用于可视化
-                            points.append(vals[:7])
-            print(f"[Info] Loaded {len(points)} point features")
+                        # - _points.txt: 至少 7 列（x y z i nx ny nz ...）
+                        # - _edge_points.txt: 至少 4 列（x y z intensity）
+                        # 可视化投影只需要前三列坐标。
+                        if len(vals) >= 3:  
+                            points.append(vals[:3])
+            points_file_used = points_file
+            print(f"[Info] Loaded {len(points)} point features from: {points_file_used}")
+            break
         except Exception as e:
-            print(f"[Warning] Failed to load points: {e}")
+            print(f"[Warning] Failed to load points from {points_file}: {e}")
+
+    if points_file_used is None:
+        print(f"[Warning] Point features files not found: {points_candidates[0]} or {points_candidates[1]}")
+
+            
+
     else:
         print(f"[Warning] Point features file not found: {points_file}")
     
@@ -321,6 +345,8 @@ Examples:
                         help="Output image path (default: result/visual_<frame_id>.png)")
     parser.add_argument("--subsample", type=int, default=5, 
                         help="Point subsampling factor (draw every N-th point)")
+    parser.add_argument("--point_source", type=str, default="edge", choices=["edge", "all", "auto"],
+                        help="Point source for visualization: edge(optimizer target), all(full points), auto(fallback).")
     
     args = parser.parse_args()
 
@@ -344,11 +370,11 @@ Examples:
     print(f"[Info] Image loaded: {img.shape[1]}x{img.shape[0]}")
 
     # 1. 加载特征
-    points, lines_3d = load_features(args.feature_base)
+    points, lines_3d = load_features(args.feature_base, point_source=args.point_source)
     
     if not points and not lines_3d:
         print("[Error] No features loaded. Nothing to visualize.")
-        print(f"[Info] Expected files: {args.feature_base}_points.txt, {args.feature_base}_lines_3d.txt")
+        print(f"[Info] Expected files: {args.feature_base}_points.txt (or _edge_points.txt), {args.feature_base}_lines_3d.txt")
         return 1
 
     # 2. 加载相机内参/整流/投影矩阵

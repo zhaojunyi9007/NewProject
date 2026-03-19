@@ -168,6 +168,29 @@ class EdgeCalibPipeline:
         if velo_to_cam:
             init_r, init_t = velo_to_cam
             print("[Info] 使用calib_velo_to_cam.txt中的R/T作为初始外参")
+
+        # A/B实验参数（通过环境变量传递给 C++ optimizer）
+        ab_cfg = self.config.get('calibration', {}).get('ab_experiment', {})
+        optimizer_env = os.environ.copy()
+        env_map = {
+            "opt_translation": "EDGECALIB_OPT_TRANSLATION",
+            "use_line_constraint": "EDGECALIB_USE_LINE_CONSTRAINT",
+            "line_match_threshold": "EDGECALIB_LINE_MATCH_THRESHOLD",
+            "line_soft_penalty": "EDGECALIB_LINE_SOFT_PENALTY",
+            "line_soft_cap": "EDGECALIB_LINE_SOFT_CAP",
+            "t_prior_weight": "EDGECALIB_T_PRIOR_WEIGHT",
+            "w_consistency": "EDGECALIB_W_CONSISTENCY",
+            "coarse_ty_range": "EDGECALIB_COARSE_TY_RANGE",
+            "coarse_tz_range": "EDGECALIB_COARSE_TZ_RANGE",
+            "coarse_ty_step": "EDGECALIB_COARSE_TY_STEP",
+            "coarse_tz_step": "EDGECALIB_COARSE_TZ_STEP",
+            "log_line_debug": "EDGECALIB_LOG_LINE_DEBUG",
+        }
+        for k, env_key in env_map.items():
+            if k in ab_cfg and ab_cfg[k] is not None:
+                optimizer_env[env_key] = str(ab_cfg[k])
+        if ab_cfg:
+            print("[Info] 已加载 calibration.ab_experiment 参数并传递给 optimizer")
         
         for frame_id in self.frame_ids:
             feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
@@ -191,7 +214,7 @@ class EdgeCalibPipeline:
                 str(init_t[0]), str(init_t[1]), str(init_t[2]),
                 output_file
             ]
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, env=optimizer_env)
         
         print(f"\n[完成] 标定结果已保存到: {calib_dir}")
     

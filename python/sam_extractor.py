@@ -40,7 +40,7 @@ class FeatureExtractor:
 
     def extract_edges(self, image):
         """
-        提取边缘，返回二值边缘图、权重图和mask id图
+        提取边缘,返回二值边缘图、权重图和mask id图
         """
         # 1. 生成原始掩码
         print("[SAM] Generating masks...")
@@ -91,7 +91,7 @@ class FeatureExtractor:
             if not m.flags['C_CONTIGUOUS']:
                 m = np.ascontiguousarray(m)
 
-            # 使用形态学梯度/Sobel 提取掩码边界（更贴近方案中的边缘提取）
+            # 使用形态学梯度/Sobel 提取掩码边界
             grad = cv2.morphologyEx(m, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
             sobel_x = cv2.Sobel(grad, cv2.CV_32F, 1, 0, ksize=3)
             sobel_y = cv2.Sobel(grad, cv2.CV_32F, 0, 1, ksize=3)

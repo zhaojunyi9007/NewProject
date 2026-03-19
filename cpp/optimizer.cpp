@@ -6,6 +6,7 @@
 #include <map>
 #include <algorithm>
 #include <deque>
+#include <cstdlib>
 #include <opencv2/opencv.hpp>
 #include <eigen3/Eigen/Core>
 #include <eigen3/Eigen/Geometry>
@@ -509,8 +510,12 @@ struct LineReprojectionError {
     LineReprojectionError(const Line3D& l3d,
                           const std::vector<Line2D>& l2ds,
                           const Eigen::Matrix3d& R_rect,
-                          const Eigen::Matrix<double, 3, 4>& P_rect)
-        : l3d_(l3d), l2ds_(l2ds), R_rect_(R_rect), P_rect_(P_rect) {}
+                          const Eigen::Matrix<double, 3, 4>& P_rect,
+                          double match_threshold = 50.0,
+                          bool soft_penalty = false,
+                          double soft_cap = 100.0)
+        : l3d_(l3d), l2ds_(l2ds), R_rect_(R_rect), P_rect_(P_rect),
+          match_threshold_(match_threshold), soft_penalty_(soft_penalty), soft_cap_(soft_cap) {}
 
     template <typename T>
     bool operator()(const T* const r, const T* const t, T* residual) const {
@@ -571,8 +576,15 @@ struct LineReprojectionError {
             }
         }
 
-        if (found && min_dist < T(50.0)) {
+        if (found && min_dist < T(match_threshold_)) {
             residual[0] = min_dist;
+        } else if (soft_penalty_) {
+            T soft_cap = T(soft_cap_);
+            if (found) {
+                residual[0] = soft_cap * (T(1.0) - ceres::exp(-min_dist / soft_cap));
+            } else {
+                residual[0] = soft_cap;
+            }
         } else {
             residual[0] = T(0.0);
         }
@@ -583,7 +595,122 @@ struct LineReprojectionError {
     std::vector<Line2D> l2ds_;
     Eigen::Matrix3d R_rect_;
     Eigen::Matrix<double, 3, 4> P_rect_;
+    double match_threshold_;
+    bool soft_penalty_;
+    double soft_cap_;
 };
+
+struct LineMatchStats {
+    bool in_front = false;
+    bool found_type_match = false;
+    bool active = false;
+    double min_dist = 1e9;
+};
+
+LineMatchStats EvaluateLineMatchStats(const Line3D& l3d,
+                                      const std::vector<Line2D>& l2ds,
+                                      const Eigen::Matrix3d& R_rect,
+                                      const Eigen::Matrix<double, 3, 4>& P_rect,
+                                      const double* r,
+                                      const double* t,
+                                      double threshold = 50.0) {
+    LineMatchStats stats;
+    double p1_raw[3] = {l3d.p1.x(), l3d.p1.y(), l3d.p1.z()};
+    double p2_raw[3] = {l3d.p2.x(), l3d.p2.y(), l3d.p2.z()};
+    double p1[3];
+    double p2[3];
+    ceres::AngleAxisRotatePoint(r, p1_raw, p1);
+    ceres::AngleAxisRotatePoint(r, p2_raw, p2);
+    p1[0] += t[0]; p1[1] += t[1]; p1[2] += t[2];
+    p2[0] += t[0]; p2[1] += t[1]; p2[2] += t[2];
+
+    Eigen::Vector3d p1_cam(p1[0], p1[1], p1[2]);
+    Eigen::Vector3d p2_cam(p2[0], p2[1], p2[2]);
+    Eigen::Vector3d p1_rect = R_rect * p1_cam;
+    Eigen::Vector3d p2_rect = R_rect * p2_cam;
+    if (p1_rect.z() < 0.1 || p2_rect.z() < 0.1) {
+        return stats;
+    }
+    stats.in_front = true;
+
+    Eigen::Vector4d p1_h(p1_rect.x(), p1_rect.y(), p1_rect.z(), 1.0);
+    Eigen::Vector4d p2_h(p2_rect.x(), p2_rect.y(), p2_rect.z(), 1.0);
+    Eigen::Vector3d uv1 = P_rect * p1_h;
+    Eigen::Vector3d uv2 = P_rect * p2_h;
+    double u1 = uv1.x() / uv1.z();
+    double v1 = uv1.y() / uv1.z();
+    double u2 = uv2.x() / uv2.z();
+    double v2 = uv2.y() / uv2.z();
+
+    for (const auto& l2d : l2ds) {
+        if (l2d.type != l3d.type) continue;
+        stats.found_type_match = true;
+
+        double lx1 = l2d.p1.x(), ly1 = l2d.p1.y();
+        double lx2 = l2d.p2.x(), ly2 = l2d.p2.y();
+        double A = ly1 - ly2;
+        double B = lx2 - lx1;
+        double C = lx1 * ly2 - lx2 * ly1;
+        double norm = std::sqrt(A * A + B * B);
+        if (norm < 1e-6) continue;
+
+        double d1 = std::abs(A * u1 + B * v1 + C) / norm;
+        double d2 = std::abs(A * u2 + B * v2 + C) / norm;
+        double avg_dist = 0.5 * (d1 + d2);
+        if (avg_dist < stats.min_dist) {
+            stats.min_dist = avg_dist;
+        }
+    }
+    stats.active = stats.found_type_match && stats.min_dist < threshold;
+    return stats;
+}
+
+// 估计在当前位姿下某条3D线是否能形成有效线约束（与LineReprojectionError判定保持一致）
+bool IsLineConstraintActive(const Line3D& l3d,
+                            const std::vector<Line2D>& l2ds,
+                            const Eigen::Matrix3d& R_rect,
+                            const Eigen::Matrix<double, 3, 4>& P_rect,
+                            const double* r,
+                            const double* t,
+                            double threshold = 50.0) {
+    LineMatchStats stats = EvaluateLineMatchStats(l3d, l2ds, R_rect, P_rect, r, t, threshold);
+    return stats.active;
+}
+
+bool GetEnvBool(const char* name, bool default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    std::string s(value);
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    return !(s == "0" || s == "false" || s == "off" || s == "no");
+}
+
+double GetEnvDouble(const char* name, double default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    char* end = nullptr;
+    double parsed = std::strtod(value, &end);
+    if (end == value) return default_value;
+    return parsed;
+}
+
+struct TranslationPriorCost {
+    TranslationPriorCost(const Eigen::Vector3d& t_ref, double weight)
+        : t_ref_(t_ref), sqrt_weight_(std::sqrt(std::max(0.0, weight))) {}
+
+    template <typename T>
+    bool operator()(const T* const t, T* residual) const {
+        residual[0] = T(sqrt_weight_) * (t[0] - T(t_ref_.x()));
+        residual[1] = T(sqrt_weight_) * (t[1] - T(t_ref_.y()));
+        residual[2] = T(sqrt_weight_) * (t[2] - T(t_ref_.z()));
+        return true;
+    }
+
+    Eigen::Vector3d t_ref_;
+    double sqrt_weight_;
+};
+
+
 
 // ========================================
 // Ceres优化：边缘吸引场 + 语义一致性 (README2.0 第三阶段 3.2)
@@ -1004,42 +1131,67 @@ int main(int argc, char** argv) {
     
     const double angle_range = 0.15;  // radians, ±8.6 degrees
     const double angle_step = 0.01;   // radians, ~0.57 degrees
+    const double coarse_ty_range = GetEnvDouble("EDGECALIB_COARSE_TY_RANGE", 0.0);
+    const double coarse_tz_range = GetEnvDouble("EDGECALIB_COARSE_TZ_RANGE", 0.0);
+    const double coarse_ty_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TY_STEP", 0.05));
+    const double coarse_tz_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TZ_STEP", 0.05));
+    std::vector<double> ty_candidates{t_curr[1]};
+    std::vector<double> tz_candidates{t_curr[2]};
+    if (coarse_ty_range > 1e-9) {
+        ty_candidates.clear();
+        for (double ty = t_curr[1] - coarse_ty_range; ty <= t_curr[1] + coarse_ty_range + 1e-12; ty += coarse_ty_step) {
+            ty_candidates.push_back(ty);
+        }
+    }
+    if (coarse_tz_range > 1e-9) {
+        tz_candidates.clear();
+        for (double tz = t_curr[2] - coarse_tz_range; tz <= t_curr[2] + coarse_tz_range + 1e-12; tz += coarse_tz_step) {
+            tz_candidates.push_back(tz);
+        }
+    }
+
     int iter = 0;
     const int steps = static_cast<int>(std::floor((2.0 * angle_range) / angle_step)) + 1;
-    const int total_iters = steps * steps * steps;
+    const int total_iters = steps * steps * steps * static_cast<int>(ty_candidates.size()) * static_cast<int>(tz_candidates.size());
     
     std::cout << "  Search space: " << steps << "^3 = " << total_iters << " candidates" << std::endl;
     std::cout << "  Angle range: ±" << (angle_range * 180.0 / M_PI) << " degrees" << std::endl;
 
-    for (double rx = r_curr[0] - angle_range; rx <= r_curr[0] + angle_range + 1e-9; rx += angle_step) {
-        for (double ry = r_curr[1] - angle_range; ry <= r_curr[1] + angle_range + 1e-9; ry += angle_step) {
-            for (double rz = r_curr[2] - angle_range; rz <= r_curr[2] + angle_range + 1e-9; rz += angle_step) {
-                double r_try[3] = {rx, ry, rz};
-                double t_try[3] = {t_curr[0], t_curr[1], t_curr[2]};
+    std::cout << "  TY candidates: " << ty_candidates.size() << ", TZ candidates: " << tz_candidates.size() << std::endl;
 
-                Eigen::Vector3d t_vec(t_try[0], t_try[1], t_try[2]);
-                Eigen::Matrix3d R_mat;
-                ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
+    for (double ty : ty_candidates) {
+        for (double tz : tz_candidates) {
+            for (double rx = r_curr[0] - angle_range; rx <= r_curr[0] + angle_range + 1e-9; rx += angle_step) {
+                for (double ry = r_curr[1] - angle_range; ry <= r_curr[1] + angle_range + 1e-9; ry += angle_step) {
+                    for (double rz = r_curr[2] - angle_range; rz <= r_curr[2] + angle_range + 1e-9; rz += angle_step) {
+                        double r_try[3] = {rx, ry, rz};
+                        double t_try[3] = {t_curr[0], ty, tz};
 
-                double score = -1e6;
-                if (use_edge) {
-                    score = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
-                } else if (use_semantic) {
-                    score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
-                }
+                        Eigen::Vector3d t_vec(t_try[0], t_try[1], t_try[2]);
+                        Eigen::Matrix3d R_mat;
+                        ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
+
+                        double score = -1e6;
+                        if (use_edge) {
+                            score = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
+                        } else if (use_semantic) {
+                            score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
+                        }
 
 
-                // 【修复核心 2】：只有得分有效 (大于-1e5) 且优于当前最好成绩，才更新
-                if (score > best_score && score > -1e5) {
-                    best_score = score;
-                    std::copy(r_try, r_try + 3, best_r);
-                    std::copy(t_try, t_try + 3, best_t);
-                }
+                        // 【修复核心 2】：只有得分有效 (大于-1e5) 且优于当前最好成绩，才更新
+                        if (score > best_score && score > -1e5) {
+                            best_score = score;
+                            std::copy(r_try, r_try + 3, best_r);
+                            std::copy(t_try, t_try + 3, best_t);
+                        }
 
-                iter++;
-                if (iter % 2000 == 0) {
-                    std::cout << "  Progress: " << iter << "/" << total_iters
-                              << " (" << (iter * 100 / total_iters) << "%), Best Score: " << best_score << std::endl;
+                        iter++;
+                        if (iter % 2000 == 0) {
+                            std::cout << "  Progress: " << iter << "/" << total_iters
+                                      << " (" << (iter * 100 / total_iters) << "%), Best Score: " << best_score << std::endl;
+                        }
+                    }
                 }
             }
         }
@@ -1058,6 +1210,15 @@ int main(int argc, char** argv) {
     if (!edge_dist.empty() || !semantic_map.empty()) {
         std::cout << "\n[Stage 3] Fine Calibration (Ceres LM Optimization)..." << std::endl;
         ceres::Problem problem;
+        const bool optimize_translation = GetEnvBool("EDGECALIB_OPT_TRANSLATION", true);
+        const bool use_line_constraints = GetEnvBool("EDGECALIB_USE_LINE_CONSTRAINT", true);
+        const bool log_line_debug = GetEnvBool("EDGECALIB_LOG_LINE_DEBUG", false);
+        const double line_match_threshold = GetEnvDouble("EDGECALIB_LINE_MATCH_THRESHOLD", 50.0);
+        const bool line_soft_penalty = GetEnvBool("EDGECALIB_LINE_SOFT_PENALTY", false);
+        const double line_soft_cap = GetEnvDouble("EDGECALIB_LINE_SOFT_CAP", 100.0);
+        const double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 20.0);
+        const double w_consistency_env = GetEnvDouble("EDGECALIB_W_CONSISTENCY", 0.0);
+        const Eigen::Vector3d t_init_prior(t_curr[0], t_curr[1], t_curr[2]);
         
         // 采样点云以提高效率（最多5000个点）
         std::vector<int> sample_indices;
@@ -1070,7 +1231,7 @@ int main(int argc, char** argv) {
 
         // 混合Loss权重：α * E_geo + β * E_sem (README2.0.md公式)
         const double w_edge = 1.0;         // α: 几何误差权重
-        const double w_consistency = 0.0;  // β: 语义一致性权重
+        const double w_consistency = std::max(0.0, w_consistency_env);  // β: 语义一致性权重
         std::cout << "  Loss weights: w_edge=" << w_edge << ", w_consistency=" << w_consistency << std::endl;
         std::vector<LabelStats> label_stats;
         if (!semantic_map.empty()) {
@@ -1103,22 +1264,60 @@ int main(int argc, char** argv) {
         std::cout << "  Added " << valid_points_added << " individual residual blocks to Ceres." << std::endl;
         
 
-        if (!lines3d.empty() && !lines2d.empty()) {
+        //if (!lines3d.empty() && !lines2d.empty()) {
+        if (use_line_constraints && !lines3d.empty() && !lines2d.empty()) {
             std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
+            int line_blocks_added = 0;
+            int line_blocks_active_at_init = 0;
             for (const auto& l3d : lines3d) {
                 auto* line_cost = new LineReprojectionError(
                     l3d,
                     lines2d,
                     R_rect,
-                    P_rect);                    
+                    P_rect,
+                    line_match_threshold,
+                    line_soft_penalty,
+                    line_soft_cap);                    
                 problem.AddResidualBlock(
                     new ceres::NumericDiffCostFunction<LineReprojectionError, ceres::CENTRAL, 1, 3, 3>(line_cost),
                     new ceres::HuberLoss(1.0),
                     r_curr,
                     t_curr);
+                line_blocks_added++;
+                LineMatchStats stats = EvaluateLineMatchStats(l3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
+                if (stats.active) {
+                    line_blocks_active_at_init++;
+                }
+                if (log_line_debug) {
+                    std::cout << "    [LineDebug] type=" << l3d.type
+                              << ", in_front=" << (stats.in_front ? "Y" : "N")
+                              << ", found_type_match=" << (stats.found_type_match ? "Y" : "N")
+                              << ", min_dist=" << stats.min_dist
+                              << ", active=" << (stats.active ? "Y" : "N")
+                              << std::endl;
+                }
             }
+
+            std::cout << "  Line constraints added: " << line_blocks_added
+                      << ", active at init: " << line_blocks_active_at_init << std::endl;
+            std::cout << "  Line match threshold: " << line_match_threshold << " px" << std::endl;
+            std::cout << "  Line soft penalty: " << (line_soft_penalty ? "enabled" : "disabled")
+                      << " (cap=" << line_soft_cap << ")" << std::endl;
+        } else if (!use_line_constraints) {
+            std::cout << "  Line constraints: disabled by EDGECALIB_USE_LINE_CONSTRAINT" << std::endl;
         }
-        
+
+        if (t_prior_weight > 0.0) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<TranslationPriorCost, 3, 3>(
+                    new TranslationPriorCost(t_init_prior, t_prior_weight)),
+                nullptr,
+                t_curr);
+            std::cout << "  Translation prior: enabled (weight=" << t_prior_weight << ")" << std::endl;
+        } else {
+            std::cout << "  Translation prior: disabled" << std::endl;
+
+        }
         
 
         ceres::Solver::Options options;
@@ -1126,7 +1325,14 @@ int main(int argc, char** argv) {
         options.minimizer_progress_to_stdout = false;
         options.max_num_iterations = 100;
 
-        problem.SetParameterBlockConstant(t_curr);
+        //problem.SetParameterBlockConstant(t_curr);
+        //std::cout << "  Translation optimization: enabled" << std::endl;
+        if (!optimize_translation) {
+            problem.SetParameterBlockConstant(t_curr);
+            std::cout << "  Translation optimization: disabled by EDGECALIB_OPT_TRANSLATION" << std::endl;
+        } else {
+            std::cout << "  Translation optimization: enabled" << std::endl;
+        }
         
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
