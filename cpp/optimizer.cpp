@@ -472,9 +472,12 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
         //if (pt.label == 0) continue;  // 跳过未标记点
         
         int u, v;
-       //if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) {
-            //continue;
-        //}
+
+        if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) {
+            continue;
+        }
+
+       
 
         // 读取距离场值
         float dist_value = GetDistanceValue(dist_map, u, v);
@@ -984,6 +987,35 @@ int main(int argc, char** argv) {
     //LoadCalib(calib_file, K, R_rect);
     bool calib_used_default = false;
     LoadCalib(calib_file, K, R_rect, P_rect, &calib_used_default);
+
+    // 最小调试日志（中文）：
+    // 目的：快速确认投影几何主链路的尺寸/内参/外参约定，避免再次出现“看起来发散但原因不明”的问题。
+    std::cout << "\n[Debug-Min] Geometry chain summary:" << std::endl;
+    std::cout << "  Projection image size (W x H): " << W << " x " << H << std::endl;
+    std::cout << "  edge_dist size: "
+              << (edge_dist.empty() ? std::string("empty") :
+                  (std::to_string(edge_dist.cols) + " x " + std::to_string(edge_dist.rows)))
+              << std::endl;
+    std::cout << "  semantic_map size: "
+              << (semantic_map.empty() ? std::string("empty") :
+                  (std::to_string(semantic_map.cols) + " x " + std::to_string(semantic_map.rows)))
+              << std::endl;
+    std::cout << "  Camera intrinsics K:\n" << K << std::endl;
+    std::cout << "  Extrinsic convention used in optimizer: p_cam = R * p_lidar + t (LiDAR -> Camera)" << std::endl;
+    if (calib_used_default) {
+        std::cout << "  [Debug-Min] calib file unavailable/parse failed, using default intrinsics." << std::endl;
+    } else {
+        std::cout << "  [Debug-Min] calib loaded from: " << calib_file << std::endl;
+    }
+
+    Eigen::Vector3d t_vec_debug(t_curr[0], t_curr[1], t_curr[2]);
+    Eigen::Matrix3d R_mat_debug;
+    ceres::AngleAxisToRotationMatrix(r_curr, R_mat_debug.data());
+    auto proj_stats = CountProjectionStats(points, R_rect, P_rect, R_mat_debug, t_vec_debug, W, H);
+    const int projected_success = proj_stats.in_bounds + proj_stats.out_of_bounds;
+    std::cout << "  Point stats (initial pose): raw=" << proj_stats.total
+              << ", projected_success(z>0)=" << projected_success
+              << ", in_image=" << proj_stats.in_bounds << std::endl;
 
     // ========================================
     // Debug信息输出
