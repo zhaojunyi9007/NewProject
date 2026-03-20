@@ -133,9 +133,13 @@ calibration:
     # Coarse阶段 y/z 平移局部搜索范围（m），0 表示关闭
     coarse_ty_range: 0.0
     coarse_tz_range: 0.0
+    # Coarse阶段 x 平移局部搜索范围（m），0 表示关闭（默认不改变主流程）
+    coarse_tx_range: 0.05
     # Coarse阶段 y/z 平移步长（m）
     coarse_ty_step: 0.05
     coarse_tz_step: 0.05
+    # Coarse阶段 x 平移步长（m）
+    coarse_tx_step: 0.05
     # 是否打印每条线的匹配诊断
     log_line_debug: false
 

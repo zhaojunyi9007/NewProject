@@ -1165,10 +1165,22 @@ int main(int argc, char** argv) {
     const double angle_step = 0.01;   // radians, ~0.57 degrees
     const double coarse_ty_range = GetEnvDouble("EDGECALIB_COARSE_TY_RANGE", 0.0);
     const double coarse_tz_range = GetEnvDouble("EDGECALIB_COARSE_TZ_RANGE", 0.0);
+    const double coarse_tx_range = GetEnvDouble("EDGECALIB_COARSE_TX_RANGE", 0.0);
     const double coarse_ty_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TY_STEP", 0.05));
     const double coarse_tz_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TZ_STEP", 0.05));
+    const double coarse_tx_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TX_STEP", 0.05));
+    // 中文说明：
+    // 目的：做“最小范围”的 tx 消融验证，检查是否因 tx 未搜索而困在错误 basin。
+    // 默认 range=0，行为与原始主流程完全一致，不改变默认搜索空间。
+    std::vector<double> tx_candidates{t_curr[0]};
     std::vector<double> ty_candidates{t_curr[1]};
     std::vector<double> tz_candidates{t_curr[2]};
+    if (coarse_tx_range > 1e-9) {
+        tx_candidates.clear();
+        for (double tx = t_curr[0] - coarse_tx_range; tx <= t_curr[0] + coarse_tx_range + 1e-12; tx += coarse_tx_step) {
+            tx_candidates.push_back(tx);
+        }
+    }
     if (coarse_ty_range > 1e-9) {
         ty_candidates.clear();
         for (double ty = t_curr[1] - coarse_ty_range; ty <= t_curr[1] + coarse_ty_range + 1e-12; ty += coarse_ty_step) {
@@ -1184,44 +1196,59 @@ int main(int argc, char** argv) {
 
     int iter = 0;
     const int steps = static_cast<int>(std::floor((2.0 * angle_range) / angle_step)) + 1;
-    const int total_iters = steps * steps * steps * static_cast<int>(ty_candidates.size()) * static_cast<int>(tz_candidates.size());
+    const int total_iters = steps * steps * steps
+                          * static_cast<int>(tx_candidates.size())
+                          * static_cast<int>(ty_candidates.size())
+                          * static_cast<int>(tz_candidates.size());
+    double best_score_tx_fixed = -1e8;
     
     std::cout << "  Search space: " << steps << "^3 = " << total_iters << " candidates" << std::endl;
     std::cout << "  Angle range: ±" << (angle_range * 180.0 / M_PI) << " degrees" << std::endl;
 
-    std::cout << "  TY candidates: " << ty_candidates.size() << ", TZ candidates: " << tz_candidates.size() << std::endl;
+    std::cout << "  TX candidates: " << tx_candidates.size()
+              << ", TY candidates: " << ty_candidates.size()
+              << ", TZ candidates: " << tz_candidates.size() << std::endl;
 
-    for (double ty : ty_candidates) {
-        for (double tz : tz_candidates) {
-            for (double rx = r_curr[0] - angle_range; rx <= r_curr[0] + angle_range + 1e-9; rx += angle_step) {
-                for (double ry = r_curr[1] - angle_range; ry <= r_curr[1] + angle_range + 1e-9; ry += angle_step) {
-                    for (double rz = r_curr[2] - angle_range; rz <= r_curr[2] + angle_range + 1e-9; rz += angle_step) {
-                        double r_try[3] = {rx, ry, rz};
-                        double t_try[3] = {t_curr[0], ty, tz};
+    for (double tx : tx_candidates) {
+        for (double ty : ty_candidates) {
+            for (double tz : tz_candidates) {
+                for (double rx = r_curr[0] - angle_range; rx <= r_curr[0] + angle_range + 1e-9; rx += angle_step) {
+                    for (double ry = r_curr[1] - angle_range; ry <= r_curr[1] + angle_range + 1e-9; ry += angle_step) {
+                        for (double rz = r_curr[2] - angle_range; rz <= r_curr[2] + angle_range + 1e-9; rz += angle_step) {
+                            double r_try[3] = {rx, ry, rz};
+                            double t_try[3] = {tx, ty, tz};
 
-                        Eigen::Vector3d t_vec(t_try[0], t_try[1], t_try[2]);
-                        Eigen::Matrix3d R_mat;
-                        ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
+                            Eigen::Vector3d t_vec(t_try[0], t_try[1], t_try[2]);
+                            Eigen::Matrix3d R_mat;
+                            ceres::AngleAxisToRotationMatrix(r_try, R_mat.data());
 
-                        double score = -1e6;
-                        if (use_edge) {
-                            score = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
-                        } else if (use_semantic) {
-                            score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
-                        }
+                            double score = -1e6;
+                            if (use_edge) {
+                                score = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R_mat, t_vec);
+                            } else if (use_semantic) {
+                                score = MaskIntensityVarianceScore(points_for_opt, semantic_map, R_rect, P_rect, W, H, R_mat, t_vec);
+                            }
 
 
-                        // 【修复核心 2】：只有得分有效 (大于-1e5) 且优于当前最好成绩，才更新
-                        if (score > best_score && score > -1e5) {
-                            best_score = score;
-                            std::copy(r_try, r_try + 3, best_r);
-                            std::copy(t_try, t_try + 3, best_t);
-                        }
+                            // 用于与“原始tx固定版本”做最小对比（同一轮搜索内统计）
+                            if (std::abs(tx - t_curr[0]) < 1e-12 && score > best_score_tx_fixed) {
+                                best_score_tx_fixed = score;
+                            }
 
-                        iter++;
-                        if (iter % 2000 == 0) {
-                            std::cout << "  Progress: " << iter << "/" << total_iters
-                                      << " (" << (iter * 100 / total_iters) << "%), Best Score: " << best_score << std::endl;
+                            // 【修复核心 2】：只有得分有效 (大于-1e5) 且优于当前最好成绩，才更新
+                            if (score > best_score && score > -1e5) {
+                                best_score = score;
+                                std::copy(r_try, r_try + 3, best_r);
+                                std::copy(t_try, t_try + 3, best_t);
+                            }
+
+                            iter++;
+                            if (iter % 2000 == 0) {
+                                std::cout << "  Progress: " << iter << "/" << total_iters
+                                          << " (" << (iter * 100 / total_iters) << "%), Best Score: " << best_score << std::endl;
+                            }
+
+
                         }
                     }
                 }
@@ -1230,6 +1257,11 @@ int main(int argc, char** argv) {
     }
     
     std::cout << "  Coarse Search Complete. Best Score: " << best_score << std::endl;
+    if (tx_candidates.size() > 1) {
+        std::cout << "  Coarse Compare (tx fixed vs tx search): fixed_tx_best=" << best_score_tx_fixed
+                  << ", tx_search_best=" << best_score
+                  << ", delta=" << (best_score - best_score_tx_fixed) << std::endl;
+    }
     std::cout << "  R: [" << best_r[0] << ", " << best_r[1] << ", " << best_r[2] << "]" << std::endl;
     std::cout << "  T: [" << best_t[0] << ", " << best_t[1] << ", " << best_t[2] << "]" << std::endl;
     
