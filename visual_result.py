@@ -397,6 +397,8 @@ Examples:
                         help="Point source for visualization: edge(optimizer target), all(full points), auto(fallback).")
     parser.add_argument("--ab_extrinsic_compare", action="store_true",
                         help="外参方向A/B验证：比较当前外参与逆外参的投影统计与叠加图。")
+    parser.add_argument("--rectify_compare", action="store_true",
+                        help="整流约定A/B验证：比较使用R_rect与跳过R_rect的投影统计与叠加图。")
     
     args = parser.parse_args()
 
@@ -428,7 +430,8 @@ Examples:
         return 1
 
     # 2. 加载相机内参/整流/投影矩阵
-    K, R_rect, P_rect = load_kitti_calib(args.calib_file)
+    K, R_rect_loaded, P_rect = load_kitti_calib(args.calib_file)
+    R_rect = R_rect_loaded
     if args.skip_rectification:
         print("[Info] Skipping rectification (R_rect = Identity)")
         R_rect = np.eye(3)
@@ -484,6 +487,62 @@ Examples:
     
     print(f"[Info] Rotation (angle-axis): {r_vec}")
     print(f"[Info] Translation (meters): {t_vec}")
+
+    # 整流约定A/B验证（最小侵入，不改变默认主流程）
+    # A: 使用R_rect（默认流程）
+    # B: 跳过R_rect（等价于 --skip_rectification）
+    if args.rectify_compare:
+        h, w = img.shape[:2]
+        R_use = R
+        t_use = t_vec
+        R_rect_a = R_rect_loaded
+        R_rect_b = np.eye(3)
+
+        stats_a = compute_projection_stats(points, R_rect_a, P_rect, R_use, t_use, w, h)
+        stats_b = compute_projection_stats(points, R_rect_b, P_rect, R_use, t_use, w, h)
+
+        print("\n[Rectify Compare] Rectification convention check")
+        print("  A (use R_rect):")
+        print(f"    total={stats_a['total']}, projected_success={stats_a['projected_success']}, "
+              f"in_image={stats_a['in_image']}, behind_ratio={stats_a['behind_ratio']:.6f}")
+        print("  B (skip R_rect):")
+        print(f"    total={stats_b['total']}, projected_success={stats_b['projected_success']}, "
+              f"in_image={stats_b['in_image']}, behind_ratio={stats_b['behind_ratio']:.6f}")
+
+        img_a = img.copy()
+        if points:
+            img_a = project_points(img_a, points, K, R_rect_a, P_rect, R_use, t_use, subsample=args.subsample)
+        if lines_3d:
+            img_a = project_3d_lines(img_a, lines_3d, K, R_rect_a, P_rect, R_use, t_use)
+        img_a = add_legend(img_a)
+
+        img_b = img.copy()
+        if points:
+            img_b = project_points(img_b, points, K, R_rect_b, P_rect, R_use, t_use, subsample=args.subsample)
+        if lines_3d:
+            img_b = project_3d_lines(img_b, lines_3d, K, R_rect_b, P_rect, R_use, t_use)
+        img_b = add_legend(img_b)
+
+        if not args.output:
+            frame_id = os.path.basename(args.feature_base)
+            output_dir = 'result/visualization'
+            os.makedirs(output_dir, exist_ok=True)
+            base_output = os.path.join(output_dir, f"{frame_id}_rectify_compare")
+        else:
+            out_root, out_ext = os.path.splitext(args.output)
+            if not out_ext:
+                out_ext = ".png"
+            base_output = out_root
+
+        output_a = f"{base_output}_A_use_rrect.png"
+        output_b = f"{base_output}_B_skip_rrect.png"
+        os.makedirs(os.path.dirname(output_a) if os.path.dirname(output_a) else ".", exist_ok=True)
+        os.makedirs(os.path.dirname(output_b) if os.path.dirname(output_b) else ".", exist_ok=True)
+        cv2.imwrite(output_a, img_a)
+        cv2.imwrite(output_b, img_b)
+        print(f"[Rectify Compare] Saved overlay A: {output_a}")
+        print(f"[Rectify Compare] Saved overlay B: {output_b}")
+        return 0
 
     # 外参方向A/B验证（最小侵入，不改变默认主流程）
     # A: 当前外参（假定 LiDAR -> Camera）
