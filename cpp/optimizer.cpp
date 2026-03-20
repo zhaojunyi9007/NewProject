@@ -610,6 +610,18 @@ struct LineMatchStats {
     double min_dist = 1e9;
 };
 
+// 用于 line 约束最小诊断，明确每条线为何失活（behind / unmatched / threshold fail）。
+const char* GetLineStatusReason(const LineMatchStats& stats, double threshold) {
+    if (!stats.in_front) return "behind";
+    if (!stats.found_type_match) return "unmatched_type";
+    if (!stats.active) {
+        if (stats.min_dist >= 1e8) return "unmatched_or_invalid_2d";
+        if (stats.min_dist >= threshold) return "threshold_fail";
+        return "inactive_other";
+    }
+    return "active";
+}
+
 LineMatchStats EvaluateLineMatchStats(const Line3D& l3d,
                                       const std::vector<Line2D>& l2ds,
                                       const Eigen::Matrix3d& R_rect,
@@ -1333,6 +1345,10 @@ int main(int argc, char** argv) {
             std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
             int line_blocks_added = 0;
             int line_blocks_active_at_init = 0;
+            int line_behind_count = 0;
+            int line_unmatched_type_count = 0;
+            int line_threshold_fail_count = 0;
+            int line_unmatched_or_invalid_count = 0;
             for (const auto& l3d : lines3d) {
                 auto* line_cost = new LineReprojectionError(
                     l3d,
@@ -1352,18 +1368,35 @@ int main(int argc, char** argv) {
                 if (stats.active) {
                     line_blocks_active_at_init++;
                 }
+                const char* reason = GetLineStatusReason(stats, line_match_threshold);
+                std::string reason_str(reason);
+                if (reason_str == "behind") {
+                    line_behind_count++;
+                } else if (reason_str == "unmatched_type") {
+                    line_unmatched_type_count++;
+                } else if (reason_str == "threshold_fail") {
+                    line_threshold_fail_count++;
+                } else if (reason_str == "unmatched_or_invalid_2d") {
+                    line_unmatched_or_invalid_count++;
+                }
                 if (log_line_debug) {
                     std::cout << "    [LineDebug] type=" << l3d.type
                               << ", in_front=" << (stats.in_front ? "Y" : "N")
                               << ", found_type_match=" << (stats.found_type_match ? "Y" : "N")
                               << ", min_dist=" << stats.min_dist
                               << ", active=" << (stats.active ? "Y" : "N")
+                              << ", reason=" << reason
                               << std::endl;
                 }
             }
 
             std::cout << "  Line constraints added: " << line_blocks_added
                       << ", active at init: " << line_blocks_active_at_init << std::endl;
+            std::cout << "  Line inactive reasons at init: behind=" << line_behind_count
+                      << ", unmatched_type=" << line_unmatched_type_count
+                      << ", threshold_fail=" << line_threshold_fail_count
+                      << ", unmatched_or_invalid_2d=" << line_unmatched_or_invalid_count
+                      << std::endl;
             std::cout << "  Line match threshold: " << line_match_threshold << " px" << std::endl;
             std::cout << "  Line soft penalty: " << (line_soft_penalty ? "enabled" : "disabled")
                       << " (cap=" << line_soft_cap << ")" << std::endl;
