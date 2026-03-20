@@ -182,8 +182,10 @@ class EdgeCalibPipeline:
             "w_consistency": "EDGECALIB_W_CONSISTENCY",
             "coarse_ty_range": "EDGECALIB_COARSE_TY_RANGE",
             "coarse_tz_range": "EDGECALIB_COARSE_TZ_RANGE",
+            "coarse_tx_range": "EDGECALIB_COARSE_TX_RANGE",
             "coarse_ty_step": "EDGECALIB_COARSE_TY_STEP",
             "coarse_tz_step": "EDGECALIB_COARSE_TZ_STEP",
+            "coarse_tx_step": "EDGECALIB_COARSE_TX_STEP",
             "log_line_debug": "EDGECALIB_LOG_LINE_DEBUG",
         }
         for k, env_key in env_map.items():
