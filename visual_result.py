@@ -227,6 +227,54 @@ def project_points(img, points, K, R_rect, P_rect, R, t, subsample=5):
     print(f"[Info] Projected {projected_count} points to image")
     return img
 
+def compute_projection_stats(points, R_rect, P_rect, R, t, img_w, img_h):
+    """
+    计算投影统计信息（用于外参方向A/B验证）
+    返回:
+      total: 原始点数
+      projected_success: z>0.1 的点数（可投影到成像平面前方）
+      in_image: 投影后落在图像内的点数
+      behind: 在相机后方的点数
+      behind_ratio: behind / total
+    """
+    total = len(points)
+    projected_success = 0
+    in_image = 0
+    behind = 0
+
+    if total == 0:
+        return {
+            "total": 0,
+            "projected_success": 0,
+            "in_image": 0,
+            "behind": 0,
+            "behind_ratio": 0.0,
+        }
+
+    for pt in points:
+        p = np.array([pt[0], pt[1], pt[2]], dtype=np.float64)
+        p_cam = R @ p + t
+        p_rect = R_rect @ p_cam
+
+        if p_rect[2] < 0.1:
+            behind += 1
+            continue
+
+        projected_success += 1
+        uv = P_rect @ np.hstack([p_rect, 1.0])
+        u = uv[0] / uv[2]
+        v = uv[1] / uv[2]
+        if 0 <= u < img_w and 0 <= v < img_h:
+            in_image += 1
+
+    return {
+        "total": total,
+        "projected_success": projected_success,
+        "in_image": in_image,
+        "behind": behind,
+        "behind_ratio": behind / float(total),
+    }
+
 def add_legend(img):
     """
     在图像上添加图例
@@ -347,6 +395,8 @@ Examples:
                         help="Point subsampling factor (draw every N-th point)")
     parser.add_argument("--point_source", type=str, default="edge", choices=["edge", "all", "auto"],
                         help="Point source for visualization: edge(optimizer target), all(full points), auto(fallback).")
+    parser.add_argument("--ab_extrinsic_compare", action="store_true",
+                        help="外参方向A/B验证：比较当前外参与逆外参的投影统计与叠加图。")
     
     args = parser.parse_args()
 
@@ -434,6 +484,64 @@ Examples:
     
     print(f"[Info] Rotation (angle-axis): {r_vec}")
     print(f"[Info] Translation (meters): {t_vec}")
+
+    # 外参方向A/B验证（最小侵入，不改变默认主流程）
+    # A: 当前外参（假定 LiDAR -> Camera）
+    # B: 逆外参（用于验证是否存在方向约定错误）
+    if args.ab_extrinsic_compare:
+        h, w = img.shape[:2]
+        R_a = R
+        t_a = t_vec
+        R_b = R_a.T
+        t_b = -R_a.T @ t_a
+
+        stats_a = compute_projection_stats(points, R_rect, P_rect, R_a, t_a, w, h)
+        stats_b = compute_projection_stats(points, R_rect, P_rect, R_b, t_b, w, h)
+
+        print("\n[AB Compare] Extrinsic direction check")
+        print("  A (current, LiDAR->Camera):")
+        print(f"    total={stats_a['total']}, projected_success={stats_a['projected_success']}, "
+              f"in_image={stats_a['in_image']}, behind_ratio={stats_a['behind_ratio']:.6f}")
+        print("  B (inverse transform):")
+        print(f"    total={stats_b['total']}, projected_success={stats_b['projected_success']}, "
+              f"in_image={stats_b['in_image']}, behind_ratio={stats_b['behind_ratio']:.6f}")
+
+        # 叠加图输出（A/B各一张）
+        img_a = img.copy()
+        if points:
+            img_a = project_points(img_a, points, K, R_rect, P_rect, R_a, t_a, subsample=args.subsample)
+        if lines_3d:
+            img_a = project_3d_lines(img_a, lines_3d, K, R_rect, P_rect, R_a, t_a)
+        img_a = add_legend(img_a)
+
+        img_b = img.copy()
+        if points:
+            img_b = project_points(img_b, points, K, R_rect, P_rect, R_b, t_b, subsample=args.subsample)
+        if lines_3d:
+            img_b = project_3d_lines(img_b, lines_3d, K, R_rect, P_rect, R_b, t_b)
+        img_b = add_legend(img_b)
+
+        # 基于输出路径生成A/B文件名
+        if not args.output:
+            frame_id = os.path.basename(args.feature_base)
+            output_dir = 'result/visualization'
+            os.makedirs(output_dir, exist_ok=True)
+            base_output = os.path.join(output_dir, f"{frame_id}_ab_compare")
+        else:
+            out_root, out_ext = os.path.splitext(args.output)
+            if not out_ext:
+                out_ext = ".png"
+            base_output = out_root
+
+        output_a = f"{base_output}_A_current.png"
+        output_b = f"{base_output}_B_inverse.png"
+        os.makedirs(os.path.dirname(output_a) if os.path.dirname(output_a) else ".", exist_ok=True)
+        os.makedirs(os.path.dirname(output_b) if os.path.dirname(output_b) else ".", exist_ok=True)
+        cv2.imwrite(output_a, img_a)
+        cv2.imwrite(output_b, img_b)
+        print(f"[AB Compare] Saved overlay A: {output_a}")
+        print(f"[AB Compare] Saved overlay B: {output_b}")
+        return 0
 
     # 4. 绘制投影
     print("\n[Projecting Features]")
