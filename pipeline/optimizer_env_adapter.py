@@ -28,6 +28,8 @@ ENV_MAP = {
 
 def build_optimizer_env(calibration_cfg: Dict[str, Any], base_env: Dict[str, str] | None = None) -> Tuple[Dict[str, str], bool]:
     env = dict(base_env or os.environ.copy())
+    for env_key in ENV_MAP.values():
+        env.pop(env_key, None)
     ab_cfg = calibration_cfg.get("ab_experiment", {}) if isinstance(calibration_cfg, dict) else {}
     applied = False
     for key, env_key in ENV_MAP.items():
