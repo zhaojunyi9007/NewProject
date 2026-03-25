@@ -516,9 +516,14 @@ struct LineReprojectionError {
                           const Eigen::Matrix<double, 3, 4>& P_rect,
                           double match_threshold = 50.0,
                           bool soft_penalty = false,
-                          double soft_cap = 100.0)
+                          double soft_cap = 100.0,
+                          double behind_penalty = 0.0,
+                          double unmatched_penalty = 0.0,
+                          double threshold_fail_penalty = 0.0)
         : l3d_(l3d), l2ds_(l2ds), R_rect_(R_rect), P_rect_(P_rect),
-          match_threshold_(match_threshold), soft_penalty_(soft_penalty), soft_cap_(soft_cap) {}
+          match_threshold_(match_threshold), soft_penalty_(soft_penalty), soft_cap_(soft_cap),
+          behind_penalty_(behind_penalty), unmatched_penalty_(unmatched_penalty),
+          threshold_fail_penalty_(threshold_fail_penalty) {}
 
     template <typename T>
     bool operator()(const T* const r, const T* const t, T* residual) const {
@@ -539,7 +544,8 @@ struct LineReprojectionError {
         Eigen::Matrix<T, 3, 1> p2_rect = R_rect_.cast<T>() * p2_cam;
 
         if (p1_rect[2] < T(0.1) || p2_rect[2] < T(0.1)) {
-            residual[0] = T(0.0); return true; // Behind camera
+            residual[0] = T(behind_penalty_);
+            return true;
         }
         Eigen::Matrix<T, 4, 1> p1_h(p1_rect[0], p1_rect[1], p1_rect[2], T(1.0));
         Eigen::Matrix<T, 4, 1> p2_h(p2_rect[0], p2_rect[1], p2_rect[2], T(1.0));
@@ -589,7 +595,11 @@ struct LineReprojectionError {
                 residual[0] = soft_cap;
             }
         } else {
-            residual[0] = T(0.0);
+            if (!found) {
+                residual[0] = T(unmatched_penalty_);
+            } else {
+                residual[0] = T(threshold_fail_penalty_);
+            }
         }
         return true;
     }
@@ -601,6 +611,9 @@ struct LineReprojectionError {
     double match_threshold_;
     bool soft_penalty_;
     double soft_cap_;
+    double behind_penalty_;
+    double unmatched_penalty_;
+    double threshold_fail_penalty_;
 };
 
 struct LineMatchStats {
@@ -690,6 +703,72 @@ bool IsLineConstraintActive(const Line3D& l3d,
                             double threshold = 50.0) {
     LineMatchStats stats = EvaluateLineMatchStats(l3d, l2ds, R_rect, P_rect, r, t, threshold);
     return stats.active;
+}
+
+struct LineConstraintSummary {
+    int total = 0;
+    int active = 0;
+    int behind = 0;
+    int unmatched_type = 0;
+    int threshold_fail = 0;
+    int unmatched_or_invalid_2d = 0;
+    int inactive_other = 0;
+    double min_dist_sum = 0.0;
+    int min_dist_count = 0;
+};
+
+LineConstraintSummary SummarizeLineConstraints(const std::vector<Line3D>& lines3d,
+                                               const std::vector<Line2D>& lines2d,
+                                               const Eigen::Matrix3d& R_rect,
+                                               const Eigen::Matrix<double, 3, 4>& P_rect,
+                                               const double* r,
+                                               const double* t,
+                                               double threshold) {
+    LineConstraintSummary summary;
+    summary.total = static_cast<int>(lines3d.size());
+    for (const auto& l3d : lines3d) {
+        LineMatchStats stats = EvaluateLineMatchStats(l3d, lines2d, R_rect, P_rect, r, t, threshold);
+        if (stats.active) {
+            summary.active++;
+        }
+        if (stats.min_dist < 1e8) {
+            summary.min_dist_sum += stats.min_dist;
+            summary.min_dist_count++;
+        }
+
+        const std::string reason(GetLineStatusReason(stats, threshold));
+        if (reason == "behind") {
+            summary.behind++;
+        } else if (reason == "unmatched_type") {
+            summary.unmatched_type++;
+        } else if (reason == "threshold_fail") {
+            summary.threshold_fail++;
+        } else if (reason == "unmatched_or_invalid_2d") {
+            summary.unmatched_or_invalid_2d++;
+        } else if (reason != "active") {
+            summary.inactive_other++;
+        }
+    }
+    return summary;
+}
+
+void PrintLineConstraintSummary(const std::string& tag,
+                                const LineConstraintSummary& summary,
+                                double threshold) {
+    std::cout << "  [LineSummary][" << tag << "] total=" << summary.total
+              << ", active=" << summary.active
+              << ", behind=" << summary.behind
+              << ", unmatched_type=" << summary.unmatched_type
+              << ", threshold_fail=" << summary.threshold_fail
+              << ", unmatched_or_invalid_2d=" << summary.unmatched_or_invalid_2d
+              << ", inactive_other=" << summary.inactive_other
+              << ", threshold_px=" << threshold;
+    if (summary.min_dist_count > 0) {
+        std::cout << ", avg_min_dist=" << (summary.min_dist_sum / summary.min_dist_count);
+    } else {
+        std::cout << ", avg_min_dist=NA";
+    }
+    std::cout << std::endl;
 }
 
 bool GetEnvBool(const char* name, bool default_value) {
@@ -1292,6 +1371,9 @@ int main(int argc, char** argv) {
         const double line_match_threshold = GetEnvDouble("EDGECALIB_LINE_MATCH_THRESHOLD", 50.0);
         const bool line_soft_penalty = GetEnvBool("EDGECALIB_LINE_SOFT_PENALTY", false);
         const double line_soft_cap = GetEnvDouble("EDGECALIB_LINE_SOFT_CAP", 100.0);
+        const double line_behind_penalty = GetEnvDouble("EDGECALIB_LINE_BEHIND_PENALTY", 0.0);
+        const double line_unmatched_penalty = GetEnvDouble("EDGECALIB_LINE_UNMATCHED_PENALTY", 0.0);
+        const double line_threshold_fail_penalty = GetEnvDouble("EDGECALIB_LINE_THRESHOLD_FAIL_PENALTY", 0.0);
         const double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 20.0);
         const double w_consistency_env = GetEnvDouble("EDGECALIB_W_CONSISTENCY", 0.0);
         const Eigen::Vector3d t_init_prior(t_curr[0], t_curr[1], t_curr[2]);
@@ -1344,11 +1426,8 @@ int main(int argc, char** argv) {
         if (use_line_constraints && !lines3d.empty() && !lines2d.empty()) {
             std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
             int line_blocks_added = 0;
-            int line_blocks_active_at_init = 0;
-            int line_behind_count = 0;
-            int line_unmatched_type_count = 0;
-            int line_threshold_fail_count = 0;
-            int line_unmatched_or_invalid_count = 0;
+            const LineConstraintSummary init_line_summary = SummarizeLineConstraints(
+                lines3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
             for (const auto& l3d : lines3d) {
                 auto* line_cost = new LineReprojectionError(
                     l3d,
@@ -1357,29 +1436,19 @@ int main(int argc, char** argv) {
                     P_rect,
                     line_match_threshold,
                     line_soft_penalty,
-                    line_soft_cap);                    
+                    line_soft_cap,
+                    line_behind_penalty,
+                    line_unmatched_penalty,
+                    line_threshold_fail_penalty);                    
                 problem.AddResidualBlock(
                     new ceres::NumericDiffCostFunction<LineReprojectionError, ceres::CENTRAL, 1, 3, 3>(line_cost),
                     new ceres::HuberLoss(1.0),
                     r_curr,
                     t_curr);
                 line_blocks_added++;
-                LineMatchStats stats = EvaluateLineMatchStats(l3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
-                if (stats.active) {
-                    line_blocks_active_at_init++;
-                }
-                const char* reason = GetLineStatusReason(stats, line_match_threshold);
-                std::string reason_str(reason);
-                if (reason_str == "behind") {
-                    line_behind_count++;
-                } else if (reason_str == "unmatched_type") {
-                    line_unmatched_type_count++;
-                } else if (reason_str == "threshold_fail") {
-                    line_threshold_fail_count++;
-                } else if (reason_str == "unmatched_or_invalid_2d") {
-                    line_unmatched_or_invalid_count++;
-                }
                 if (log_line_debug) {
+                    LineMatchStats stats = EvaluateLineMatchStats(l3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
+                    const char* reason = GetLineStatusReason(stats, line_match_threshold);
                     std::cout << "    [LineDebug] type=" << l3d.type
                               << ", in_front=" << (stats.in_front ? "Y" : "N")
                               << ", found_type_match=" << (stats.found_type_match ? "Y" : "N")
@@ -1391,15 +1460,15 @@ int main(int argc, char** argv) {
             }
 
             std::cout << "  Line constraints added: " << line_blocks_added
-                      << ", active at init: " << line_blocks_active_at_init << std::endl;
-            std::cout << "  Line inactive reasons at init: behind=" << line_behind_count
-                      << ", unmatched_type=" << line_unmatched_type_count
-                      << ", threshold_fail=" << line_threshold_fail_count
-                      << ", unmatched_or_invalid_2d=" << line_unmatched_or_invalid_count
-                      << std::endl;
+                      << ", active at init: " << init_line_summary.active << std::endl;
+            PrintLineConstraintSummary("init", init_line_summary, line_match_threshold);
+                      
             std::cout << "  Line match threshold: " << line_match_threshold << " px" << std::endl;
             std::cout << "  Line soft penalty: " << (line_soft_penalty ? "enabled" : "disabled")
                       << " (cap=" << line_soft_cap << ")" << std::endl;
+            std::cout << "  Line hard penalties (when soft disabled): behind=" << line_behind_penalty
+                      << ", unmatched=" << line_unmatched_penalty
+                      << ", threshold_fail=" << line_threshold_fail_penalty << std::endl;         
         } else if (!use_line_constraints) {
             std::cout << "  Line constraints: disabled by EDGECALIB_USE_LINE_CONSTRAINT" << std::endl;
         }
@@ -1437,6 +1506,11 @@ int main(int argc, char** argv) {
         std::cout << "  " << summary.BriefReport() << std::endl;
         std::cout << "  Final R: [" << r_curr[0] << ", " << r_curr[1] << ", " << r_curr[2] << "]" << std::endl;
         std::cout << "  Final T: [" << t_curr[0] << ", " << t_curr[1] << ", " << t_curr[2] << "]" << std::endl;
+        if (use_line_constraints && !lines3d.empty() && !lines2d.empty()) {
+            const LineConstraintSummary final_line_summary = SummarizeLineConstraints(
+                lines3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
+            PrintLineConstraintSummary("final", final_line_summary, line_match_threshold);
+        }
     } else {
         std::cout << "\n[Stage 3] Skipped (no edge field or semantic map for fine optimization)" << std::endl;
     }

@@ -106,7 +106,7 @@ calibration:
     enabled: true
     max_iterations: 100
     huber_loss_threshold: 5.0  # Huber核函数阈值
-    line_match_threshold: 50.0  # 线匹配阈值 (pixels)
+    line_match_threshold: 300.0  # 线匹配阈值 (pixels)
   
   # 置信度检查与时序平滑
   temporal_validation:
@@ -122,7 +122,7 @@ calibration:
     # 是否启用线约束（建议默认 false，待线匹配稳定后再开启）
     use_line_constraint: true
     # 线匹配阈值（像素）
-    line_match_threshold: 50
+    line_match_threshold: 300
     # 线约束软惩罚（避免 unmatched 全部归零）
     line_soft_penalty: false
     line_soft_cap: 100
