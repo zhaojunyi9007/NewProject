@@ -16,8 +16,7 @@
 ## 2. 当前输入/输出契约（冻结）
 
 ### 2.1 配置入口
-- 主配置：`config.yaml`
-- Stage 1 新增镜像入口：`configs/default.yaml`（内容与 `config.yaml` 一致）
+- 唯一主配置入口：`configs/default.yaml`
 
 ### 2.2 关键输出目录（由配置 `data.*_output_dir` 决定）
 - SAM 特征：`result/sam_features`
@@ -38,7 +37,14 @@
   - `experiments/line_constraint_ab_test.py`
   - `experiments/check_lines.py`
   - `experiments/check_features.py`
-- 在仓库根目录保留同名兼容入口脚本，转发至 `experiments/` 中对应实现。
+- 已移除仓库根目录 legacy 兼容脚本入口，避免影子入口。
+
+## 3.1 插件化接口（Stage 4）
+
+- 图像特征阶段新增插件接口：`python/features/interfaces.py`。  
+- 默认特征插件实现：`python/features/plugins/sam_subprocess_plugin.py`（保持原有 `python/run_sam.py` 子进程行为）。  
+- 优化器约束新增适配器接口：`pipeline/optimizer_constraint_adapter.py`。  
+- 默认约束适配器仍使用既有 `ab_experiment -> ENV` 映射，行为保持不变。
 
 ## 4. 非目标（本阶段明确不做）
 
@@ -51,4 +57,4 @@
 
 若 Stage 1 调整引起任何问题，可按提交粒度整体回滚：
 - 回滚目录迁移与兼容入口
-- 回滚 `docs/architecture.md` 与 `configs/default.yaml`
+- 回滚 `docs/architecture.md` 与 `configs/default.yaml

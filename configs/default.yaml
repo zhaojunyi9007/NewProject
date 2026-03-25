@@ -39,9 +39,13 @@ frames:
 sam:
   checkpoint_path: "/gz-data/model/sam_vit_h_4b8939.pth"
   model_type: "vit_h"
+  feature_plugin: "sam_subprocess"
   points_per_side: 16  # 16x16 网格提示
   pred_iou_thresh: 0.86
   stability_score_thresh: 0.92
+  mask_alignment:
+    enabled: false
+    output_dir: "result/mask_alignment"
 
 # ========================================
 # LiDAR 特征提取配置
@@ -88,6 +92,7 @@ lidar:
 # 标定优化配置
 # ========================================
 calibration:
+  constraint_adapter: "legacy_env_constraints"
   # 初始外参（如果为空则使用粗搜索结果）
   initial_extrinsic:
     rotation: [0.0, 0.0, 0.0]      # rx, ry, rz (angle-axis)
