@@ -6,7 +6,7 @@ from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 
 class FeatureExtractor:
     """
-    统一的特征提取器：使用SAM进行分割，提取mask、2D线特征等
+    统一的特征提取器:使用SAM进行分割,提取mask、2D线特征等
     """
     def __init__(self, checkpoint_path, model_type="vit_h", device=None):
         # 加载 SAM 模型
