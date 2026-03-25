@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
+import os
 
 import yaml
 
@@ -85,23 +86,35 @@ def parse_frame_ids(frame_ids_text: str | None) -> list[int] | None:
 
 
 def create_output_dirs(config: Dict[str, Any]) -> None:
-    dirs = [
-        config["data"]["result_dir"],
-        config["data"]["sam_output_dir"],
-        config["data"]["lidar_output_dir"],
-        config["data"]["calib_output_dir"],
-        config["data"]["visual_output_dir"],
+    data_cfg = config.get("data", {})
+    output_keys = [
+        "result_dir",
+        "sam_output_dir",
+        "lidar_output_dir",
+        "calib_output_dir",
+        "visual_output_dir",
     ]
-    for d in dirs:
-        Path(d).mkdir(parents=True, exist_ok=True)
+    for key in output_keys:
+        path = data_cfg.get(key)
+        if path:
+            os.makedirs(path, exist_ok=True)
 
 
 def get_frame_list(config: Dict[str, Any]) -> list[int]:
-    mode = config["frames"]["mode"]
+    frames_cfg = config.get("frames", {})
+    mode = frames_cfg.get("mode", "select")
     if mode == "select":
-        return config["frames"]["frame_ids"]
-    if mode == "all":
-        velodyne_dir = config["data"]["velodyne_dir"]
-        bin_files = sorted(Path(velodyne_dir).glob("*.bin"))
-        return [int(f.stem) for f in bin_files]
-    raise ValueError(f"未知的处理模式: {mode}")
+        return [int(x) for x in frames_cfg.get("frame_ids", [])]
+
+    image_dir = config.get("data", {}).get("image_dir", "")
+    if not image_dir or not os.path.isdir(image_dir):
+        return []
+
+    frame_ids: list[int] = []
+    for name in os.listdir(image_dir):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() != ".png" or not stem.isdigit():
+            continue
+        frame_ids.append(int(stem))
+    frame_ids.sort()
+    return frame_ids

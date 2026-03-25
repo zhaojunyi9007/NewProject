@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import os
-import subprocess
 
 from pipeline.context import RuntimeContext
+from pipeline.feature_plugin_registry import get_feature_plugin
+from python.features.interfaces import FeatureFrameContext
 
 
 def run(context: RuntimeContext) -> None:
@@ -14,7 +15,8 @@ def run(context: RuntimeContext) -> None:
 
     image_dir = context.config["data"]["image_dir"]
     output_dir = context.config["data"]["sam_output_dir"]
-    checkpoint = context.config["sam"]["checkpoint_path"]
+    plugin = get_feature_plugin(context.config)
+    print(f"[Info] SAM特征插件: {plugin.name}")
 
     for frame_id in context.frame_ids:
         img_path = os.path.join(image_dir, f"{frame_id:010d}.png")
@@ -23,12 +25,13 @@ def run(context: RuntimeContext) -> None:
             continue
 
         print(f"\n处理帧 {frame_id:010d}...")
-        cmd = [
-            "python", "python/run_sam.py",
-            "--image", img_path,
-            "--checkpoint", checkpoint,
-            "--output_dir", output_dir,
-        ]
-        subprocess.run(cmd, check=True)
+        plugin.run_frame(
+            FeatureFrameContext(
+                frame_id=frame_id,
+                image_path=img_path,
+                output_dir=output_dir,
+                config=context.config,
+            )
+        )
 
     print(f"\n[完成] SAM特征已保存到: {output_dir}")

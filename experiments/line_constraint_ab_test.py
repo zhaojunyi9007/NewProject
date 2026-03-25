@@ -133,7 +133,7 @@ def run_one(cfg, frame_id: int, mode: str, out_dir: str, env_base: dict, init_r,
 
 def main():
     parser = argparse.ArgumentParser(description="Line constraints ON/OFF 最小A/B实验")
-    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--frame_id", type=int, default=None, help="默认取 config.frames.frame_ids 的第一帧")
     parser.add_argument("--output_dir", default="result/ablation_line")
     parser.add_argument(
