@@ -6,7 +6,12 @@ Stage-3: 仅保留 CLI + Runner 调用
 """
 import argparse
 
-from pipeline.context import load_runtime_config, parse_frame_ids, validate_config
+from pipeline.context import (
+    apply_cli_semantic_overrides,
+    load_runtime_config,
+    parse_frame_ids,
+    validate_config,
+)
 from pipeline.runner import PipelineRunner
 
 
@@ -31,6 +36,7 @@ def main():
         (("data", "result_dir"), args.result_dir),
     ]
     config = load_runtime_config(args.config, cli_overrides=cli_overrides)
+    apply_cli_semantic_overrides(config, result_dir=args.result_dir, frame_ids_text=args.frame_ids)
     validate_config(config)
     runner = PipelineRunner(config)
     
