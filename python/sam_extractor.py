@@ -54,9 +54,14 @@ class FeatureExtractor:
         weight_map = np.zeros((h, w), dtype=np.float32)
         mask_id_map = np.zeros((h, w), dtype=np.uint16)
         stability_map = np.zeros((h, w), dtype=np.float32)
-        
-        # 3. 循环处理每个mask
+
+        # --- 新增：计算动态基准尺度 ---
         image_area = h * w
+        max_dim = max(h, w)
+        min_area_thresh = image_area * 0.001  # 动态最小面积 (KITTI上约等于 460)
+        min_arc_length = max_dim * 0.06       # 动态轮廓周长 (KITTI上约等于 75)
+        # ----------------------------
+ 
         for idx, mask in enumerate(masks):
             # 提取掩码元数据
             m_bool = mask['segmentation']
@@ -66,14 +71,14 @@ class FeatureExtractor:
 
             x, y, bw, bh = bbox
             area = mask.get('area', bw * bh)
-            image_area = h * w
-            
-            # 过滤1：超大面积背景（大马路、天空），如果超过图像15%直接丢弃
+
+            # 过滤1：超大面积背景
             if area > image_area * 0.15:
                 continue
-            # 过滤2：极小噪点（细碎树叶）
-            if area < 500:
+            # 过滤2：极小噪点 (修改为动态比例)
+            if area < min_area_thresh:
                 continue
+
             # 过滤3：纯天上物体（物体最底端 y+bh 都在图像上半部，多为树冠）
             if (y + bh) < h * 0.3:
                 continue
@@ -102,24 +107,17 @@ class FeatureExtractor:
             contours, _ = cv2.findContours(edge_strength, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             for cnt in contours:
-                # 绘制当前轮廓的临时掩码
                 edge_mask = np.zeros((h, w), dtype=np.uint8)
                 cv2.drawContours(edge_mask, [cnt], -1, 255, 1)
-            
-                # 使用 mask 提取原图像素计算标准差(自适应滤波)
                 pixels = image[edge_mask == 255]
             
                 if len(pixels) == 0: 
                     continue
 
-                # 仅保留高置信度的边界
-                if np.std(pixels) > 10 and cv2.arcLength(cnt, True) >= 80:
-                    # 计算注意力权重：稳定性 * 几何先验加权
-                    # 如果是结构化长边缘，赋予更高的注意力权重
+                # 仅保留高置信度的边界 (修改 arcLength 阈值为动态比例)
+                if np.std(pixels) > 10 and cv2.arcLength(cnt, True) >= min_arc_length:
                     weight = stability * (1.5 if is_structural else 1.0)
-                    
                     cv2.drawContours(final_edge_map, [cnt], -1, 255, 1)
-                    # 将权重绘制到权重图中，供后续优化器使用
                     cv2.drawContours(weight_map, [cnt], -1, float(weight), 1)
 
             # 生成mask id map (保留稳定性更高的掩码)
@@ -141,11 +139,16 @@ class FeatureExtractor:
         # 输入要求：边缘是白色(255)，背景是黑色(0) -> 需要反转一下给 distanceTransform
         # distanceTransform 计算的是"到零像素的距离"，所以我们要把边缘变成0
         dist_map = cv2.distanceTransform(255 - edge_map, cv2.DIST_L2, 5)
+
+        # --- 修改：使用基于图像尺寸的动态归一化尺度 ---
+        h, w = edge_map.shape[:2]
+        # 默认使用最大边长的 15% 作为距离场截断值，也可通过环境变量强行指定
+        default_max_dist = max(h, w) * 0.15 
+        FIXED_MAX_DIST = float(os.environ.get("SAM_MAX_DIST", default_max_dist))
         
         # 使用固定的最大距离进行归一化（单位：像素）
         # KITTI图像尺寸约 1242x375，选择200像素作为最大有效距离
         # 这样可以保证不同帧之间的残差尺度一致
-        FIXED_MAX_DIST = 200.0  # 像素
         dist_map = np.clip(dist_map, 0, FIXED_MAX_DIST) / FIXED_MAX_DIST
         
         actual_max = np.max(dist_map * FIXED_MAX_DIST)
@@ -182,6 +185,13 @@ class FeatureExtractor:
         line_mask = np.zeros((h, w), dtype=np.uint8)
         min_length = 20  # 最小线段长度（像素）
         top_region = int(h * 0.4)  # 图像上方区域（电缆）
+
+        # --- 新增：计算动态线段长度阈值 ---
+        max_dim = max(h, w)
+        min_length = max_dim * 0.015       # 全局最小长度 (KITTI上约 18 像素)
+        min_ground_length = max_dim * 0.06 # 地面长线阈值 (KITTI上约 75 像素)
+        min_sky_length = max_dim * 0.03    # 天空短线阈值 (KITTI上约 37 像素)
+        # --------------------------------
         
         for line in lines:
             x1, y1, x2, y2 = line[0]
@@ -212,12 +222,12 @@ class FeatureExtractor:
                 # 【情况A：在地面】
                 # 地面上有很多斑马线、阴影。我们只想要铁轨！
                 # 铁轨通常很长，所以把长度小于 80 像素的短线全部干掉。
-                if length < 80:
+                if length < min_ground_length:
                     continue 
             else:
                 # 【情况B：在天上或背景里】
                 # 天上的横线可能是电缆，但也可能是树枝。把小于 40 的短横线干掉。
-                if line_type == 0 and length < 40: 
+                if line_type == 0 and length < min_sky_length: 
                     continue
             # ==============================
             
