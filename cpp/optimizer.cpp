@@ -167,7 +167,10 @@ int GetMaxLabel(const cv::Mat& semantic_map) {
         return static_cast<int>(max_v);
     }
     if (semantic_map.type() == CV_8U) {
-        return 255;
+        double min_v = 0.0;
+        double max_v = 0.0;
+        cv::minMaxLoc(semantic_map, &min_v, &max_v);
+        return static_cast<int>(max_v);
     }
     return 0;
 }

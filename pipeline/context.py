@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 import os
 
@@ -83,6 +82,27 @@ def parse_frame_ids(frame_ids_text: str | None) -> list[int] | None:
     if not items:
         return None
     return [int(x) for x in items]
+
+
+def apply_cli_semantic_overrides(config: Dict[str, Any], result_dir: str | None, frame_ids_text: str | None) -> None:
+    data_cfg = config.setdefault("data", {})
+    frames_cfg = config.setdefault("frames", {})
+
+    if result_dir:
+        data_cfg["result_dir"] = result_dir
+        linked_dirs = {
+            "sam_output_dir": "sam_features",
+            "lidar_output_dir": "lidar_features",
+            "calib_output_dir": "calibration",
+            "visual_output_dir": "visualization",
+        }
+        for key, default_leaf in linked_dirs.items():
+            current_path = str(data_cfg.get(key, "")).strip()
+            leaf = os.path.basename(current_path) if current_path else default_leaf
+            data_cfg[key] = os.path.join(result_dir, leaf)
+
+    if frame_ids_text:
+        frames_cfg["mode"] = "select"
 
 
 def create_output_dirs(config: Dict[str, Any]) -> None:
