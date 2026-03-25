@@ -15,11 +15,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from pipeline.context import load_runtime_config, parse_frame_ids, validate_config
+from pipeline.optimizer_env_adapter import build_optimizer_env
+
 class EdgeCalibPipeline:
-    def __init__(self, config_path="config.yaml"):
+    def __init__(self, config_path="config.yaml", config=None):
         """初始化标定流程"""
-        with open(config_path, 'r', encoding='utf-8') as f:
-            self.config = yaml.safe_load(f)
+        if config is not None:
+            self.config = config
+        else:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self.config = yaml.safe_load(f)
         
         # 创建输出目录
         self._create_output_dirs()
@@ -169,29 +175,12 @@ class EdgeCalibPipeline:
             init_r, init_t = velo_to_cam
             print("[Info] 使用calib_velo_to_cam.txt中的R/T作为初始外参")
 
-        # A/B实验参数（通过环境变量传递给 C++ optimizer）
-        ab_cfg = self.config.get('calibration', {}).get('ab_experiment', {})
-        optimizer_env = os.environ.copy()
-        env_map = {
-            "opt_translation": "EDGECALIB_OPT_TRANSLATION",
-            "use_line_constraint": "EDGECALIB_USE_LINE_CONSTRAINT",
-            "line_match_threshold": "EDGECALIB_LINE_MATCH_THRESHOLD",
-            "line_soft_penalty": "EDGECALIB_LINE_SOFT_PENALTY",
-            "line_soft_cap": "EDGECALIB_LINE_SOFT_CAP",
-            "t_prior_weight": "EDGECALIB_T_PRIOR_WEIGHT",
-            "w_consistency": "EDGECALIB_W_CONSISTENCY",
-            "coarse_ty_range": "EDGECALIB_COARSE_TY_RANGE",
-            "coarse_tz_range": "EDGECALIB_COARSE_TZ_RANGE",
-            "coarse_tx_range": "EDGECALIB_COARSE_TX_RANGE",
-            "coarse_ty_step": "EDGECALIB_COARSE_TY_STEP",
-            "coarse_tz_step": "EDGECALIB_COARSE_TZ_STEP",
-            "coarse_tx_step": "EDGECALIB_COARSE_TX_STEP",
-            "log_line_debug": "EDGECALIB_LOG_LINE_DEBUG",
-        }
-        for k, env_key in env_map.items():
-            if k in ab_cfg and ab_cfg[k] is not None:
-                optimizer_env[env_key] = str(ab_cfg[k])
-        if ab_cfg:
+        # A/B实验参数（通过统一 adapter 传递给 C++ optimizer）
+        optimizer_env, has_ab_overrides = build_optimizer_env(
+            self.config.get("calibration", {}),
+            os.environ.copy()
+        )
+        if has_ab_overrides:
             print("[Info] 已加载 calibration.ab_experiment 参数并传递给 optimizer")
         
         for frame_id in self.frame_ids:
@@ -289,17 +278,28 @@ class EdgeCalibPipeline:
 
 def main():
     parser = argparse.ArgumentParser(description="EdgeCalib v2.0 完整标定流程")
-    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument("--config", default="configs/default.yaml", help="配置文件路径")
     parser.add_argument("--stage", choices=["sam", "lidar", "calib", "visual", "all"], 
                         default="all", help="执行阶段")
     parser.add_argument("--skip-sam", action="store_true", help="跳过SAM提取")
     parser.add_argument("--skip-lidar", action="store_true", help="跳过LiDAR提取")
     parser.add_argument("--skip-calib", action="store_true", help="跳过标定优化")
     parser.add_argument("--skip-visual", action="store_true", help="跳过可视化")
+    parser.add_argument("--frame-ids", default=None, help="CLI覆盖帧ID列表，逗号分隔，如 0,10,20")
+    parser.add_argument("--fusion-window", type=int, default=None, help="CLI覆盖多帧融合窗口")
+    parser.add_argument("--result-dir", default=None, help="CLI覆盖 result_dir（仅入口级覆盖）")
     
     args = parser.parse_args()
     
-    pipeline = EdgeCalibPipeline(args.config)
+    cli_overrides = [
+        (("frames", "frame_ids"), parse_frame_ids(args.frame_ids)),
+        (("frames", "fusion_window"), args.fusion_window),
+        (("data", "result_dir"), args.result_dir),
+    ]
+    config = load_runtime_config(args.config, cli_overrides=cli_overrides)
+    validate_config(config)
+
+    pipeline = EdgeCalibPipeline(args.config, config=config)
     
     if args.stage == "sam":
         pipeline.run_sam_extraction()
