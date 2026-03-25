@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from pipeline.context import RuntimeContext
-from pipeline.optimizer_env_adapter import build_optimizer_env
+from pipeline.optimizer_constraint_adapter import get_optimizer_constraint_adapter
 
 
 def _load_velo_to_cam_extrinsic(config):
@@ -56,10 +56,9 @@ def run(context: RuntimeContext) -> None:
         init_r, init_t = velo_to_cam
         print("[Info] 使用calib_velo_to_cam.txt中的R/T作为初始外参")
 
-    optimizer_env, has_ab_overrides = build_optimizer_env(
-        context.config.get("calibration", {}),
-        os.environ.copy(),
-    )
+    adapter = get_optimizer_constraint_adapter(context.config)
+    optimizer_env, has_ab_overrides = adapter.build_env(context.config, os.environ.copy())
+    print(f"[Info] 优化约束适配器: {adapter.name}")
     if has_ab_overrides:
         print("[Info] 已加载 calibration.ab_experiment 参数并传递给 optimizer")
 
