@@ -4,13 +4,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
 import yaml
 
 
 ConfigPath = Tuple[str, ...]
+
+
+@dataclass
+class RuntimeContext:
+    config: Dict[str, Any]
+    frame_ids: list[int]
 
 
 def _set_nested(config: Dict[str, Any], path: ConfigPath, value: Any) -> None:
@@ -74,3 +82,26 @@ def parse_frame_ids(frame_ids_text: str | None) -> list[int] | None:
     if not items:
         return None
     return [int(x) for x in items]
+
+
+def create_output_dirs(config: Dict[str, Any]) -> None:
+    dirs = [
+        config["data"]["result_dir"],
+        config["data"]["sam_output_dir"],
+        config["data"]["lidar_output_dir"],
+        config["data"]["calib_output_dir"],
+        config["data"]["visual_output_dir"],
+    ]
+    for d in dirs:
+        Path(d).mkdir(parents=True, exist_ok=True)
+
+
+def get_frame_list(config: Dict[str, Any]) -> list[int]:
+    mode = config["frames"]["mode"]
+    if mode == "select":
+        return config["frames"]["frame_ids"]
+    if mode == "all":
+        velodyne_dir = config["data"]["velodyne_dir"]
+        bin_files = sorted(Path(velodyne_dir).glob("*.bin"))
+        return [int(f.stem) for f in bin_files]
+    raise ValueError(f"未知的处理模式: {mode}")
