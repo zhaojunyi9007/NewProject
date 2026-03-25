@@ -949,7 +949,7 @@ struct SinglePointEdgeCost {
         double v_f = uv.y() / uv.z();
 
         if (u_f < 0 || u_f >= W_ - 1 || v_f < 0 || v_f >= H_ - 1) {
-            residual[0] = 0.0;
+            residual[0] = 1.0 * pt_.weight; // 给定最大惩罚值（因为距离图归一化到了 0~1）
             return true;
         }
 
