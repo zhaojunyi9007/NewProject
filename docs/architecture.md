@@ -2,14 +2,14 @@
 
 > 本文档用于“冻结现状 + 建立边界”。本阶段不修改算法行为，只整理结构边界与入口。
 
-## 1. 当前主流程（保持不变）
+## 1. 当前主流程（保持核心行为不变）
 
-主入口为 `run_pipeline.py`，阶段顺序如下：
+主入口为 `run_pipeline.py`，通过 `pipeline/runner.py` 调度阶段模块，阶段顺序如下：
 
-1. `run_sam_extraction()`：调用 `python/run_sam.py` 生成图像侧特征
-2. `run_lidar_extraction()`：调用 `build/lidar_extractor` 生成点云侧特征
-3. `run_calibration()`：调用 `build/optimizer` 进行标定优化
-4. `run_visualization()`：调用 `visual_result.py` 输出可视化结果
+1. `pipeline/stages/sam_stage.py`：调用 `python/run_sam.py` 生成图像侧特征
+2. `pipeline/stages/lidar_stage.py`：调用 `build/lidar_extractor` 生成点云侧特征
+3. `pipeline/stages/calib_stage.py`：调用 `build/optimizer` 进行标定优化
+4. `pipeline/stages/visual_stage.py`：调用 `visual_result.py` 输出可视化结果
 
 本阶段不改变上述执行顺序、参数语义和默认行为。
 
