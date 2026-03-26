@@ -69,8 +69,9 @@ void EdgeCalibrator::PerformCoarseSearch() {
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
     double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
 
-    Eigen::Matrix3d init_R;
-    ceres::AngleAxisToRotationMatrix(r_curr_, init_R.data());
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> init_R_row;
+    ceres::AngleAxisToRotationMatrix(r_curr_, init_R_row.data());
+    Eigen::Matrix3d init_R = init_R_row; // Eigen 会自动正确地将 Row-Major 转换为 Col-Major
     Eigen::Vector3d init_t(t_curr_[0], t_curr_[1], t_curr_[2]);
 
     best_score_ = use_edge
@@ -83,8 +84,9 @@ void EdgeCalibrator::PerformCoarseSearch() {
         for (double ry = r_curr_[1] - angle_range; ry <= r_curr_[1] + angle_range + 1e-9; ry += angle_step) {
             for (double rz = r_curr_[2] - angle_range; rz <= r_curr_[2] + angle_range + 1e-9; rz += angle_step) {
                 double r_try[3] = {rx, ry, rz};
-                Eigen::Matrix3d R_try;
-                ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
+                Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_try_row;
+                ceres::AngleAxisToRotationMatrix(r_try, R_try_row.data());
+                Eigen::Matrix3d R_try = R_try_row;
                 Eigen::Vector3d t_try(t_curr_[0], t_curr_[1], t_curr_[2]);
                 double score = use_edge
                     ? EdgeAttractionScore(edge_points_, edge_dist_, edge_weight_, R_rect_, P_rect_, W_, H_, R_try, t_try)
