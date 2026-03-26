@@ -30,6 +30,24 @@ def main():
     parser.add_argument("--frame_start", type=str, default="", help="Start frame ID")
     parser.add_argument("--frame_end", type=str, default="", help="End frame ID")
     parser.add_argument("--max_frames", type=int, default=0, help="Max number of frames to process")
+    parser.add_argument("--points_per_side", type=int, default=16, help="SAM points_per_side")
+    parser.add_argument("--pred_iou_thresh", type=float, default=0.86, help="SAM pred_iou_thresh")
+    parser.add_argument("--stability_score_thresh", type=float, default=0.92, help="SAM stability_score_thresh")
+    parser.add_argument("--min_mask_region_area", type=int, default=500, help="SAM min_mask_region_area")
+    parser.add_argument("--min_mask_area_ratio", type=float, default=0.001, help="Heuristic: minimum mask area ratio")
+    parser.add_argument("--max_background_area_ratio", type=float, default=0.15, help="Heuristic: maximum background area ratio")
+    parser.add_argument("--sky_mask_bottom_ratio", type=float, default=0.3, help="Heuristic: sky mask bottom ratio")
+    parser.add_argument("--ground_region_top_ratio", type=float, default=0.5, help="Heuristic: ground region top ratio")
+    parser.add_argument("--flat_ground_aspect_ratio", type=float, default=3.0, help="Heuristic: flat-ground aspect ratio")
+    parser.add_argument("--structural_aspect_ratio", type=float, default=3.0, help="Heuristic: structural aspect ratio")
+    parser.add_argument("--contour_stddev_threshold", type=float, default=10.0, help="Heuristic: contour stddev threshold")
+    parser.add_argument("--min_arc_length_ratio", type=float, default=0.06, help="Heuristic: min arc length ratio")
+    parser.add_argument("--global_min_line_length_ratio", type=float, default=0.015, help="Heuristic: global min line length ratio")
+    parser.add_argument("--ground_min_line_length_ratio", type=float, default=0.06, help="Heuristic: ground min line length ratio")
+    parser.add_argument("--sky_min_line_length_ratio", type=float, default=0.03, help="Heuristic: sky min line length ratio")
+    parser.add_argument("--fused_top_black_ratio", type=float, default=0.20, help="Heuristic: fused top black ratio")
+    parser.add_argument("--fused_bottom_black_ratio", type=float, default=0.80, help="Heuristic: fused bottom black ratio")
+    parser.add_argument("--distance_max_ratio", type=float, default=0.15, help="Heuristic: distance max ratio")
 
     args = parser.parse_args()
 
@@ -56,7 +74,27 @@ def main():
     extractor = FeatureExtractor(
         checkpoint_path=args.checkpoint,
         model_type=args.model_type,
-        device=args.device
+        device=args.device,
+        points_per_side=args.points_per_side,
+        pred_iou_thresh=args.pred_iou_thresh,
+        stability_score_thresh=args.stability_score_thresh,
+        min_mask_region_area=args.min_mask_region_area,
+        heuristics={
+            "min_mask_area_ratio": args.min_mask_area_ratio,
+            "max_background_area_ratio": args.max_background_area_ratio,
+            "sky_mask_bottom_ratio": args.sky_mask_bottom_ratio,
+            "ground_region_top_ratio": args.ground_region_top_ratio,
+            "flat_ground_aspect_ratio": args.flat_ground_aspect_ratio,
+            "structural_aspect_ratio": args.structural_aspect_ratio,
+            "contour_stddev_threshold": args.contour_stddev_threshold,
+            "min_arc_length_ratio": args.min_arc_length_ratio,
+            "global_min_line_length_ratio": args.global_min_line_length_ratio,
+            "ground_min_line_length_ratio": args.ground_min_line_length_ratio,
+            "sky_min_line_length_ratio": args.sky_min_line_length_ratio,
+            "fused_top_black_ratio": args.fused_top_black_ratio,
+            "fused_bottom_black_ratio": args.fused_bottom_black_ratio,
+            "distance_max_ratio": args.distance_max_ratio,
+        },
     )
 
    # 4. 处理图像

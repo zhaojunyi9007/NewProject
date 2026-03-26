@@ -1,0 +1,144 @@
+#include "include/optimizer_data_loader.h"
+
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
+void CalibHistory::push(const Eigen::Vector3d& r, const Eigen::Vector3d& t, double score) {
+    rotation_history.push_back(r);
+    translation_history.push_back(t);
+    score_history.push_back(score);
+
+    if (rotation_history.size() > static_cast<size_t>(max_history)) {
+        rotation_history.pop_front();
+        translation_history.pop_front();
+        score_history.pop_front();
+    }
+}
+
+bool CalibHistory::is_smooth(const Eigen::Vector3d& r_new, const Eigen::Vector3d& t_new, double threshold) const {
+    if (rotation_history.empty()) return true;
+
+    Eigen::Vector3d r_last = rotation_history.back();
+    Eigen::Vector3d t_last = translation_history.back();
+
+    double r_diff = (r_new - r_last).norm();
+    double t_diff = (t_new - t_last).norm();
+
+    return (r_diff < threshold && t_diff < threshold);
+}
+
+std::pair<Eigen::Vector3d, Eigen::Vector3d> CalibHistory::get_smoothed() const {
+    if (rotation_history.empty()) {
+        return {Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()};
+    }
+
+    Eigen::Vector3d r_mean = Eigen::Vector3d::Zero();
+    Eigen::Vector3d t_mean = Eigen::Vector3d::Zero();
+
+    for (size_t i = 0; i < rotation_history.size(); ++i) {
+        r_mean += rotation_history[i];
+        t_mean += translation_history[i];
+    }
+
+    r_mean /= rotation_history.size();
+    t_mean /= translation_history.size();
+
+    return {r_mean, t_mean};
+}
+
+bool LoadCalibHistory(const std::string& history_file, CalibHistory& history) {
+    if (history_file.empty()) {
+        return false;
+    }
+    std::ifstream file(history_file);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    history.rotation_history.clear();
+    history.translation_history.clear();
+    history.score_history.clear();
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::stringstream ss(line);
+        double rx, ry, rz, tx, ty, tz, score;
+        if (ss >> rx >> ry >> rz >> tx >> ty >> tz >> score) {
+            history.rotation_history.emplace_back(rx, ry, rz);
+            history.translation_history.emplace_back(tx, ty, tz);
+            history.score_history.push_back(score);
+        }
+    }
+    return !history.rotation_history.empty();
+}
+
+bool SaveCalibHistory(const std::string& history_file, const CalibHistory& history) {
+    if (history_file.empty()) {
+        return false;
+    }
+    std::ofstream file(history_file);
+    if (!file.is_open()) {
+        return false;
+    }
+    file << "# rx ry rz tx ty tz score\n";
+    for (size_t i = 0; i < history.rotation_history.size(); ++i) {
+        const auto& r = history.rotation_history[i];
+        const auto& t = history.translation_history[i];
+        double score = 0.0;
+        if (i < history.score_history.size()) {
+            score = history.score_history[i];
+        }
+        file << r.x() << " " << r.y() << " " << r.z() << " "
+             << t.x() << " " << t.y() << " " << t.z() << " " << score << "\n";
+    }
+    return true;
+}
+
+std::vector<PointFeature> LoadEdgePointsCustom(const std::string& filename) {
+    std::vector<PointFeature> pts;
+    std::ifstream fin(filename);
+    std::string line;
+    while (std::getline(fin, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::stringstream ss(line);
+        double x, y, z, val;
+        if (ss >> x >> y >> z >> val) {
+            PointFeature pt;
+            pt.p = Eigen::Vector3d(x, y, z);
+            pt.intensity = val;
+            pt.weight = 1.0;
+            pt.label = 1;
+            pts.push_back(pt);
+        }
+    }
+    return pts;
+}
+
+bool LoadCalib(const std::string& calib_file,
+               Eigen::Matrix3d& K,
+               Eigen::Matrix3d& R_rect,
+               Eigen::Matrix<double, 3, 4>& P_rect,
+               bool* used_default) {
+    if (used_default) {
+        *used_default = false;
+    }
+    if (!calib_file.empty() && IOUtils::LoadKittiCalib(calib_file, K, R_rect, P_rect)) {
+        return true;
+    }
+
+    std::cerr << "[Warning] Using default calibration parameters" << std::endl;
+    K << 721.5, 0, 609.5, 0, 721.5, 172.8, 0, 0, 1;
+
+    R_rect = Eigen::Matrix3d::Identity();
+    P_rect << K(0, 0), K(0, 1), K(0, 2), 0.0,
+              K(1, 0), K(1, 1), K(1, 2), 0.0,
+              K(2, 0), K(2, 1), K(2, 2), 0.0;
+    if (used_default) {
+        *used_default = true;
+    }
+    return true;
+}

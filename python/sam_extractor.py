@@ -8,7 +8,17 @@ class FeatureExtractor:
     """
     统一的特征提取器:使用SAM进行分割,提取mask、2D线特征等
     """
-    def __init__(self, checkpoint_path, model_type="vit_h", device=None):
+     def __init__(
+        self,
+        checkpoint_path,
+        model_type="vit_h",
+        device=None,
+        points_per_side=16,
+        pred_iou_thresh=0.86,
+        stability_score_thresh=0.92,
+        min_mask_region_area=500,
+        heuristics=None,
+    ):
         # 加载 SAM 模型
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -28,13 +38,31 @@ class FeatureExtractor:
         # 设置 16x16 的网格提示生成掩码
         self.mask_generator = SamAutomaticMaskGenerator(
             sam, 
-            points_per_side=16,
-            pred_iou_thresh=0.86,
-            stability_score_thresh=0.92,
+            points_per_side=points_per_side,
+            pred_iou_thresh=pred_iou_thresh,
+            stability_score_thresh=stability_score_thresh,
             crop_n_layers=1,
             crop_n_points_downscale_factor=2,
-            min_mask_region_area=500,
+            min_mask_region_area=min_mask_region_area,
         )
+        self.heuristics = {
+            "min_mask_area_ratio": 0.001,
+            "max_background_area_ratio": 0.15,
+            "sky_mask_bottom_ratio": 0.3,
+            "ground_region_top_ratio": 0.5,
+            "flat_ground_aspect_ratio": 3.0,
+            "structural_aspect_ratio": 3.0,
+            "contour_stddev_threshold": 10.0,
+            "min_arc_length_ratio": 0.06,
+            "global_min_line_length_ratio": 0.015,
+            "ground_min_line_length_ratio": 0.06,
+            "sky_min_line_length_ratio": 0.03,
+            "fused_top_black_ratio": 0.20,
+            "fused_bottom_black_ratio": 0.80,
+            "distance_max_ratio": 0.15,
+        }
+        if isinstance(heuristics, dict):
+            self.heuristics.update(heuristics)
         
         print(f"[SAM] Model loaded successfully")
 
@@ -58,8 +86,8 @@ class FeatureExtractor:
         # --- 新增：计算动态基准尺度 ---
         image_area = h * w
         max_dim = max(h, w)
-        min_area_thresh = image_area * 0.001  # 动态最小面积 (KITTI上约等于 460)
-        min_arc_length = max_dim * 0.06       # 动态轮廓周长 (KITTI上约等于 75)
+        min_area_thresh = image_area * float(self.heuristics["min_mask_area_ratio"])
+        min_arc_length = max_dim * float(self.heuristics["min_arc_length_ratio"])
         # ----------------------------
  
         for idx, mask in enumerate(masks):
@@ -73,17 +101,17 @@ class FeatureExtractor:
             area = mask.get('area', bw * bh)
 
             # 过滤1：超大面积背景
-            if area > image_area * 0.15:
+            if area > image_area * float(self.heuristics["max_background_area_ratio"]):
                 continue
             # 过滤2：极小噪点 (修改为动态比例)
             if area < min_area_thresh:
                 continue
 
             # 过滤3：纯天上物体（物体最底端 y+bh 都在图像上半部，多为树冠）
-            if (y + bh) < h * 0.3:
+            if (y + bh) < h * float(self.heuristics["sky_mask_bottom_ratio"]):
                 continue
             # 过滤4：地面扁平物体（马路上的巨大横向阴影、斑马线）
-            if y > h * 0.5 and bw > bh * 3:
+            if y > h * float(self.heuristics["ground_region_top_ratio"]) and bw > bh * float(self.heuristics["flat_ground_aspect_ratio"]):
                 continue
         
             # 几何过滤逻辑 (空旷场景优先保留长条形结构如护栏、轨道)
@@ -115,7 +143,7 @@ class FeatureExtractor:
                     continue
 
                 # 仅保留高置信度的边界 (修改 arcLength 阈值为动态比例)
-                if np.std(pixels) > 10 and cv2.arcLength(cnt, True) >= min_arc_length:
+                if np.std(pixels) > float(self.heuristics["contour_stddev_threshold"]) and cv2.arcLength(cnt, True) >= min_arc_length:
                     weight = stability * (1.5 if is_structural else 1.0)
                     cv2.drawContours(final_edge_map, [cnt], -1, 255, 1)
                     cv2.drawContours(weight_map, [cnt], -1, float(weight), 1)
@@ -143,7 +171,7 @@ class FeatureExtractor:
         # --- 修改：使用基于图像尺寸的动态归一化尺度 ---
         h, w = edge_map.shape[:2]
         # 默认使用最大边长的 15% 作为距离场截断值，也可通过环境变量强行指定
-        default_max_dist = max(h, w) * 0.15 
+        default_max_dist = max(h, w) * float(self.heuristics["distance_max_ratio"]) 
         FIXED_MAX_DIST = float(os.environ.get("SAM_MAX_DIST", default_max_dist))
         
         # 使用固定的最大距离进行归一化（单位：像素）
@@ -188,9 +216,9 @@ class FeatureExtractor:
 
         # --- 新增：计算动态线段长度阈值 ---
         max_dim = max(h, w)
-        min_length = max_dim * 0.015       # 全局最小长度 (KITTI上约 18 像素)
-        min_ground_length = max_dim * 0.06 # 地面长线阈值 (KITTI上约 75 像素)
-        min_sky_length = max_dim * 0.03    # 天空短线阈值 (KITTI上约 37 像素)
+        min_length = max_dim * float(self.heuristics["global_min_line_length_ratio"])
+        min_ground_length = max_dim * float(self.heuristics["ground_min_line_length_ratio"])
+        min_sky_length = max_dim * float(self.heuristics["sky_min_line_length_ratio"])
         # --------------------------------
         
         for line in lines:
@@ -218,7 +246,7 @@ class FeatureExtractor:
             mid_y = (y1 + y2) / 2.0
             
             # 判断线在图像的下半部(地面)还是上半部(天空/建筑)
-            if mid_y > h * 0.5: 
+            if mid_y > h * float(self.heuristics["ground_region_top_ratio"]): 
                 # 【情况A：在地面】
                 # 地面上有很多斑马线、阴影。我们只想要铁轨！
                 # 铁轨通常很长，所以把长度小于 80 像素的短线全部干掉。
@@ -250,9 +278,9 @@ class FeatureExtractor:
         fused_edge_map = cv2.bitwise_or(edge_map, line_mask)
         h_img, w_img = fused_edge_map.shape
         # 强制抹黑顶部 20% (纯天空和树顶边缘)
-        fused_edge_map[0:int(h_img * 0.20), :] = 0
+        fused_edge_map[0:int(h_img * float(self.heuristics["fused_top_black_ratio"])), :] = 0
         # 强制抹黑底部 20% (本车引擎盖、近处地面的车道线)
-        fused_edge_map[int(h_img * 0.80):h_img, :] = 0
+        fused_edge_map[int(h_img * float(self.heuristics["fused_bottom_black_ratio"])):h_img, :] = 0
 
         dist_map = self.get_distance_transform(fused_edge_map)
         dist_map = cv2.GaussianBlur(dist_map, (5, 5), 0)
