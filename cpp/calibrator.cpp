@@ -1,26 +1,25 @@
-#include "include/common.h"
 #include "include/optimizer_cost_functions.h"
 #include "include/optimizer_data_loader.h"
-#include "include/optimizer_image_utils.h"
 #include "include/optimizer_scoring.h"
-#include <iostream>
-#include <string>
-#include <fstream>
-#include <random>
-#include <map>
+#include "include/common.h"
+
 #include <algorithm>
-#include <deque>
+#include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <map>
 #include <opencv2/opencv.hpp>
-#include <eigen3/Eigen/Core>
-#include <eigen3/Eigen/Geometry>
+#include <random>
+#include <string>
+#include <vector>
+
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
-
+#include <eigen3/Eigen/Core>
+#include <eigen3/Eigen/Geometry>
 
 static CalibHistory g_calib_history;
-
-
 
 bool GetEnvBool(const char* name, bool default_value) {
     const char* value = std::getenv(name);
@@ -38,9 +37,6 @@ double GetEnvDouble(const char* name, double default_value) {
     if (end == value) return default_value;
     return parsed;
 }
-
-
-
 
 // ========================================
 // 主程序

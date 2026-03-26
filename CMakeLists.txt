@@ -52,6 +52,8 @@ target_link_libraries(lidar_extractor
 add_executable(optimizer 
     cpp/optimizer.cpp 
     cpp/io_utils.cpp
+    cpp/optimizer_data_loader.cpp
+    cpp/optimizer_scoring.cpp
 )
 target_link_libraries(optimizer 
     ${PCL_LIBRARIES}
