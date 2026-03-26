@@ -29,9 +29,17 @@ def run(context: RuntimeContext) -> None:
             continue
 
         with open(calib_result_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-            r_vec = lines[1].strip().split()
-            t_vec = lines[2].strip().split()
+            lines = [line.strip() for line in f if line.strip()]
+
+        if len(lines) < 3:
+            print(f"[Warning] 标定结果格式异常(行数不足)，跳过帧 {frame_id:010d}: {calib_result_file}")
+            continue
+
+        r_vec = lines[1].split()
+        t_vec = lines[2].split()
+        if len(r_vec) != 3 or len(t_vec) != 3:
+            print(f"[Warning] 标定结果格式异常(R/T维度错误)，跳过帧 {frame_id:010d}: {calib_result_file}")
+            continue
 
         print(f"可视化帧 {frame_id:010d}...")
         cmd = [
