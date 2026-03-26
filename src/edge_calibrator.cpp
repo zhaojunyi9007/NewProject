@@ -19,6 +19,15 @@ bool GetEnvBool(const char* name, bool default_value) {
     std::transform(s.begin(), s.end(), s.begin(), ::tolower);
     return !(s == "0" || s == "false" || s == "off" || s == "no");
 }
+
+double GetEnvDouble(const char* name, double default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    char* end = nullptr;
+    double parsed = std::strtod(value, &end);
+    if (end == value) return default_value;
+    return parsed;
+}
 }  // namespace
 
 EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(config) {
@@ -104,14 +113,27 @@ void EdgeCalibrator::PerformFineOptimization() {
                                  new ceres::HuberLoss(0.1), r_curr_, t_curr_);
     }
 
+    // 1. 【修改】：激活线特征的 AutoDiff（自动微分）
     if (GetEnvBool("EDGECALIB_USE_LINE_CONSTRAINT", true) && !lines2d_.empty() && !lines3d_.empty()) {
         for (const auto& l3d : lines3d_) {
             auto* line_cost = new LineReprojectionError(l3d, lines2d_, R_rect_, P_rect_);
-            problem.AddResidualBlock(new ceres::NumericDiffCostFunction<LineReprojectionError, ceres::CENTRAL, 1, 3, 3>(line_cost),
+            // 注意这里改成了 AutoDiffCostFunction
+            problem.AddResidualBlock(new ceres::AutoDiffCostFunction<LineReprojectionError, 1, 3, 3>(line_cost),
                                      new ceres::HuberLoss(1.0), r_curr_, t_curr_);
         }
     }
 
+    // 2. 【新增】：恢复遗漏的 Translation Prior (防止由于单目深度不可观测导致平移量飞掉)
+    double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 20.0);
+    if (t_prior_weight > 0.0) {
+        // 使用 config 里的初始平移量作为先验锚点
+        Eigen::Vector3d t_init_prior(config_.init_t[0], config_.init_t[1], config_.init_t[2]);
+        problem.AddResidualBlock(
+            new ceres::AutoDiffCostFunction<TranslationPriorCost, 3, 3>(
+                new TranslationPriorCost(t_init_prior, t_prior_weight)),
+            nullptr, t_curr_);
+    }
+    
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::DENSE_SCHUR;
     options.max_num_iterations = 100;
