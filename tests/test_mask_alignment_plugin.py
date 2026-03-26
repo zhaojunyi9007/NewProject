@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from python.features.interfaces import FeatureFrameContext
-from python.features.plugins.mask_alignment_plugin import MaskAlignmentFeaturePlugin
+from python.features.mask_alignment_plugin import MaskAlignmentFeaturePlugin
 
 
 class _DummyBasePlugin:
