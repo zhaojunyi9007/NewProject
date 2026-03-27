@@ -340,7 +340,10 @@ struct EdgeConsistencyCost {
             if (p_rect.z() < 0.1) continue;
 
             Eigen::Vector4d p_rect_h;
-            p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+            p_rect_h[0] = p_rect.x();
+            p_rect_h[1] = p_rect.y();
+            p_rect_h[2] = p_rect.z();
+            p_rect_h[3] = 1.0;
             Eigen::Vector3d uv = P_rect_ * p_rect_h;
 
             int u = static_cast<int>(uv.x() / uv.z());
@@ -429,7 +432,10 @@ struct SinglePointEdgeCost {
         }
 
         Eigen::Matrix<T, 4, 1> p_rect_h;
-        p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+        p_rect_h[0] = p_rect.x();
+        p_rect_h[1] = p_rect.y();
+        p_rect_h[2] = p_rect.z();
+        p_rect_h[3] = T(1.0);
         Eigen::Matrix<T, 3, 1> uv = P_rect_.cast<T>() * p_rect_h;
 
         T u_f = uv.x() / uv.z();
