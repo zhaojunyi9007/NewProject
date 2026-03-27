@@ -103,11 +103,6 @@ def load_features(feature_base, point_source="edge"):
 
     if points_file_used is None:
         print(f"[Warning] Point features files not found: {points_candidates[0]} or {points_candidates[1]}")
-
-            
-
-    else:
-        print(f"[Warning] Point features file not found: {points_file}")
     
     # 加载3D线特征
     lines_file = feature_base + "_lines_3d.txt"

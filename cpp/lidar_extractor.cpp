@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <cstdlib>
 
 // PCL Headers
 #include <pcl/io/pcd_io.h>
@@ -174,6 +175,24 @@ struct NDTFusionResult {
     std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> aligned_frames;  // 配准后的历史帧
 };
 
+double GetEnvDouble(const char* name, double default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    char* end = nullptr;
+    double parsed = std::strtod(value, &end);
+    if (end == value) return default_value;
+    return parsed;
+}
+
+int GetEnvInt(const char* name, int default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    if (end == value) return default_value;
+    return static_cast<int>(parsed);
+}
+
 NDTFusionResult FuseMultiFrameNDT(
     const std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr>& frames) 
 {
@@ -202,10 +221,10 @@ NDTFusionResult FuseMultiFrameNDT(
     
     // 配置NDT参数 (按照README2.0方案)
     pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
-    ndt.setTransformationEpsilon(0.01);  // 变换收敛阈值
-    ndt.setStepSize(0.1);                 // More/Newton线搜索步长
-    ndt.setResolution(1.0);               // NDT网格分辨率 (m)
-    ndt.setMaximumIterations(30);         // 最大迭代次数
+    ndt.setTransformationEpsilon(GetEnvDouble("EDGECALIB_LIDAR_NDT_TRANS_EPS", 0.01));  // 变换收敛阈值
+    ndt.setStepSize(GetEnvDouble("EDGECALIB_LIDAR_NDT_STEP_SIZE", 0.1));                 // More/Newton线搜索步长
+    ndt.setResolution(GetEnvDouble("EDGECALIB_LIDAR_NDT_RESOLUTION", 1.0));              // NDT网格分辨率 (m)
+    ndt.setMaximumIterations(GetEnvInt("EDGECALIB_LIDAR_NDT_MAX_ITERS", 30));            // 最大迭代次数
     
     ndt.setInputTarget(target);
     
@@ -374,7 +393,9 @@ std::vector<double> ComputeTemporalConsistencyOptimized(
     const pcl::PointCloud<pcl::PointXYZI>::Ptr& current_downsampled,
     const std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr>& aligned_frames,
     double position_threshold = 0.5,  // 位置一致性阈值 (m)
-    double projection_threshold = 0.5)  // 投影一致性阈值 (m, range image)
+    double projection_threshold = 0.5,  // 投影一致性阈值 (m, range image)
+    double static_weight = 1.0,
+    double dynamic_weight = 1.0)
 {
     std::vector<double> weights;
     weights.reserve(current_downsampled->size());
@@ -455,11 +476,13 @@ std::vector<double> ComputeTemporalConsistencyOptimized(
         double projection_ratio = aligned_frames.empty()
             ? 0.0
             : static_cast<double>(projection_consistent) / aligned_frames.size();
-        double weight = 0.5 * appearance_ratio + 0.5 * projection_ratio;
+        double raw_weight = 0.5 * appearance_ratio + 0.5 * projection_ratio;
+        raw_weight = std::max(0.0, std::min(1.0, raw_weight));
+        double weight = dynamic_weight + (static_weight - dynamic_weight) * raw_weight;
         weights.push_back(weight);
         
         // 分类统计
-        if (weight > 0.7) {
+        if (raw_weight > 0.7) {
             static_count++;
         } else {
             dynamic_count++;
@@ -529,7 +552,8 @@ int main(int argc, char** argv) {
     pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_ds(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::VoxelGrid<pcl::PointXYZI> sor;
     sor.setInputCloud(fused_cloud);
-    sor.setLeafSize(0.1f, 0.1f, 0.1f); // 10cm 体素
+    const float voxel_size = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_VOXEL_SIZE", 0.1));
+    sor.setLeafSize(voxel_size, voxel_size, voxel_size); // 体素大小来自配置/环境变量
     sor.filter(*cloud_ds);
     std::cout << "  Downsampled to " << cloud_ds->size() << " points" << std::endl;
 
@@ -550,7 +574,7 @@ int main(int argc, char** argv) {
     pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>());
     ne.setInputCloud(cloud_ds);
     ne.setSearchMethod(tree);
-    ne.setKSearch(20);
+    ne.setKSearch(std::max(1, GetEnvInt("EDGECALIB_LIDAR_NORMAL_K", 20)));
     ne.compute(*normals);
     std::cout << "  Computed normals for " << normals->size() << " points" << std::endl;
 
@@ -561,8 +585,10 @@ int main(int argc, char** argv) {
     std::vector<double> temporal_weights = ComputeTemporalConsistencyOptimized(
         cloud_ds, 
         fusion_result.aligned_frames, 
-        0.5,
-        0.5
+        GetEnvDouble("EDGECALIB_LIDAR_TEMPORAL_POS_THRESH", 0.5),
+        GetEnvDouble("EDGECALIB_LIDAR_TEMPORAL_PROJ_THRESH", 0.5),
+        GetEnvDouble("EDGECALIB_LIDAR_TEMPORAL_STATIC_WEIGHT", 1.0),
+        GetEnvDouble("EDGECALIB_LIDAR_TEMPORAL_DYNAMIC_WEIGHT", 1.0)
     );
 
 
@@ -577,7 +603,7 @@ int main(int argc, char** argv) {
 
     std::vector<int> point_labels_1to1(cloud_ds->size(), LABEL_UNKNOWN);
     std::vector<PointFeature> labeled_points;
-    double search_radius = 0.5; // PCA 搜索半径 0.5m
+    double search_radius = GetEnvDouble("EDGECALIB_LIDAR_PCA_RADIUS", 0.5); // PCA 搜索半径
     int stats[5] = {0};
 
     for (size_t i = 0; i < cloud_ds->size(); ++i) {
@@ -682,6 +708,7 @@ int main(int argc, char** argv) {
         int saved_edges = 0;
         for (size_t i = 0; i < cloud_ds->size(); ++i) {
             if (!depth_edges.edge_flags.empty() && depth_edges.edge_flags[i]) {
+                count_total++;
                 const auto& p = cloud_ds->points[i];
                 int label = point_labels_1to1[i];
 
@@ -717,6 +744,7 @@ int main(int argc, char** argv) {
         std::cout << "  [DEBUG] Removed Ground (z <= -1.2): " << count_ground << std::endl;
         std::cout << "  [DEBUG] Kept Edges: " << saved_edges << std::endl;
         std::cout << "          -> Unknown (Label 0): " << keep_unknown << " (可能是噪点或锐角车框)" << std::endl;
+        std::cout << "          -> Road (Label 1): " << keep_road << std::endl;
         std::cout << "          -> Structure (Label 3): " << keep_struct << " (高质量物理边缘!)" << std::endl;
     }
     
@@ -725,6 +753,15 @@ int main(int argc, char** argv) {
     // ========================================
     std::cout << "\n[Stage 10] Extracting 3D line features..." << std::endl;
     std::vector<Line3D> lines;
+    const double ground_z_min = GetEnvDouble("EDGECALIB_LIDAR_GROUND_Z_MIN", -3.0);
+    const double ground_z_max = GetEnvDouble("EDGECALIB_LIDAR_GROUND_Z_MAX", -1.2);
+    const double rail_ransac_threshold = GetEnvDouble("EDGECALIB_LIDAR_RAIL_RANSAC_THRESHOLD", 0.15);
+    const int rail_max_lines = std::max(0, GetEnvInt("EDGECALIB_LIDAR_RAIL_MAX_LINES", 2));
+    const double pole_z_min = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MIN", -1.0);
+    const double pole_z_max = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MAX", 5.0);
+    const double pole_ransac_threshold = GetEnvDouble("EDGECALIB_LIDAR_POLE_RANSAC_THRESHOLD", 0.2);
+    const double pole_vertical_tolerance = GetEnvDouble("EDGECALIB_LIDAR_POLE_VERTICAL_TOLERANCE", 0.2);
+    const int pole_max_lines = std::max(0, GetEnvInt("EDGECALIB_LIDAR_POLE_MAX_LINES", 5));
     
     // 8.1 提取铁轨 (Ground Parallel Lines)
     std::cout << "  [6.1] Extracting Rail Lines..." << std::endl;
@@ -732,7 +769,7 @@ int main(int argc, char** argv) {
     pcl::PassThrough<pcl::PointXYZI> pass;
     pass.setInputCloud(fused_cloud);
     pass.setFilterFieldName("z");
-    pass.setFilterLimits(-3.0, -1.2); // 粗略的地面区域
+    pass.setFilterLimits(static_cast<float>(ground_z_min), static_cast<float>(ground_z_max)); // 地面区域
     pass.filter(*rail_region);
     std::cout << "      Filtered " << rail_region->size() << " ground points" << std::endl;
 
@@ -741,11 +778,11 @@ int main(int argc, char** argv) {
         seg.setOptimizeCoefficients(true);
         seg.setModelType(pcl::SACMODEL_LINE);
         seg.setMethodType(pcl::SAC_RANSAC);
-        seg.setDistanceThreshold(0.15); // 15cm 容差
+        seg.setDistanceThreshold(rail_ransac_threshold);
         seg.setMaxIterations(200);
 
-        // 尝试提取两条最显著的直线 (左右轨)
-        for (int i=0; i<2; ++i) {
+        // 尝试提取多条最显著的直线 (左右轨)
+        for (int i=0; i<rail_max_lines; ++i) {
             if (rail_region->size() < 100) break;
             
             pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
@@ -786,7 +823,7 @@ int main(int argc, char** argv) {
     pcl::PointCloud<pcl::PointXYZI>::Ptr pole_region(new pcl::PointCloud<pcl::PointXYZI>);
     pass.setInputCloud(fused_cloud);
     pass.setFilterFieldName("z");
-    pass.setFilterLimits(-1.0, 5.0); // 地面以上
+    pass.setFilterLimits(static_cast<float>(pole_z_min), static_cast<float>(pole_z_max)); // 地面以上
     pass.filter(*pole_region);
     std::cout << "      Filtered " << pole_region->size() << " elevated points" << std::endl;
     
@@ -797,12 +834,12 @@ int main(int argc, char** argv) {
         seg.setModelType(pcl::SACMODEL_PARALLEL_LINE);
         seg.setMethodType(pcl::SAC_RANSAC);
         seg.setAxis(Eigen::Vector3f(0, 0, 1)); // Z轴
-        seg.setEpsAngle(0.2); // 允许偏离垂直 ~11度
-        seg.setDistanceThreshold(0.2);
+        seg.setEpsAngle(pole_vertical_tolerance); // 允许偏离垂直角度
+        seg.setDistanceThreshold(pole_ransac_threshold);
         seg.setMaxIterations(200);
         seg.setInputCloud(pole_region);
 
-        for (int i=0; i<5; ++i) { // 尝试提取5根立柱
+        for (int i=0; i<pole_max_lines; ++i) { // 尝试提取若干立柱
             if (pole_region->size() < 50) break;
             
             pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);

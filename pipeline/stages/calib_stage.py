@@ -48,6 +48,13 @@ def run(context: RuntimeContext) -> None:
     lidar_dir = context.config["data"]["lidar_output_dir"]
     calib_dir = context.config["data"]["calib_output_dir"]
     calib_file = context.config["data"]["calib_file"]
+    history_cfg = context.config.get("calibration", {}).get("temporal_validation", {}).get("history_file", "")
+    history_file = ""
+    if history_cfg:
+        history_file = str(history_cfg)
+        if not os.path.isabs(history_file):
+            history_file = os.path.join(calib_dir, history_file)
+        os.makedirs(os.path.dirname(history_file) or ".", exist_ok=True)
 
     init_r = context.config["calibration"]["initial_extrinsic"]["rotation"]
     init_t = context.config["calibration"]["initial_extrinsic"]["translation"]
@@ -81,6 +88,8 @@ def run(context: RuntimeContext) -> None:
             str(init_t[0]), str(init_t[1]), str(init_t[2]),
             output_file,
         ]
+        if history_file:
+            cmd.append(history_file)
         subprocess.run(cmd, check=True, env=optimizer_env)
 
     print(f"\n[完成] 标定结果已保存到: {calib_dir}")

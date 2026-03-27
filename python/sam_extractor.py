@@ -8,7 +8,7 @@ class FeatureExtractor:
     """
     统一的特征提取器:使用SAM进行分割,提取mask、2D线特征等
     """
-     def __init__(
+    def __init__(
         self,
         checkpoint_path,
         model_type="vit_h",

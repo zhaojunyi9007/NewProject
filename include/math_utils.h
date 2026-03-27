@@ -3,7 +3,18 @@
 #include <cmath>
 
 #include <ceres/ceres.h>
+#include <ceres/jet.h>
 #include <opencv2/opencv.hpp>
+
+template <typename T>
+inline double ScalarValue(const T& value) {
+    return static_cast<double>(value);
+}
+
+template <typename T, int N>
+inline double ScalarValue(const ceres::Jet<T, N>& value) {
+    return static_cast<double>(value.a);
+}
 
 inline float GetDistanceValueT(const cv::Mat& dist_map, int u, int v) {
     if (dist_map.empty()) return 1.0f;
@@ -40,8 +51,8 @@ inline double BilinearInterpolate(const cv::Mat& img, double x, double y) {
 
 template <typename T>
 inline T BilinearInterpolateT(const cv::Mat& img, const T& x, const T& y) {
-    double x_val = ceres::JetOps<T>::GetScalar(x);
-    double y_val = ceres::JetOps<T>::GetScalar(y);
+    double x_val = ScalarValue(x);
+    double y_val = ScalarValue(y);
 
     int x1 = static_cast<int>(std::floor(x_val));
     int y1 = static_cast<int>(std::floor(y_val));

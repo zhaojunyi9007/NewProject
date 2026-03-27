@@ -423,7 +423,7 @@ struct SinglePointEdgeCost {
         p_cam.z() = p_rotated[2] + t[2];
 
         Eigen::Matrix<T, 3, 1> p_rect = R_rect_.cast<T>() * p_cam;
-        if (ceres::JetOps<T>::GetScalar(p_rect.z()) < 0.1) {
+        if (ScalarValue(p_rect.z()) < 0.1) {
             residual[0] = T(0.0);
             return true;
         }
@@ -435,8 +435,8 @@ struct SinglePointEdgeCost {
         T u_f = uv.x() / uv.z();
         T v_f = uv.y() / uv.z();
 
-        const double u_scalar = ceres::JetOps<T>::GetScalar(u_f);
-        const double v_scalar = ceres::JetOps<T>::GetScalar(v_f);
+        const double u_scalar = ScalarValue(u_f);
+        const double v_scalar = ScalarValue(v_f);
         if (u_scalar < 0 || u_scalar >= W_ - 1 || v_scalar < 0 || v_scalar >= H_ - 1) {
             residual[0] = T(pt_.weight);
             return true;
@@ -445,7 +445,12 @@ struct SinglePointEdgeCost {
         T edge_error = T(0.0);
         if (dist_map_ && !dist_map_->empty()) {
             edge_error = BilinearInterpolateT(*dist_map_, u_f, v_f);
-            edge_error = ceres::max(ceres::min(edge_error, T(1.0)), T(0.0));
+            const double edge_scalar = ScalarValue(edge_error);
+            if (edge_scalar < 0.0) {
+                edge_error = T(0.0);
+            } else if (edge_scalar > 1.0) {
+                edge_error = T(1.0);
+            }
         }
 
         residual[0] = edge_error * T(pt_.weight);
