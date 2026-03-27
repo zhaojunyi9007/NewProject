@@ -443,10 +443,6 @@ struct SinglePointEdgeCost {
 
         const double u_scalar = ScalarValue(u_f);
         const double v_scalar = ScalarValue(v_f);
-        if (u_scalar < 0 || u_scalar >= W_ - 1 || v_scalar < 0 || v_scalar >= H_ - 1) {
-            residual[0] = T(pt_.weight);
-            return true;
-        }
 
         T edge_error = T(0.0);
         if (dist_map_ && !dist_map_->empty()) {
@@ -459,7 +455,23 @@ struct SinglePointEdgeCost {
             }
         }
 
-        residual[0] = edge_error * T(pt_.weight);
+        // Keep non-zero, geometry-dependent gradient for out-of-FOV points.
+        // Using smooth hinge avoids hard discontinuity at borders.
+        const T eps = T(1e-6);
+        auto smooth_hinge = [&](const T& x) -> T {
+            return (x + ceres::sqrt(x * x + eps)) * T(0.5);
+        };
+
+        T boundary_penalty = T(0.0);
+        if (u_scalar < 0 || u_scalar >= W_ - 1 || v_scalar < 0 || v_scalar >= H_ - 1) {
+            const T left = smooth_hinge(-u_f);
+            const T right = smooth_hinge(u_f - T(W_ - 1));
+            const T top = smooth_hinge(-v_f);
+            const T bottom = smooth_hinge(v_f - T(H_ - 1));
+            boundary_penalty = (left + right + top + bottom) / T(W_ + H_);
+        }
+
+        residual[0] = (edge_error + boundary_penalty) * T(pt_.weight);
         return true;
     }
 
