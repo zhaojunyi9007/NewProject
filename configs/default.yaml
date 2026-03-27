@@ -135,6 +135,7 @@ calibration:
     smoothness_threshold: 0.05  # 参数变化阈值
     history_frames: 3  # 历史帧数量
     min_confidence: 0.7  # 最小置信度
+    history_file: "calib_history.txt"  # 相对 calib_output_dir 的历史文件
 
   # A/B实验参数（会被 run_pipeline.py 传给 optimizer 环境变量）
   ab_experiment:

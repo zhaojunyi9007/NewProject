@@ -1,4 +1,4 @@
-#include "include/optimizer_cost_functions.h"
+#include "include/optimizer_cost_function.h"
 #include "include/optimizer_data_loader.h"
 #include "include/optimizer_scoring.h"
 #include "include/common.h"

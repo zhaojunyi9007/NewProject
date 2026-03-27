@@ -1,7 +1,7 @@
 #pragma once
 
 #include "include/common.h"
-#include "include/optimizer_cost_functions.h"
+#include "include/optimizer_cost_function.h"
 
 #include <vector>
 

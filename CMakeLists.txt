@@ -49,13 +49,14 @@ target_link_libraries(lidar_extractor
 )
 
 # --- Executable: Optimizer (Coarse-to-Fine 标定) ---
-add_executable(optimizer 
-    cpp/optimizer.cpp 
+add_executable(optimizer
+    src/main.cpp
+    src/edge_calibrator.cpp
     cpp/io_utils.cpp
     cpp/optimizer_data_loader.cpp
     cpp/optimizer_scoring.cpp
 )
-target_link_libraries(optimizer 
+target_link_libraries(optimizer
     ${PCL_LIBRARIES}
     ${OpenCV_LIBS}
     ${CERES_LIBRARIES}
