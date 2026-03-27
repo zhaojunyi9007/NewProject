@@ -109,6 +109,8 @@ lidar:
 # ========================================
 calibration:
   constraint_adapter: "legacy_env_constraints"
+  extrinsic_init:
+    target_camera: "cam2"  # 从Tr_velo_to_cam初始化时，先转换到目标相机
   # 初始外参（如果为空则使用粗搜索结果）
   initial_extrinsic:
     rotation: [0.0, 0.0, 0.0]      # rx, ry, rz (angle-axis)

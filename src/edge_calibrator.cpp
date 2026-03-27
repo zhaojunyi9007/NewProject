@@ -28,6 +28,36 @@ double GetEnvDouble(const char* name, double default_value) {
     if (end == value) return default_value;
     return parsed;
 }
+
+void PrintProjectionStats(const char* tag,
+                          const std::vector<PointFeature>& points,
+                          const Eigen::Matrix3d& R_rect,
+                          const Eigen::Matrix<double, 3, 4>& P_rect,
+                          const double* r,
+                          const double* t,
+                          int W, int H) {
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_row;
+    ceres::AngleAxisToRotationMatrix(r, R_row.data());
+    Eigen::Matrix3d R = R_row;
+    Eigen::Vector3d t_vec(t[0], t[1], t[2]);
+    ProjectionDebugStats stats = CountProjectionStats(points, R_rect, P_rect, R, t_vec, W, H);
+    const int projected = stats.in_bounds + stats.out_of_bounds;
+    const double total = std::max(1, stats.total);
+    const double projected_ratio = static_cast<double>(projected) / total;
+    const double in_bounds_ratio = static_cast<double>(stats.in_bounds) / total;
+    const double behind_ratio = static_cast<double>(stats.behind) / total;
+    const double oob_ratio = static_cast<double>(stats.out_of_bounds) / total;
+    std::cout << "[Debug][Proj][" << tag << "] total=" << stats.total
+              << ", projected(z>0)=" << projected
+              << " (" << projected_ratio << ")"
+              << ", in_image=" << stats.in_bounds
+              << " (" << in_bounds_ratio << ")"
+              << ", behind=" << stats.behind
+              << " (" << behind_ratio << ")"
+              << ", out_of_bounds=" << stats.out_of_bounds
+              << " (" << oob_ratio << ")"
+              << std::endl;
+}
 }  // namespace
 
 EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(config) {
@@ -58,6 +88,10 @@ bool EdgeCalibrator::LoadData() {
     if (!config_.history_file.empty()) {
         LoadCalibHistory(config_.history_file, history_);
     }
+    std::cout << "[Info] Feature counts: points=" << points_.size()
+              << ", edge_points=" << edge_points_.size()
+              << ", lines2d=" << lines2d_.size()
+              << ", lines3d=" << lines3d_.size() << std::endl;
     return true;
 }
 
@@ -77,6 +111,7 @@ void EdgeCalibrator::PerformCoarseSearch() {
     best_score_ = use_edge
         ? EdgeAttractionScore(edge_points_, edge_dist_, edge_weight_, R_rect_, P_rect_, W_, H_, init_R, init_t)
         : MaskIntensityVarianceScore(points_, semantic_map_, R_rect_, P_rect_, W_, H_, init_R, init_t);
+    PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 
     const double angle_range = 0.15;
     const double angle_step = 0.01;
@@ -101,12 +136,14 @@ void EdgeCalibrator::PerformCoarseSearch() {
 
     std::copy(best_r, best_r + 3, r_curr_);
     std::copy(best_t, best_t + 3, t_curr_);
+    PrintProjectionStats("after_coarse", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 }
 
 void EdgeCalibrator::PerformFineOptimization() {
     if (edge_dist_.empty() && semantic_map_.empty()) return;
 
     std::cout << "[Stage 3] Fine Calibration..." << std::endl;
+    PrintProjectionStats("before_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
     ceres::Problem problem;
     const int stride = std::max<int>(1, static_cast<int>(edge_points_.size() / 5000));
     for (size_t i = 0; i < edge_points_.size(); i += stride) {
@@ -147,6 +184,7 @@ void EdgeCalibrator::PerformFineOptimization() {
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     std::cout << summary.BriefReport() << std::endl;
+    PrintProjectionStats("after_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 }
 
 void EdgeCalibrator::ApplyTemporalSmoothing() {
