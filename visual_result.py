@@ -4,6 +4,118 @@ import os
 import argparse
 import sys
 
+def _infer_sam_base_from_feature_base(feature_base: str) -> str:
+    """
+    Infer sam feature base path from lidar feature_base.
+    Typical:
+      result/lidar_features/0000000088  -> result/sam_features/0000000088
+    """
+    feature_dir = os.path.dirname(feature_base)
+    if feature_dir and "lidar_features" in feature_dir:
+        sam_dir = feature_dir.replace("lidar_features", "sam_features")
+        return os.path.join(sam_dir, os.path.basename(feature_base))
+    # Fallback: assume sibling directory name
+    return feature_base
+
+def load_edge_dist_map(sam_base: str):
+    """
+    Load SAM edge distance transform map produced by sam stage.
+    Expected file: <sam_base>_edge_dist.png (float/uint, normalized 0..1 ideally).
+    Returns: (dist_map_float01, raw_map) or (None, None)
+    """
+    if not sam_base:
+        return None, None
+    cand = f"{sam_base}_edge_dist.png"
+    if not os.path.exists(cand):
+        return None, None
+    raw = cv2.imread(cand, cv2.IMREAD_UNCHANGED)
+    if raw is None or raw.size == 0:
+        return None, None
+    dist = raw.astype(np.float32)
+    # Robust normalization: map to [0,1] if not already.
+    dmin = float(np.nanmin(dist))
+    dmax = float(np.nanmax(dist))
+    if dmax - dmin > 1e-12:
+        dist01 = (dist - dmin) / (dmax - dmin)
+    else:
+        dist01 = np.zeros_like(dist, dtype=np.float32)
+    dist01 = np.clip(dist01, 0.0, 1.0)
+    return dist01, raw
+
+def overlay_edge_dist(img_bgr: np.ndarray, dist01: np.ndarray, alpha: float = 0.35) -> np.ndarray:
+    """
+    Overlay edge distance map on top of the RGB image.
+    Lower distance (closer to edges) is shown hotter.
+    """
+    if dist01 is None:
+        return img_bgr
+    h, w = img_bgr.shape[:2]
+    if dist01.shape[0] != h or dist01.shape[1] != w:
+        dist01 = cv2.resize(dist01, (w, h), interpolation=cv2.INTER_LINEAR)
+    # Invert so edges (low dist) become high intensity
+    inv = (1.0 - dist01) * 255.0
+    inv_u8 = inv.astype(np.uint8)
+    heat = cv2.applyColorMap(inv_u8, cv2.COLORMAP_TURBO)
+    return cv2.addWeighted(img_bgr, 1.0, heat, float(alpha), 0.0)
+
+def edge_alignment_stats(points, R_rect, P_rect, R, t, img_w, img_h, dist01: np.ndarray):
+    """
+    Sample edge distance map at projected point locations.
+    Returns dict with counts and quantiles for in-image projected points.
+    dist01 is normalized to [0,1] where 0 means on-edge (best).
+    """
+    if dist01 is None or len(points) == 0:
+        return None
+    # Ensure map matches image size
+    if dist01.shape[0] != img_h or dist01.shape[1] != img_w:
+        dist01 = cv2.resize(dist01, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+
+    samples = []
+    behind = 0
+    oob = 0
+    for pt in points:
+        p = np.array([pt[0], pt[1], pt[2]], dtype=np.float64)
+        p_cam = R @ p + t
+        p_rect = R_rect @ p_cam
+        if p_rect[2] < 0.1:
+            behind += 1
+            continue
+        uv = P_rect @ np.hstack([p_rect, 1.0])
+        u = uv[0] / uv[2]
+        v = uv[1] / uv[2]
+        if not (0 <= u < img_w and 0 <= v < img_h):
+            oob += 1
+            continue
+        ui = int(u)
+        vi = int(v)
+        samples.append(float(dist01[vi, ui]))
+
+    if len(samples) == 0:
+        return {
+            "n_total": len(points),
+            "n_sampled": 0,
+            "behind": behind,
+            "oob": oob,
+        }
+
+    arr = np.array(samples, dtype=np.float32)
+    qs = np.quantile(arr, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist()
+    return {
+        "n_total": len(points),
+        "n_sampled": int(arr.size),
+        "behind": behind,
+        "oob": oob,
+        "mean": float(arr.mean()),
+        "p10": float(qs[0]),
+        "p25": float(qs[1]),
+        "p50": float(qs[2]),
+        "p75": float(qs[3]),
+        "p90": float(qs[4]),
+        "ratio_le_0.05": float((arr <= 0.05).mean()),
+        "ratio_le_0.10": float((arr <= 0.10).mean()),
+        "ratio_le_0.20": float((arr <= 0.20).mean()),
+    }
+
 def load_kitti_calib(calib_file):
     """
     加载KITTI标定文件
@@ -394,6 +506,10 @@ Examples:
                         help="外参方向A/B验证：比较当前外参与逆外参的投影统计与叠加图。")
     parser.add_argument("--rectify_compare", action="store_true",
                         help="整流约定A/B验证：比较使用R_rect与跳过R_rect的投影统计与叠加图。")
+    parser.add_argument("--overlay_edge_dist", action="store_true",
+                        help="Overlay SAM edge distance map on output image (auto-infer sam_base from feature_base).")
+    parser.add_argument("--edge_dist_alpha", type=float, default=0.35,
+                        help="Alpha for edge distance overlay (0..1).")
     
     args = parser.parse_args()
 
@@ -599,6 +715,15 @@ Examples:
 
     # 4. 绘制投影
     print("\n[Projecting Features]")
+
+    # Optional: overlay edge distance map (helps judge alignment visually).
+    # Default behavior: enabled, because visual_stage does not pass flags.
+    sam_base = _infer_sam_base_from_feature_base(args.feature_base)
+    dist01, _ = load_edge_dist_map(sam_base)
+    if dist01 is not None:
+        do_overlay = True if (not hasattr(args, "overlay_edge_dist")) else (args.overlay_edge_dist or True)
+        if do_overlay:
+            img = overlay_edge_dist(img, dist01, alpha=args.edge_dist_alpha)
     
     # 先画点 (作为背景)
     if points:
@@ -610,6 +735,17 @@ Examples:
 
     # 5. 添加图例
     img = add_legend(img)
+
+    # Print quantitative edge-alignment stats (samples DT values at projected points).
+    if dist01 is not None and points:
+        h, w = img.shape[:2]
+        stats = edge_alignment_stats(points, R_rect, P_rect, R, t_vec, w, h - 80, dist01)
+        # h includes legend stacked; use original image height (h-80)
+        if stats and stats.get("n_sampled", 0) > 0:
+            print("\n[Edge Alignment Stats] (edge_dist at projected points; 0=on-edge, 1=far)")
+            print(f"  sampled={stats['n_sampled']}/{stats['n_total']}, behind={stats['behind']}, oob={stats['oob']}")
+            print(f"  mean={stats['mean']:.4f}, p50={stats['p50']:.4f}, p25/p75={stats['p25']:.4f}/{stats['p75']:.4f}")
+            print(f"  ratio<=0.05={stats['ratio_le_0.05']:.3f}, <=0.10={stats['ratio_le_0.10']:.3f}, <=0.20={stats['ratio_le_0.20']:.3f}")
 
     # 6. 保存结果
     # 如果没有指定输出路径，自动生成到result/visualization目录

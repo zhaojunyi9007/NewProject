@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <vector>
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
@@ -113,22 +114,57 @@ void EdgeCalibrator::PerformCoarseSearch() {
         : MaskIntensityVarianceScore(points_, semantic_map_, R_rect_, P_rect_, W_, H_, init_R, init_t);
     PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 
-    const double angle_range = 0.15;
-    const double angle_step = 0.01;
-    for (double rx = r_curr_[0] - angle_range; rx <= r_curr_[0] + angle_range + 1e-9; rx += angle_step) {
-        for (double ry = r_curr_[1] - angle_range; ry <= r_curr_[1] + angle_range + 1e-9; ry += angle_step) {
-            for (double rz = r_curr_[2] - angle_range; rz <= r_curr_[2] + angle_range + 1e-9; rz += angle_step) {
-                double r_try[3] = {rx, ry, rz};
-                Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_try_row;
-                ceres::AngleAxisToRotationMatrix(r_try, R_try_row.data());
-                Eigen::Matrix3d R_try = R_try_row;
-                Eigen::Vector3d t_try(t_curr_[0], t_curr_[1], t_curr_[2]);
-                double score = use_edge
-                    ? EdgeAttractionScore(edge_points_, edge_dist_, edge_weight_, R_rect_, P_rect_, W_, H_, R_try, t_try)
-                    : (use_semantic ? MaskIntensityVarianceScore(points_, semantic_map_, R_rect_, P_rect_, W_, H_, R_try, t_try) : -1e8);
-                if (score > best_score_) {
-                    best_score_ = score;
-                    std::copy(r_try, r_try + 3, best_r);
+    const double angle_range = GetEnvDouble("EDGECALIB_COARSE_ANGLE_RANGE", 0.15);
+    const double angle_step  = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_ANGLE_STEP", 0.05));
+    double tx_range = GetEnvDouble("EDGECALIB_COARSE_TX_RANGE", 0.0);
+    double ty_range = GetEnvDouble("EDGECALIB_COARSE_TY_RANGE", 0.0);
+    double tz_range = GetEnvDouble("EDGECALIB_COARSE_TZ_RANGE", 0.0);
+    double tx_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TX_STEP", 0.05));
+    double ty_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TY_STEP", 0.15));
+    double tz_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TZ_STEP", 0.15));
+
+    // Per-dimension fallback: each axis independently gets a minimum search
+    // range so the coarse search can always escape poor translation basins.
+    if (tx_range <= 1e-9) tx_range = 0.10;
+    if (ty_range <= 1e-9) ty_range = 0.30;
+    if (tz_range <= 1e-9) tz_range = 0.30;
+
+    std::vector<double> tx_candidates;
+    std::vector<double> ty_candidates;
+    std::vector<double> tz_candidates;
+    for (double tx = t_curr_[0] - tx_range; tx <= t_curr_[0] + tx_range + 1e-12; tx += tx_step) tx_candidates.push_back(tx);
+    for (double ty = t_curr_[1] - ty_range; ty <= t_curr_[1] + ty_range + 1e-12; ty += ty_step) ty_candidates.push_back(ty);
+    for (double tz = t_curr_[2] - tz_range; tz <= t_curr_[2] + tz_range + 1e-12; tz += tz_step) tz_candidates.push_back(tz);
+    if (tx_candidates.empty()) tx_candidates.push_back(t_curr_[0]);
+    if (ty_candidates.empty()) ty_candidates.push_back(t_curr_[1]);
+    if (tz_candidates.empty()) tz_candidates.push_back(t_curr_[2]);
+
+    std::cout << "[Debug][Coarse] Translation search candidates: tx=" << tx_candidates.size()
+              << ", ty=" << ty_candidates.size() << ", tz=" << tz_candidates.size() << std::endl;
+
+    for (double tx : tx_candidates) {
+        for (double ty : ty_candidates) {
+            for (double tz : tz_candidates) {
+                for (double rx = r_curr_[0] - angle_range; rx <= r_curr_[0] + angle_range + 1e-9; rx += angle_step) {
+                    for (double ry = r_curr_[1] - angle_range; ry <= r_curr_[1] + angle_range + 1e-9; ry += angle_step) {
+                        for (double rz = r_curr_[2] - angle_range; rz <= r_curr_[2] + angle_range + 1e-9; rz += angle_step) {
+                            double r_try[3] = {rx, ry, rz};
+                            Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_try_row;
+                            ceres::AngleAxisToRotationMatrix(r_try, R_try_row.data());
+                            Eigen::Matrix3d R_try = R_try_row;
+                            Eigen::Vector3d t_try(tx, ty, tz);
+                            double score = use_edge
+                                ? EdgeAttractionScore(edge_points_, edge_dist_, edge_weight_, R_rect_, P_rect_, W_, H_, R_try, t_try)
+                                : (use_semantic ? MaskIntensityVarianceScore(points_, semantic_map_, R_rect_, P_rect_, W_, H_, R_try, t_try) : -1e8);
+                            if (score > best_score_) {
+                                best_score_ = score;
+                                std::copy(r_try, r_try + 3, best_r);
+                                best_t[0] = tx;
+                                best_t[1] = ty;
+                                best_t[2] = tz;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -145,15 +181,54 @@ void EdgeCalibrator::PerformFineOptimization() {
     std::cout << "[Stage 3] Fine Calibration..." << std::endl;
     PrintProjectionStats("before_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
     ceres::Problem problem;
-    const int stride = std::max<int>(1, static_cast<int>(edge_points_.size() / 5000));
-    for (size_t i = 0; i < edge_points_.size(); i += stride) {
-        auto* cost = new SinglePointEdgeCost(edge_points_[i], edge_dist_.empty() ? nullptr : &edge_dist_, R_rect_, P_rect_, W_, H_);
+    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> r_row;
+    ceres::AngleAxisToRotationMatrix(r_curr_, r_row.data());
+    Eigen::Matrix3d r_mat = r_row;
+    Eigen::Vector3d t_vec(t_curr_[0], t_curr_[1], t_curr_[2]);
+    ProjectionDebugStats stats = CountProjectionStats(edge_points_, R_rect_, P_rect_, r_mat, t_vec, W_, H_);
+    const double in_image_ratio = stats.total > 0 ? static_cast<double>(stats.in_bounds) / stats.total : 0.0;
+    const double behind_ratio = stats.total > 0 ? static_cast<double>(stats.behind) / stats.total : 0.0;
+
+    // Use only in-view / near-view points in fine stage to improve gradient quality.
+    // Make the thresholds tunable for quick experiments.
+    const double fine_margin_switch = GetEnvDouble("EDGECALIB_FINE_MARGIN_SWITCH_INIMAGE", 0.03);
+    const int fine_margin_low = static_cast<int>(GetEnvDouble("EDGECALIB_FINE_MARGIN_LOW", 240.0));
+    const int fine_margin_high = static_cast<int>(GetEnvDouble("EDGECALIB_FINE_MARGIN_HIGH", 120.0));
+    const int fine_margin = (in_image_ratio < fine_margin_switch) ? fine_margin_low : fine_margin_high;
+    std::vector<PointFeature> fine_points = FilterPointsInView(edge_points_, R_rect_, P_rect_, r_mat, t_vec, W_, H_, fine_margin);
+    if (fine_points.size() < 200) {
+        fine_points = edge_points_;
+        std::cout << "[Debug][Fine] Filtered points too few, fallback to all edge points: "
+                  << fine_points.size() << std::endl;
+    } else {
+        std::cout << "[Debug][Fine] Using filtered edge points: " << fine_points.size()
+                  << " / " << edge_points_.size() << " (margin=" << fine_margin << ")" << std::endl;
+    }
+
+    // Compute gating stats on the actual point set used in fine optimization.
+    // This avoids disabling/enabling the translation prior based on points that do not
+    // contribute gradients in the fine stage.
+    ProjectionDebugStats fine_stats = CountProjectionStats(fine_points, R_rect_, P_rect_, r_mat, t_vec, W_, H_);
+    const double fine_in_image_ratio =
+        fine_stats.total > 0 ? static_cast<double>(fine_stats.in_bounds) / fine_stats.total : 0.0;
+    const double fine_behind_ratio =
+        fine_stats.total > 0 ? static_cast<double>(fine_stats.behind) / fine_stats.total : 0.0;
+    const double fine_oob_ratio =
+        fine_stats.total > 0 ? static_cast<double>(fine_stats.out_of_bounds) / fine_stats.total : 0.0;
+    std::cout << "[Debug][Fine] Gating stats on fine_points: total=" << fine_stats.total
+              << ", in_image_ratio=" << fine_in_image_ratio
+              << ", behind_ratio=" << fine_behind_ratio
+              << ", oob_ratio=" << fine_oob_ratio << std::endl;
+
+    const int stride = std::max<int>(1, static_cast<int>(fine_points.size() / 5000));
+    for (size_t i = 0; i < fine_points.size(); i += stride) {
+        auto* cost = new SinglePointEdgeCost(fine_points[i], edge_dist_.empty() ? nullptr : &edge_dist_, R_rect_, P_rect_, W_, H_);
         problem.AddResidualBlock(new ceres::AutoDiffCostFunction<SinglePointEdgeCost, 1, 3, 3>(cost),
                                  new ceres::HuberLoss(0.1), r_curr_, t_curr_);
     }
 
     // 1. 【修改】：激活线特征的 AutoDiff（自动微分）
-    if (GetEnvBool("EDGECALIB_USE_LINE_CONSTRAINT", true) && !lines2d_.empty() && !lines3d_.empty()) {
+    if (GetEnvBool("EDGECALIB_USE_LINE_CONSTRAINT", false) && !lines2d_.empty() && !lines3d_.empty()) {
         for (const auto& l3d : lines3d_) {
             auto* line_cost = new LineReprojectionError(l3d, lines2d_, R_rect_, P_rect_);
             // 注意这里改成了 AutoDiffCostFunction
@@ -163,7 +238,38 @@ void EdgeCalibrator::PerformFineOptimization() {
     }
 
     // 2. 【新增】：恢复遗漏的 Translation Prior (防止由于单目深度不可观测导致平移量飞掉)
-    double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 20.0);
+    double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 5.0);
+    const double t_prior_disable_inimage = GetEnvDouble("EDGECALIB_T_PRIOR_DISABLE_INIMAGE_THRESH", 0.03);
+    const double t_prior_weaken_inimage = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_INIMAGE_THRESH", 0.08);
+    const double t_prior_weaken_factor = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_FACTOR", 0.1);
+
+    // Gating for stability using the actual fine point set:
+    // - If most fine points are out-of-bounds, we are likely in a bad basin: disable prior for basin escape.
+    // - If OOB is moderate, keep a weak prior to prevent translation drifting too far.
+    // - Additionally, if fine in-image ratio is extremely low, disable prior to allow escape.
+    const double t_prior_disable_oob = GetEnvDouble("EDGECALIB_T_PRIOR_DISABLE_OOB_THRESH", 0.65);
+    const double t_prior_weaken_oob = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_OOB_THRESH", 0.35);
+    const double t_prior_weaken_oob_factor = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_OOB_FACTOR", 0.1);
+
+    if (fine_in_image_ratio < t_prior_disable_inimage) {
+        t_prior_weight = 0.0;
+        std::cout << "[Debug][Fine] In-image ratio too low on fine_points (" << fine_in_image_ratio
+                  << "), disable translation prior for basin escape (th=" << t_prior_disable_inimage << ")." << std::endl;
+    } else if (fine_oob_ratio > t_prior_disable_oob) {
+        t_prior_weight = 0.0;
+        std::cout << "[Debug][Fine] OOB ratio high on fine_points (" << fine_oob_ratio
+                  << "), disable translation prior for basin escape (th=" << t_prior_disable_oob << ")." << std::endl;
+    } else if (fine_oob_ratio > t_prior_weaken_oob) {
+        t_prior_weight *= t_prior_weaken_oob_factor;
+        std::cout << "[Debug][Fine] OOB ratio moderate on fine_points (" << fine_oob_ratio
+                  << "), weaken translation prior by factor " << t_prior_weaken_oob_factor
+                  << " (th=" << t_prior_weaken_oob << "). New weight=" << t_prior_weight << std::endl;
+    } else if (fine_in_image_ratio < t_prior_weaken_inimage) {
+        t_prior_weight *= t_prior_weaken_factor;
+        std::cout << "[Debug][Fine] Low in-image ratio on fine_points (" << fine_in_image_ratio
+                  << "), weaken translation prior by factor " << t_prior_weaken_factor
+                  << " (th=" << t_prior_weaken_inimage << "). New weight=" << t_prior_weight << std::endl;
+    }
     if (t_prior_weight > 0.0) {
         // 使用 config 里的初始平移量作为先验锚点
         Eigen::Vector3d t_init_prior(config_.init_t[0], config_.init_t[1], config_.init_t[2]);

@@ -28,7 +28,7 @@ frames:
   
   # 当mode="select"时，指定要处理的帧ID列表
   # 例如: [0, 10, 20, 30] 表示处理第0, 10, 20, 30帧
-  frame_ids: [89]
+  frame_ids: [88,89,90,91]
   
   # 多帧融合配置
   fusion_window: 3  # 每次融合的帧数 (Three-in-one: 当前帧 + 前N-1帧)
@@ -133,7 +133,7 @@ calibration:
   
   # 置信度检查与时序平滑
   temporal_validation:
-    enabled: true
+    enabled: false
     smoothness_threshold: 0.05  # 参数变化阈值
     history_frames: 3  # 历史帧数量
     min_confidence: 0.7  # 最小置信度
@@ -143,8 +143,8 @@ calibration:
   ab_experiment:
     # 是否优化平移（true/false）
     opt_translation: true
-    # 是否启用线约束（建议默认 false，待线匹配稳定后再开启）
-    use_line_constraint: true
+    # 是否启用线约束（当前3D线数量较少，默认关闭以免误导优化）
+    use_line_constraint: false
     # 线匹配阈值（像素）
     line_match_threshold: 50
     # 线约束软惩罚（避免 unmatched 全部归零）
@@ -154,16 +154,31 @@ calibration:
     t_prior_weight: 20
     # 语义一致性权重（0~1）
     w_consistency: 0.0
-    # Coarse阶段 y/z 平移局部搜索范围（m），0 表示关闭
-    coarse_ty_range: 0.0
-    coarse_tz_range: 0.0
-    # Coarse阶段 x 平移局部搜索范围（m），0 表示关闭（默认不改变主流程）
-    coarse_tx_range: 0.05
-    # Coarse阶段 y/z 平移步长（m）
-    coarse_ty_step: 0.05
-    coarse_tz_step: 0.05
-    # Coarse阶段 x 平移步长（m）
+    # Coarse阶段旋转搜索范围/步长（rad）
+    # 步长设为0.05 rad（约2.9°）以便在添加平移搜索后保持总体计算量可控
+    coarse_angle_range: 0.15
+    coarse_angle_step: 0.05
+    # Coarse阶段平移搜索范围/步长（m）
+    # ty/tz 设置较宽范围，确保能逃出初始外参偏差
+    coarse_tx_range: 0.10
     coarse_tx_step: 0.05
+    coarse_ty_range: 0.30
+    coarse_ty_step: 0.15
+    coarse_tz_range: 0.30
+    coarse_tz_step: 0.15
+    # Fine阶段可见点过滤窗口（小网格试跑最优点附近）
+    fine_margin_switch_inimage: 0.03
+    fine_margin_low: 400
+    fine_margin_high: 400
+    # translation prior 自适应阈值
+    # 结合 behind_ratio + in_image_ratio 双门控（见 edge_calibrator.cpp），这里保持更保守的 in_image 阈值
+    t_prior_disable_inimage_thresh: 0.03
+    t_prior_weaken_inimage_thresh: 0.08
+    t_prior_weaken_factor: 0.1
+    # OOB 门控（基于 fine_points 统计）：出界比例高时禁用/弱化 prior，避免被 prior 拉回坏盆地
+    t_prior_disable_oob_thresh: 0.65
+    t_prior_weaken_oob_thresh: 0.35
+    t_prior_weaken_oob_factor: 0.1
     # 是否打印每条线的匹配诊断
     log_line_debug: false
 

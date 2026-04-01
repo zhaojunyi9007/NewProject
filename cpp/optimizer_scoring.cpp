@@ -210,6 +210,11 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
         visible_count++;
     }
 
-    if (visible_count < 50) return -1e6;
+    // When fewer than 50 points project in-image the edge score is too flat to
+    // distinguish poses.  Fall back to a score that simply prefers candidates
+    // that get more points into the image, so the coarse search still drives
+    // toward better alignment rather than returning an identical sentinel for
+    // every candidate.
+    if (visible_count < 50) return -1e5 + visible_count;
     return total_score;
 }
