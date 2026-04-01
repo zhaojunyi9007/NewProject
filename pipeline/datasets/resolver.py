@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Dataset path resolution for KITTI vs OSDaR23 (Stage 1: I/O discovery only).
+Dataset path resolution for KITTI vs OSDaR23 (I/O discovery only).
 
 OSDaR23 filenames: ``{counter}_{timestamp}.png`` / ``{counter}_{timestamp}.pcd``
 KITTI filenames: ``{frame_id:010d}.png`` / ``{frame_id:010d}.bin``
@@ -118,7 +118,7 @@ class OSDaRResolver(DatasetResolver):
         return self._pick_one(candidates)
 
     def resolve_image(self, frame_id: int) -> PathOrNone:
-        return self._resolve_by_prefix_int(self._image_dir, frame_id, (".png",))
+        return self._resolve_by_prefix_int(self._image_dir, frame_id, (".png", ".jpg", ".jpeg"))
 
     def resolve_lidar(self, frame_id: int) -> PathsOrNone:
         return self._resolve_by_prefix_int(self._velo_dir, frame_id, (".pcd",))
@@ -126,18 +126,14 @@ class OSDaRResolver(DatasetResolver):
     def list_available_frames(self) -> List[int]:
         if not self._image_dir or not os.path.isdir(self._image_dir):
             return []
-        counters: set[int] = set()
+        ids = set()
         for name in os.listdir(self._image_dir):
-            if not name.lower().endswith(".png"):
-                continue
             m = self._PREFIX_RE.match(name)
-            if m:
-                counters.add(int(m.group(1)))
-        return sorted(counters)
+            if not m:
+                continue
+            try:
+                ids.add(int(m.group(1)))
+            except ValueError:
+                continue
+        return sorted(ids)
 
-
-def get_dataset_resolver(config: Dict[str, Any]) -> DatasetResolver:
-    fmt = str(config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
-    if fmt in {"osdar23", "osdar"}:
-        return OSDaRResolver(config)
-    return KittiResolver(config)

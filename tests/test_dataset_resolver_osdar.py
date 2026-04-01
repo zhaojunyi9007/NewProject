@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from pipeline.dataset_resolver import OSDaRResolver, get_dataset_resolver
+from pipeline.datasets.resolver import OSDaRResolver
 
 
 class DatasetResolverOSDaRTest(unittest.TestCase):
@@ -34,8 +34,7 @@ class DatasetResolverOSDaRTest(unittest.TestCase):
                     "velodyne_dir": lidar_dir,
                 }
             }
-            resolver = get_dataset_resolver(cfg)
-            self.assertIsInstance(resolver, OSDaRResolver)
+            resolver = OSDaRResolver(cfg)
 
             self.assertEqual(resolver.list_available_frames(), [12, 13])
             # Should match even when filenames carry leading zeros (012_*)
@@ -57,7 +56,7 @@ class DatasetResolverOSDaRTest(unittest.TestCase):
                     "osdar_duplicate_policy": "earliest",
                 }
             }
-            resolver = get_dataset_resolver(cfg)
+            resolver = OSDaRResolver(cfg)
             self.assertTrue(resolver.resolve_image(5).endswith("5_0001.png"))
 
 

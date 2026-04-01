@@ -1,8 +1,11 @@
 #include "include/optimizer_data_loader.h"
 
+#include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <string>
 
 void CalibHistory::push(const Eigen::Vector3d& r, const Eigen::Vector3d& t, double score) {
     rotation_history.push_back(r);
@@ -126,22 +129,45 @@ bool LoadCalib(const std::string& calib_file,
     if (used_default) {
         *used_default = false;
     }
-    if (!calib_file.empty() && IOUtils::LoadKittiCalib(calib_file, K, R_rect, P_rect)) {
-        return true;
+
+    const char* fmt_env = std::getenv("EDGECALIB_DATASET_FORMAT");
+    std::string ds_fmt = fmt_env ? std::string(fmt_env) : "";
+    for (auto& c : ds_fmt) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
 
-    // OSDaR23 calibration.txt fallback: load intrinsics and set rectification to identity.
-    // The lidar->camera extrinsic is handled separately (initial guess / optimizer variables).
-    if (!calib_file.empty()) {
-        const char* cam = std::getenv("EDGECALIB_OSDAR_CAMERA");
-        std::string cam_folder = cam ? std::string(cam) : "rgb_center";
-        Eigen::Matrix4d T_lidar_to_cam;
-        if (IOUtils::LoadOSDaRCalib(calib_file, cam_folder, K, T_lidar_to_cam)) {
-            R_rect = Eigen::Matrix3d::Identity();
-            P_rect << K(0, 0), K(0, 1), K(0, 2), 0.0,
-                      K(1, 0), K(1, 1), K(1, 2), 0.0,
-                      K(2, 0), K(2, 1), K(2, 2), 0.0;
+    // Explicit dataset: avoid trying KITTI parser on OSDaR23 files (misleading errors).
+    if (ds_fmt == "osdar23" || ds_fmt == "osdar") {
+        if (!calib_file.empty()) {
+            const char* cam = std::getenv("EDGECALIB_OSDAR_CAMERA");
+            std::string cam_folder = cam ? std::string(cam) : "rgb_center";
+            Eigen::Matrix4d T_lidar_to_cam;
+            if (IOUtils::LoadOSDaRCalib(calib_file, cam_folder, K, T_lidar_to_cam)) {
+                R_rect = Eigen::Matrix3d::Identity();
+                P_rect << K(0, 0), K(0, 1), K(0, 2), 0.0,
+                          K(1, 0), K(1, 1), K(1, 2), 0.0,
+                          K(2, 0), K(2, 1), K(2, 2), 0.0;
+                return true;
+            }
+        }
+        std::cerr << "[Warning] OSDaR calib load failed; using default calibration parameters" << std::endl;
+    } else {
+        if (!calib_file.empty() && IOUtils::LoadKittiCalib(calib_file, K, R_rect, P_rect)) {
             return true;
+        }
+
+        // Legacy fallback: try OSDaR23 if env points to OSDaR camera (or unset format on mixed runs).
+        if (!calib_file.empty()) {
+            const char* cam = std::getenv("EDGECALIB_OSDAR_CAMERA");
+            std::string cam_folder = cam ? std::string(cam) : "rgb_center";
+            Eigen::Matrix4d T_lidar_to_cam;
+            if (IOUtils::LoadOSDaRCalib(calib_file, cam_folder, K, T_lidar_to_cam)) {
+                R_rect = Eigen::Matrix3d::Identity();
+                P_rect << K(0, 0), K(0, 1), K(0, 2), 0.0,
+                          K(1, 0), K(1, 1), K(1, 2), 0.0,
+                          K(2, 0), K(2, 1), K(2, 2), 0.0;
+                return true;
+            }
         }
     }
 

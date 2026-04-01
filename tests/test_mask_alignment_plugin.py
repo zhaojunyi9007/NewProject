@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 from PIL import Image
 
-from python.features.interfaces import FeatureFrameContext
-from python.features.mask_alignment_plugin import MaskAlignmentFeaturePlugin
+from pipeline.sam.interfaces import FeatureFrameContext
+from pipeline.sam.mask_alignment_plugin import MaskAlignmentFeaturePlugin
 
 
 class _DummyBasePlugin:

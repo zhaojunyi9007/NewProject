@@ -13,6 +13,7 @@ import argparse
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 import yaml
 
@@ -110,7 +111,7 @@ def run_one(cfg, frame_id: int, mode: str, out_dir: str, env_base: dict, init_r,
     img_path = os.path.join(data["image_dir"], f"{frame_id:010d}.png")
     vis_out = os.path.join(out_dir, f"{frame_id:010d}_line_{mode}_overlay.png")
     vis_cmd = [
-        "python", "visual_result.py",
+        sys.executable, "tools/visualize.py",
         "--img", img_path,
         "--feature_base", feature_base,
         "--calib_file", calib_file if os.path.exists(calib_file) else "",
@@ -133,7 +134,7 @@ def run_one(cfg, frame_id: int, mode: str, out_dir: str, env_base: dict, init_r,
 
 def main():
     parser = argparse.ArgumentParser(description="Line constraints ON/OFF 最小A/B实验")
-    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--config", default="configs/kitti.yaml")
     parser.add_argument("--frame_id", type=int, default=None, help="默认取 config.frames.frame_ids 的第一帧")
     parser.add_argument("--output_dir", default="result/ablation_line")
     parser.add_argument(

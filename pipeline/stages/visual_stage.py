@@ -3,9 +3,10 @@
 
 import os
 import subprocess
+import sys
 
 from pipeline.context import RuntimeContext
-from pipeline.dataset_resolver import get_dataset_resolver
+from pipeline.datasets import get_adapter
 
 
 def run(context: RuntimeContext) -> None:
@@ -17,10 +18,10 @@ def run(context: RuntimeContext) -> None:
     calib_dir = context.config["data"]["calib_output_dir"]
     visual_dir = context.config["data"]["visual_output_dir"]
     calib_file = context.config["data"].get("calib_file", "")
-    resolver = get_dataset_resolver(context.config)
+    adapter = get_adapter(context.config)
 
     for frame_id in context.frame_ids:
-        img_path = resolver.resolve_image(frame_id)
+        img_path = adapter.resolve_image(frame_id)
         feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
         calib_result_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
         output_path = os.path.join(visual_dir, f"{frame_id:010d}_result.png")
@@ -51,7 +52,7 @@ def run(context: RuntimeContext) -> None:
         print(f"  source_image={img_path}")
         print(f"  feature_base={feature_base}")
         cmd = [
-            "python", "visual_result.py",
+            sys.executable, "tools/visualize.py",
             "--img", img_path,
             "--feature_base", feature_base,
             "--calib_file", calib_file if os.path.exists(calib_file) else "",

@@ -11,6 +11,8 @@ import os
 
 import yaml
 
+from pipeline.datasets import get_adapter
+
 
 ConfigPath = Tuple[str, ...]
 
@@ -30,14 +32,58 @@ def _set_nested(config: Dict[str, Any], path: ConfigPath, value: Any) -> None:
     node[path[-1]] = value
 
 
-def load_runtime_config(config_path: str, cli_overrides: Iterable[Tuple[ConfigPath, Any]] | None = None) -> Dict[str, Any]:
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deep-merge two dictionaries.
+    - Dict values merge recursively
+    - Non-dict values (including lists) are overridden
+    """
+    out: Dict[str, Any] = deepcopy(base)
+    for k, v in (override or {}).items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge_dicts(out[k], v)
+        else:
+            out[k] = deepcopy(v)
+    return out
 
-    if not isinstance(config, dict):
+
+def _load_yaml_with_base(config_path: str, _stack: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
         raise ValueError(f"配置文件格式错误（非字典）: {config_path}")
 
-    merged = deepcopy(config)
+    bases = cfg.get("_base")
+    if not bases:
+        return cfg
+
+    if config_path in _stack:
+        chain = " -> ".join(_stack + (config_path,))
+        raise ValueError(f"检测到配置 _base 循环引用: {chain}")
+
+    if isinstance(bases, str):
+        base_list = [bases]
+    elif isinstance(bases, list) and all(isinstance(x, str) for x in bases):
+        base_list = list(bases)
+    else:
+        raise ValueError(f"_base 必须是字符串或字符串列表: {config_path}")
+
+    merged_base: Dict[str, Any] = {}
+    here = os.path.dirname(os.path.abspath(config_path))
+    for rel in base_list:
+        base_path = rel
+        if not os.path.isabs(base_path):
+            base_path = os.path.join(here, rel)
+        base_cfg = _load_yaml_with_base(base_path, _stack=_stack + (config_path,))
+        merged_base = _deep_merge_dicts(merged_base, base_cfg)
+
+    child = dict(cfg)
+    child.pop("_base", None)
+    return _deep_merge_dicts(merged_base, child)
+
+
+def load_runtime_config(config_path: str, cli_overrides: Iterable[Tuple[ConfigPath, Any]] | None = None) -> Dict[str, Any]:
+    merged = _load_yaml_with_base(config_path)
     if cli_overrides:
         for path, value in cli_overrides:
             if value is None:
@@ -48,23 +94,14 @@ def load_runtime_config(config_path: str, cli_overrides: Iterable[Tuple[ConfigPa
 
 def apply_data_paths_from_dataset(config: Dict[str, Any]) -> None:
     """
-    When dataset_format is OSDaR23 and osdar_sequence_root is set, derive standard paths:
-    image_dir = <root>/<image_sensor>, velodyne_dir = <root>/lidar, calib_file = <root>/calibration.txt
-    KITTI paths in yaml are left unchanged when dataset_format=kitti or root is empty.
+    Deprecated name: delegates to DatasetAdapter.apply_derived_paths (OSDaR23 path derivation).
     """
-    data = config.setdefault("data", {})
-    fmt = str(data.get("dataset_format", "kitti") or "kitti").lower()
-    root = str(data.get("osdar_sequence_root", "") or "").strip()
-    if fmt in {"osdar23", "osdar"} and root:
-        sensor = str(data.get("image_sensor", "rgb_center") or "rgb_center").strip() or "rgb_center"
-        data["image_dir"] = os.path.join(root, sensor)
-        data["velodyne_dir"] = os.path.join(root, "lidar")
-        data["calib_file"] = os.path.join(root, "calibration.txt")
+    get_adapter(config).apply_derived_paths(config)
 
 
 def prepare_runtime_config(config: Dict[str, Any]) -> None:
     """Apply dataset-specific path rules before validation and frame listing."""
-    apply_data_paths_from_dataset(config)
+    get_adapter(config).apply_derived_paths(config)
 
 
 def validate_config(config: Dict[str, Any]) -> None:
@@ -107,17 +144,15 @@ def _log_resolved_paths(config: Dict[str, Any], frame_ids: list[int]) -> None:
     if not frame_ids:
         return
     try:
-        from pipeline.dataset_resolver import get_dataset_resolver
-
-        resolver = get_dataset_resolver(config)
+        adapter = get_adapter(config)
     except Exception as e:
-        print(f"[Warning] Dataset resolver init failed: {e}")
+        print(f"[Warning] Dataset adapter init failed: {e}")
         return
 
     print("[Info] Frame source resolution preview (up to 10 frames):")
     for fid in frame_ids:
-        img = resolver.resolve_image(fid)
-        lidar = resolver.resolve_lidar(fid)
+        img = adapter.resolve_image(fid)
+        lidar = adapter.resolve_lidar(fid)
         print(f"  frame_id={fid} image={img} lidar={lidar}")
 
 
@@ -167,15 +202,13 @@ def create_output_dirs(config: Dict[str, Any]) -> None:
 
 
 def get_frame_list(config: Dict[str, Any]) -> list[int]:
-    from pipeline.dataset_resolver import get_dataset_resolver
-
     frames_cfg = config.get("frames", {})
     mode = frames_cfg.get("mode", "select")
     if mode == "select":
         return [int(x) for x in frames_cfg.get("frame_ids", [])]
 
     prepare_runtime_config(config)
-    resolver = get_dataset_resolver(config)
-    frame_ids = resolver.list_available_frames()
+    adapter = get_adapter(config)
+    frame_ids = adapter.list_available_frames()
     _log_resolved_paths(config, frame_ids[:10])
     return frame_ids

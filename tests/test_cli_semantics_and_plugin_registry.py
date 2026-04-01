@@ -1,7 +1,7 @@
 import unittest
 
 from pipeline.context import apply_cli_semantic_overrides
-from pipeline.feature_plugin_registry import get_feature_plugin
+from pipeline.sam.plugin_registry import get_feature_plugin
 
 class CliSemanticsAndPluginRegistryTest(unittest.TestCase):
     def test_result_dir_override_relinks_stage_outputs(self):

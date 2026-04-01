@@ -33,9 +33,9 @@
 让 Pipeline 能识别数据集类型，并解析 OSDaR23 的文件组织与命名（`counter_timestamp`）。
 
 ### 1.2 修改文件
-- `configs/default.yaml`
+- `configs/kitti.yaml`（以及 `_base: base.yaml`）
 - `pipeline/context.py`
-- （新增）`pipeline/dataset_resolver.py`
+- （新增）`pipeline/datasets/resolver.py`
 
 ### 1.3 具体改动
 
@@ -181,7 +181,7 @@ data:
 - `pipeline/stages/sam_stage.py`
 - `pipeline/stages/lidar_stage.py`
 - `pipeline/stages/calib_stage.py`
-- `visual_result.py`（若读取规则有耦合）
+- `tools/visualize.py`
 
 ### 4.3 具体改动
 - 内部统一使用 `logical_frame_id`（int）作为中间产物前缀。
@@ -203,7 +203,7 @@ data:
 把 KITTI 参数迁移到 OSDaR 场景下的可用区间。
 
 ### 5.2 修改文件
-- `configs/default.yaml`
+- `configs/kitti.yaml`（以及 `_base: base.yaml`）
 - （新增）`configs/osdar23.yaml`
 
 ### 5.3 建议参数方向
