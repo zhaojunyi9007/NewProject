@@ -6,10 +6,14 @@
 #include <algorithm>
 #include <limits>
 #include <cstdlib>
+#include <cstring>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 // PCL Headers
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
+#include <pcl/PCLPointCloud2.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/features/normal_3d.h>
@@ -162,6 +166,110 @@ namespace LocalIO {
         }
         
         std::cout << "[Info] Loaded " << cloud->size() << " points from bin file" << std::endl;
+        return cloud->size() > 0;
+    }
+
+    bool LoadPCD(const std::string& pcd_file, pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud) {
+        if (!cloud) {
+            cloud.reset(new pcl::PointCloud<pcl::PointXYZI>);
+        }
+        pcl::PCLPointCloud2 blob;
+        if (pcl::io::loadPCDFile(pcd_file, blob) < 0) {
+            std::cerr << "[Error] Cannot load PCD file: " << pcd_file << std::endl;
+            return false;
+        }
+
+        // Convert by field names so extra fields like timestamp/sensor_index won't break loading.
+        // OSDaR23 example: FIELDS x y z intensity timestamp sensor_index
+        const bool has_x = pcl::getFieldIndex(blob, "x") >= 0;
+        const bool has_y = pcl::getFieldIndex(blob, "y") >= 0;
+        const bool has_z = pcl::getFieldIndex(blob, "z") >= 0;
+        const bool has_i = pcl::getFieldIndex(blob, "intensity") >= 0;
+        if (!(has_x && has_y && has_z)) {
+            std::cerr << "[Error] PCD missing required fields x/y/z: " << pcd_file << std::endl;
+            return false;
+        }
+
+        const int idx_x = pcl::getFieldIndex(blob, "x");
+        const int idx_y = pcl::getFieldIndex(blob, "y");
+        const int idx_z = pcl::getFieldIndex(blob, "z");
+        const int idx_i = pcl::getFieldIndex(blob, "intensity");
+
+        const auto& fx = blob.fields[static_cast<size_t>(idx_x)];
+        const auto& fy = blob.fields[static_cast<size_t>(idx_y)];
+        const auto& fz = blob.fields[static_cast<size_t>(idx_z)];
+        const pcl::PCLPointField* fi = (idx_i >= 0) ? &blob.fields[static_cast<size_t>(idx_i)] : nullptr;
+
+        auto read_as_float = [&](const uint8_t* ptr, uint8_t datatype) -> float {
+            switch (datatype) {
+                case pcl::PCLPointField::INT8: {
+                    int8_t v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                case pcl::PCLPointField::UINT8: {
+                    uint8_t v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                case pcl::PCLPointField::INT16: {
+                    int16_t v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                case pcl::PCLPointField::UINT16: {
+                    uint16_t v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                case pcl::PCLPointField::INT32: {
+                    int32_t v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                case pcl::PCLPointField::UINT32: {
+                    uint32_t v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                case pcl::PCLPointField::FLOAT32: {
+                    float v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return v;
+                }
+                case pcl::PCLPointField::FLOAT64: {
+                    double v;
+                    std::memcpy(&v, ptr, sizeof(v));
+                    return static_cast<float>(v);
+                }
+                default:
+                    return 0.0f;
+            }
+        };
+
+        const size_t n = static_cast<size_t>(blob.width) * static_cast<size_t>(blob.height);
+        cloud->clear();
+        cloud->reserve(n);
+        if (blob.data.empty() || blob.point_step == 0) {
+            std::cerr << "[Error] Empty PCD data or invalid point_step: " << pcd_file << std::endl;
+            return false;
+        }
+
+        for (size_t idx = 0; idx < n; ++idx) {
+            const size_t base = idx * static_cast<size_t>(blob.point_step);
+            if (base + blob.point_step > blob.data.size()) {
+                break;
+            }
+            const uint8_t* p0 = blob.data.data() + base;
+            pcl::PointXYZI p;
+            p.x = read_as_float(p0 + fx.offset, fx.datatype);
+            p.y = read_as_float(p0 + fy.offset, fy.datatype);
+            p.z = read_as_float(p0 + fz.offset, fz.datatype);
+            p.intensity = fi ? read_as_float(p0 + fi->offset, fi->datatype) : 1.0f;
+            cloud->push_back(p);
+        }
+
+        std::cout << "[Info] Loaded " << cloud->size() << " points from PCD file" << std::endl;
         return cloud->size() > 0;
     }
 }
@@ -502,21 +610,31 @@ std::vector<double> ComputeTemporalConsistencyOptimized(
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: ./lidar_extractor <kitti_bin_path_1> [<kitti_bin_path_2> ...] <output_base_path>" << std::endl;
+        std::cerr << "Usage: ./lidar_extractor <cloud_path_1(.bin/.pcd)> [<cloud_path_2> ...] <output_base_path>" << std::endl;
         return -1;
     }
 
     // 解析参数：最后一个是输出路径，前面都是输入点云
-    std::vector<std::string> bin_paths;
+    std::vector<std::string> cloud_paths;
     for (int i = 1; i < argc - 1; ++i) {
-        bin_paths.emplace_back(argv[i]);
+        cloud_paths.emplace_back(argv[i]);
     }
     std::string out_base = argv[argc - 1];
+    // Ensure output directory exists (out_base is a prefix, not a directory).
+    {
+        const std::string::size_type slash = out_base.find_last_of("/\\");
+        if (slash != std::string::npos) {
+            const std::string out_dir = out_base.substr(0, slash);
+            if (!out_dir.empty()) {
+                ::mkdir(out_dir.c_str(), 0755);  // best-effort; ignore EEXIST
+            }
+        }
+    }
 
     std::cout << "=== EdgeCalib v2.0 - LiDAR Feature Extractor ===" << std::endl;
-    std::cout << "Input frames: " << bin_paths.size() << std::endl;
-    for (size_t i = 0; i < bin_paths.size(); ++i) {
-        std::cout << "  [" << i << "] " << bin_paths[i] << std::endl;
+    std::cout << "Input frames: " << cloud_paths.size() << std::endl;
+    for (size_t i = 0; i < cloud_paths.size(); ++i) {
+        std::cout << "  [" << i << "] " << cloud_paths[i] << std::endl;
     }
     std::cout << "Output base: " << out_base << "_*.txt" << std::endl;
 
@@ -526,10 +644,25 @@ int main(int argc, char** argv) {
     std::cout << "\n[Stage 1] Loading point clouds..." << std::endl;
     std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> frames;
     
-    for (const auto& path : bin_paths) {
+    for (const auto& path : cloud_paths) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr frame(new pcl::PointCloud<pcl::PointXYZI>);
-        if (!LocalIO::LoadKittiBin(path, frame)) {
-            std::cerr << "[Error] Failed to load bin: " << path << std::endl;
+        const std::string ext = (path.size() >= 4) ? path.substr(path.size() - 4) : std::string();
+        const std::string ext_lower = [&] {
+            std::string s = ext;
+            std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+            return s;
+        }();
+        bool ok = false;
+        if (ext_lower == ".bin") {
+            ok = LocalIO::LoadKittiBin(path, frame);
+        } else if (ext_lower == ".pcd") {
+            ok = LocalIO::LoadPCD(path, frame);
+        } else {
+            std::cerr << "[Error] Unsupported cloud extension (expect .bin/.pcd): " << path << std::endl;
+            ok = false;
+        }
+        if (!ok) {
+            std::cerr << "[Error] Failed to load cloud: " << path << std::endl;
             return -1;
         }
         frames.push_back(frame);

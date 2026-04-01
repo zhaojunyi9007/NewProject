@@ -8,10 +8,11 @@ from pipeline.stages import sam_stage
 class SingleFrameSmokeTest(unittest.TestCase):
     @patch("python.features.plugins.sam_subprocess_plugin.subprocess.run")
     @patch("pipeline.stages.sam_stage.os.path.exists", return_value=True)
-    def test_sam_stage_single_frame_smoke(self, _mock_exists, mock_run):
+    @patch("pipeline.dataset_resolver.os.path.isfile", return_value=True)
+    def test_sam_stage_single_frame_smoke(self, _mock_isfile, _mock_exists, mock_run):
         context = RuntimeContext(
             config={
-                "data": {"image_dir": "dataset", "sam_output_dir": "result/sam_features"},
+                "data": {"dataset_format": "kitti", "image_dir": "dataset", "sam_output_dir": "result/sam_features"},
                 "sam": {
                     "checkpoint_path": "/tmp/fake_checkpoint.pth",
                     "feature_plugin": "sam_subprocess",

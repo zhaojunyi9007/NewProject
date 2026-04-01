@@ -130,6 +130,21 @@ bool LoadCalib(const std::string& calib_file,
         return true;
     }
 
+    // OSDaR23 calibration.txt fallback: load intrinsics and set rectification to identity.
+    // The lidar->camera extrinsic is handled separately (initial guess / optimizer variables).
+    if (!calib_file.empty()) {
+        const char* cam = std::getenv("EDGECALIB_OSDAR_CAMERA");
+        std::string cam_folder = cam ? std::string(cam) : "rgb_center";
+        Eigen::Matrix4d T_lidar_to_cam;
+        if (IOUtils::LoadOSDaRCalib(calib_file, cam_folder, K, T_lidar_to_cam)) {
+            R_rect = Eigen::Matrix3d::Identity();
+            P_rect << K(0, 0), K(0, 1), K(0, 2), 0.0,
+                      K(1, 0), K(1, 1), K(1, 2), 0.0,
+                      K(2, 0), K(2, 1), K(2, 2), 0.0;
+            return true;
+        }
+    }
+
     std::cerr << "[Warning] Using default calibration parameters" << std::endl;
     K << 721.5, 0, 609.5, 0, 721.5, 172.8, 0, 0, 1;
 

@@ -87,6 +87,15 @@ namespace IOUtils {
                         Eigen::Matrix3d& K,
                         Eigen::Matrix3d& R_rect,
                         Eigen::Matrix<double, 3, 4>& P_rect);
+
+    // Load OSDaR23 calibration.txt for a given camera folder (e.g. rgb_center).
+    // Output:
+    //   K: camera intrinsics
+    //   T_lidar_to_cam: 4x4 transform (LiDAR/parent frame -> camera frame)
+    bool LoadOSDaRCalib(const std::string& calib_file,
+                        const std::string& camera_folder,
+                        Eigen::Matrix3d& K,
+                        Eigen::Matrix4d& T_lidar_to_cam);
 }
 
 #endif // COMMON_H

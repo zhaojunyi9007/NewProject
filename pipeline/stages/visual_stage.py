@@ -5,6 +5,7 @@ import os
 import subprocess
 
 from pipeline.context import RuntimeContext
+from pipeline.dataset_resolver import get_dataset_resolver
 
 
 def run(context: RuntimeContext) -> None:
@@ -12,17 +13,21 @@ def run(context: RuntimeContext) -> None:
     print("[阶段4] 结果可视化")
     print("=" * 40)
 
-    image_dir = context.config["data"]["image_dir"]
     lidar_dir = context.config["data"]["lidar_output_dir"]
     calib_dir = context.config["data"]["calib_output_dir"]
     visual_dir = context.config["data"]["visual_output_dir"]
     calib_file = context.config["data"].get("calib_file", "")
+    resolver = get_dataset_resolver(context.config)
 
     for frame_id in context.frame_ids:
-        img_path = os.path.join(image_dir, f"{frame_id:010d}.png")
+        img_path = resolver.resolve_image(frame_id)
         feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
         calib_result_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
         output_path = os.path.join(visual_dir, f"{frame_id:010d}_result.png")
+
+        if not img_path or not os.path.exists(img_path):
+            print(f"[Warning] 图像不存在，跳过帧 {frame_id:010d}: {img_path}")
+            continue
 
         if not os.path.exists(calib_result_file):
             print(f"[Warning] 标定结果不存在，跳过帧 {frame_id:010d}")
@@ -42,6 +47,9 @@ def run(context: RuntimeContext) -> None:
             continue
 
         print(f"可视化帧 {frame_id:010d}...")
+        print(f"  logical_frame_id={frame_id:010d}")
+        print(f"  source_image={img_path}")
+        print(f"  feature_base={feature_base}")
         cmd = [
             "python", "visual_result.py",
             "--img", img_path,

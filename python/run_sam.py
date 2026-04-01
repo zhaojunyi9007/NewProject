@@ -48,6 +48,9 @@ def main():
     parser.add_argument("--fused_top_black_ratio", type=float, default=0.20, help="Heuristic: fused top black ratio")
     parser.add_argument("--fused_bottom_black_ratio", type=float, default=0.80, help="Heuristic: fused bottom black ratio")
     parser.add_argument("--distance_max_ratio", type=float, default=0.15, help="Heuristic: distance max ratio")
+    parser.add_argument("--output_prefix", type=str, default="",
+                        help="Override output filename prefix (e.g. '0000000012'). "
+                             "When empty, falls back to image filename stem.")
 
     args = parser.parse_args()
 
@@ -105,7 +108,8 @@ def main():
             sys.exit(1)
         
         print(f"--- Processing single image: {args.image} ---")
-        extractor.process_image(args.image, args.output_dir)
+        extractor.process_image(args.image, args.output_dir,
+                                output_prefix=args.output_prefix or None)
         print(f"\n[Done] Feature extracted and saved to: {args.output_dir}")
     
     else:

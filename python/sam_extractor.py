@@ -287,7 +287,7 @@ class FeatureExtractor:
         weight_map = cv2.GaussianBlur(weight_map, (5, 5), 0)
         return dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d, mask_id_map
 
-    def process_image(self, image_path, output_dir):
+    def process_image(self, image_path, output_dir, output_prefix=None):
         """
         处理单张图像，生成所有必要的特征文件
         生成文件：
@@ -308,8 +308,12 @@ class FeatureExtractor:
             print(f"[Error] Cannot read image: {image_path}")
             return False
         
-        # 提取文件名（不含扩展名）
-        filename = os.path.splitext(os.path.basename(image_path))[0]
+        # 输出前缀：优先使用调用者传入的 output_prefix（逻辑帧号），
+        # 否则回退到原始图像文件名 stem（兼容旧行为）。
+        if output_prefix:
+            filename = output_prefix
+        else:
+            filename = os.path.splitext(os.path.basename(image_path))[0]
         output_base = os.path.join(output_dir, filename)
 
         # 1. 生成融合边缘与吸引场
