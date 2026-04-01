@@ -4,6 +4,12 @@ import os
 import argparse
 import sys
 
+# Ensure repo root is importable when running as a script:
+# `python tools/visualize.py ...` puts `tools/` on sys.path, not the repo root.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 from pipeline.datasets import get_adapter
 
 def _infer_sam_base_from_feature_base(feature_base: str) -> str:

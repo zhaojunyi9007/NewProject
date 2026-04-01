@@ -18,6 +18,8 @@ def run(context: RuntimeContext) -> None:
     calib_dir = context.config["data"]["calib_output_dir"]
     visual_dir = context.config["data"]["visual_output_dir"]
     calib_file = context.config["data"].get("calib_file", "")
+    ds_fmt = str(context.config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
+    img_sensor = str(context.config.get("data", {}).get("image_sensor", "") or "")
     adapter = get_adapter(context.config)
 
     for frame_id in context.frame_ids:
@@ -56,10 +58,13 @@ def run(context: RuntimeContext) -> None:
             "--img", img_path,
             "--feature_base", feature_base,
             "--calib_file", calib_file if os.path.exists(calib_file) else "",
+            "--dataset_format", ds_fmt,
             "--r_vec", *r_vec,
             "--t_vec", *t_vec,
             "--output", output_path,
         ]
+        if img_sensor:
+            cmd.extend(["--image_sensor", img_sensor])
         subprocess.run(cmd, check=True)
 
     print(f"\n[完成] 可视化结果已保存到: {visual_dir}")

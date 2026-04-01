@@ -19,8 +19,8 @@ import yaml
 
 
 def load_cfg(path: str):
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    from pipeline.context import load_runtime_config
+    return load_runtime_config(path)
 
 
 def load_velo_to_cam_extrinsic(calib_path: str):

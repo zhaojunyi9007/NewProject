@@ -37,9 +37,8 @@ void PrintProjectionStats(const char* tag,
                           const double* r,
                           const double* t,
                           int W, int H) {
-    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_row;
-    ceres::AngleAxisToRotationMatrix(r, R_row.data());
-    Eigen::Matrix3d R = R_row;
+    Eigen::Matrix3d R;
+    ceres::AngleAxisToRotationMatrix(r, R.data());
     Eigen::Vector3d t_vec(t[0], t[1], t[2]);
     ProjectionDebugStats stats = CountProjectionStats(points, R_rect, P_rect, R, t_vec, W, H);
     const int projected = stats.in_bounds + stats.out_of_bounds;
@@ -104,9 +103,8 @@ void EdgeCalibrator::PerformCoarseSearch() {
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
     double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
 
-    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> init_R_row;
-    ceres::AngleAxisToRotationMatrix(r_curr_, init_R_row.data());
-    Eigen::Matrix3d init_R = init_R_row; // Eigen 会自动正确地将 Row-Major 转换为 Col-Major
+    Eigen::Matrix3d init_R;
+    ceres::AngleAxisToRotationMatrix(r_curr_, init_R.data());
     Eigen::Vector3d init_t(t_curr_[0], t_curr_[1], t_curr_[2]);
 
     best_score_ = use_edge
@@ -149,9 +147,8 @@ void EdgeCalibrator::PerformCoarseSearch() {
                     for (double ry = r_curr_[1] - angle_range; ry <= r_curr_[1] + angle_range + 1e-9; ry += angle_step) {
                         for (double rz = r_curr_[2] - angle_range; rz <= r_curr_[2] + angle_range + 1e-9; rz += angle_step) {
                             double r_try[3] = {rx, ry, rz};
-                            Eigen::Matrix<double, 3, 3, Eigen::RowMajor> R_try_row;
-                            ceres::AngleAxisToRotationMatrix(r_try, R_try_row.data());
-                            Eigen::Matrix3d R_try = R_try_row;
+                            Eigen::Matrix3d R_try;
+                            ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
                             Eigen::Vector3d t_try(tx, ty, tz);
                             double score = use_edge
                                 ? EdgeAttractionScore(edge_points_, edge_dist_, edge_weight_, R_rect_, P_rect_, W_, H_, R_try, t_try)
@@ -181,9 +178,8 @@ void EdgeCalibrator::PerformFineOptimization() {
     std::cout << "[Stage 3] Fine Calibration..." << std::endl;
     PrintProjectionStats("before_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
     ceres::Problem problem;
-    Eigen::Matrix<double, 3, 3, Eigen::RowMajor> r_row;
-    ceres::AngleAxisToRotationMatrix(r_curr_, r_row.data());
-    Eigen::Matrix3d r_mat = r_row;
+    Eigen::Matrix3d r_mat;
+    ceres::AngleAxisToRotationMatrix(r_curr_, r_mat.data());
     Eigen::Vector3d t_vec(t_curr_[0], t_curr_[1], t_curr_[2]);
     ProjectionDebugStats stats = CountProjectionStats(edge_points_, R_rect_, P_rect_, r_mat, t_vec, W_, H_);
     const double in_image_ratio = stats.total > 0 ? static_cast<double>(stats.in_bounds) / stats.total : 0.0;
