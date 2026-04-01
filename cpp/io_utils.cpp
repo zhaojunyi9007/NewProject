@@ -418,11 +418,24 @@ namespace IOUtils {
             return false;
         }
 
-        // Convention assumption:
-        // File provides T_cam_to_parent: p_parent = R * p_cam + t
-        // For projection we need p_cam = R^T * (p_parent - t)
-        // With merged lidar being parent (identity), T_lidar_to_cam = inverse(T_cam_to_parent).
-        T_lidar_to_cam = T_cam_to_parent.inverse();
+        // OSDaR23 reference/body frame: X=driving direction, Y=left, Z=up (calibration.txt header).
+        // Camera optical frame (OpenCV/pinhole K convention): X=right, Y=down, Z=into-scene.
+        // Step 1: lidar-frame -> camera body-frame: T_lidar_to_body = inv(T_cam_to_parent)
+        // Step 2: camera body-frame -> camera optical-frame: multiply by R_body_to_optical (pure rotation)
+        //   optical-X = -body-Y,  optical-Y = -body-Z,  optical-Z = body-X
+        Eigen::Matrix4d T_lidar_to_body = T_cam_to_parent.inverse();
+
+        Eigen::Matrix4d T_body_to_optical = Eigen::Matrix4d::Identity();
+        T_body_to_optical(0, 0) =  0.0;  T_body_to_optical(0, 1) = -1.0;  T_body_to_optical(0, 2) =  0.0;
+        T_body_to_optical(1, 0) =  0.0;  T_body_to_optical(1, 1) =  0.0;  T_body_to_optical(1, 2) = -1.0;
+        T_body_to_optical(2, 0) =  1.0;  T_body_to_optical(2, 1) =  0.0;  T_body_to_optical(2, 2) =  0.0;
+
+        T_lidar_to_cam = T_body_to_optical * T_lidar_to_body;
+
+        std::cerr << "[OSDaR23] T_cam_to_parent t= ["
+                  << T_cam_to_parent(0,3) << ", " << T_cam_to_parent(1,3) << ", " << T_cam_to_parent(2,3) << "]\n"
+                  << "[OSDaR23] T_lidar_to_optical t= ["
+                  << T_lidar_to_cam(0,3) << ", " << T_lidar_to_cam(1,3) << ", " << T_lidar_to_cam(2,3) << "]\n";
         return true;
     }
 }

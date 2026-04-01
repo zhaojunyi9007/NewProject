@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 
 from python.features.interfaces import FeatureFrameContext
 
@@ -20,7 +21,7 @@ class SamSubprocessFeaturePlugin:
         checkpoint = sam_cfg["checkpoint_path"]
         heuristics_cfg = sam_cfg.get("heuristics", {})
         cmd = [
-            "python", "python/run_sam.py",
+            sys.executable, "python/run_sam.py",
             "--image", context.image_path,
             "--checkpoint", checkpoint,
             "--output_dir", context.output_dir,
