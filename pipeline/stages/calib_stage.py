@@ -53,10 +53,27 @@ def _load_osdar23_init_extrinsic(calib_path: str, camera_folder: str):
         i += 1
     if T_cam_to_parent is None:
         return None
-    T_lidar_to_cam = np.linalg.inv(T_cam_to_parent)
+
+    T_lidar_to_body = np.linalg.inv(T_cam_to_parent)
+
+    # OSDaR23 reference/body frame: X=driving direction, Y=left, Z=up  (see calibration.txt header)
+    # Camera optical frame (OpenCV / pinhole K convention): X=right, Y=down, Z=into-scene (forward)
+    # Mapping:  optical-X = -body-Y,  optical-Y = -body-Z,  optical-Z = body-X
+    R_body_to_optical = np.array([
+        [0, -1,  0],
+        [0,  0, -1],
+        [1,  0,  0],
+    ], dtype=np.float64)
+    T_body_to_optical = np.eye(4, dtype=np.float64)
+    T_body_to_optical[:3, :3] = R_body_to_optical
+
+    T_lidar_to_cam = T_body_to_optical @ T_lidar_to_body
     R = T_lidar_to_cam[:3, :3]
     t = T_lidar_to_cam[:3, 3]
+    print(f"  [OSDaR23 calib] T_cam_to_parent t={T_cam_to_parent[:3,3].tolist()}")
+    print(f"  [OSDaR23 calib] T_lidar_to_optical t={t.tolist()}")
     rvec, _ = cv2.Rodrigues(R)
+    print(f"  [OSDaR23 calib] rvec={rvec.reshape(-1).tolist()}")
     return rvec.reshape(-1).tolist(), t.reshape(-1).tolist()
 
 
