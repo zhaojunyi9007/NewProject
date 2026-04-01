@@ -4,6 +4,8 @@ import os
 import argparse
 import sys
 
+from pipeline.datasets import get_adapter
+
 def _infer_sam_base_from_feature_base(feature_base: str) -> str:
     """
     Infer sam feature base path from lidar feature_base.
@@ -116,142 +118,38 @@ def edge_alignment_stats(points, R_rect, P_rect, R, t, img_w, img_h, dist01: np.
         "ratio_le_0.20": float((arr <= 0.20).mean()),
     }
 
-def load_kitti_calib(calib_file):
-    """
-    加载KITTI标定文件
-    如果文件不存在或解析失败，返回默认值
-    支持P2/P_rect_02和R0_rect/R_rect_00格式
-    """
-    default_k = np.array([[721.5, 0, 609.5],
-                          [0, 721.5, 172.8],
-                          [0, 0, 1]])
-    default_r_rect = np.eye(3)
-    default_p_rect = np.array([[721.5, 0, 609.5, 0.0],
-                               [0, 721.5, 172.8, 0.0],
-                               [0, 0, 1, 0.0]])
-
+def _infer_dataset_format_from_calib_file(calib_file: str) -> str:
     if not calib_file or not os.path.exists(calib_file):
-        print("[Warning] No calib_file provided; using default camera intrinsics (KITTI typical values)")
-        
-        return default_k, default_r_rect, default_p_rect
-    
-    try:
-        K = None
-        R_rect = None
-        P_rect = None
-
-        with open(calib_file, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                # 支持P2:和P_rect_02:格式
-                if line.startswith("P2:") or line.startswith("P_rect_02:"):
-                    parts = line.split(":")
-                    if len(parts) >= 2:
-                        values_str = parts[1].strip()
-                        values = list(map(float, values_str.split()))
-                        if len(values) == 12:
-                            P_rect = np.array(values, dtype=np.float64).reshape(3, 4)
-                            K = P_rect[:, :3].copy()
-                elif line.startswith("R0_rect:") or line.startswith("R_rect_00:"):
-                    parts = line.split(":")
-                    if len(parts) >= 2:
-                        values_str = parts[1].strip()
-                        values = list(map(float, values_str.split()))
-                        if len(values) == 9:
-                            R_rect = np.array(values, dtype=np.float64).reshape(3, 3)
-        if K is None or P_rect is None:
-            raise ValueError("P2/P_rect_02 not found in calibration file.")
-        if R_rect is None:
-            R_rect = default_r_rect
-        print(f"[Info] Loaded camera intrinsics and rectification from {calib_file}")
-        return K, R_rect, P_rect
-    except Exception as e:
-        print(f"[Error] Failed to parse KITTI calibration file: {e}")
-        print("[Warning] Using default camera intrinsics")
-        return default_k, default_r_rect, default_p_rect
-
-
-def _extract_numbers(line: str):
-    import re
-    nums = re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", line)
-    return [float(x) for x in nums]
-
-
-def load_osdar23_calib(calib_file: str):
-    """
-    Load OSDaR23 calibration.txt for visualization.
-    We align with the optimizer's OSDaR branch:
-      - R_rect = Identity
-      - P_rect = [K | 0]
-      - Extrinsic is optimized separately; here we only load intrinsics.
-    """
-    if not calib_file or not os.path.exists(calib_file):
-        print("[Warning] OSDaR23 calib_file missing; fallback to default intrinsics")
-        K = np.array([[1000.0, 0.0, 960.0],
-                      [0.0, 1000.0, 540.0],
-                      [0.0, 0.0, 1.0]], dtype=np.float64)
-        R_rect = np.eye(3, dtype=np.float64)
-        P_rect = np.hstack([K, np.zeros((3, 1), dtype=np.float64)])
-        return K, R_rect, P_rect
-
-    with open(calib_file, "r", encoding="utf-8", errors="ignore") as f:
-        lines = [ln.strip() for ln in f.readlines()]
-
-    K = None
-    in_camera_matrix = False
-    rows = []
-    for ln in lines:
-        low = ln.lower()
-        if ("camera_matrix" in low) and ("intrinsics_pinhole" in low):
-            in_camera_matrix = True
-            rows = []
-            continue
-        if in_camera_matrix:
-            vals = _extract_numbers(ln)
-            if len(vals) >= 3:
-                rows.append(vals[:3])
-            if len(rows) >= 3:
-                K = np.array(rows[:3], dtype=np.float64)
-                break
-
-    if K is None:
-        # Try a looser match: first 3x3 block after a 'camera_matrix' line.
-        for i, ln in enumerate(lines):
-            if "camera_matrix" in ln.lower():
-                rows = []
-                for j in range(i + 1, min(i + 10, len(lines))):
-                    vals = _extract_numbers(lines[j])
-                    if len(vals) >= 3:
-                        rows.append(vals[:3])
-                    if len(rows) >= 3:
-                        K = np.array(rows[:3], dtype=np.float64)
-                        break
-            if K is not None:
-                break
-
-    if K is None:
-        raise RuntimeError(f"Cannot parse OSDaR23 camera_matrix from: {calib_file}")
-
-    R_rect = np.eye(3, dtype=np.float64)
-    P_rect = np.hstack([K, np.zeros((3, 1), dtype=np.float64)])
-    return K, R_rect, P_rect
-
-
-def load_calib_auto(calib_file: str):
-    """
-    Auto-detect KITTI vs OSDaR23 calibration format.
-    """
-    if not calib_file or not os.path.exists(calib_file):
-        return load_kitti_calib(calib_file)
+        return "kitti"
     try:
         with open(calib_file, "r", encoding="utf-8", errors="ignore") as f:
-            head = f.read(4096).lower()
-        if "intrinsics_pinhole" in head or "pose_wrt_parent" in head:
-            print("[Info] Detected OSDaR23 calibration.txt format")
-            return load_osdar23_calib(calib_file)
+            head = f.read(256 * 1024).lower()
+        # OSDaR23 calibration.txt typically contains these fields (not always in first 4KB).
+        if ("intrinsics_pinhole" in head) or ("pose_wrt_parent" in head) or ("data_folder:" in head and "camera_matrix" in head):
+            return "osdar23"
     except Exception:
         pass
-    return load_kitti_calib(calib_file)
+    return "kitti"
+
+
+def _infer_osdar_camera_from_img_path(img_path: str) -> str:
+    # OSDaR23 layout: <sequence_root>/<camera_folder>/<counter>_<timestamp>.png
+    if not img_path:
+        return "rgb_center"
+    parent = os.path.basename(os.path.dirname(img_path))
+    return parent or "rgb_center"
+
+
+def load_calib_via_adapter(calib_file: str, dataset_format: str | None = None, image_sensor: str | None = None):
+    """
+    Load (K, R_rect, P_rect) via dataset adapters.
+    This avoids ad-hoc parsing and keeps behavior consistent with the pipeline/optimizer.
+    """
+    fmt = (dataset_format or "").strip().lower() or _infer_dataset_format_from_calib_file(calib_file)
+    cam = (image_sensor or "").strip() or "rgb_center"
+    cfg = {"data": {"dataset_format": fmt, "calib_file": calib_file, "image_sensor": cam}}
+    ds = get_adapter(cfg)
+    return ds.load_intrinsics()
 
 def load_features(feature_base, point_source="edge"):
     """
@@ -553,14 +451,14 @@ def main():
         epilog="""
 Examples:
   # 使用标定结果文件自动加载外参
-  python3 visual_result.py --img image.png --feature_base result/0000000000
+  python3 tools/visualize.py --img image.png --feature_base result/0000000000
   
   # 手动指定外参
-  python3 visual_result.py --img image.png --feature_base result/0000000000 \\
+  python3 tools/visualize.py --img image.png --feature_base result/0000000000 \\
       --r_vec 0.01 0.02 0.03 --t_vec 0.0 -0.3 1.8
   
   # 指定相机标定文件
-  python3 visual_result.py --img image.png --feature_base result/0000000000 \\
+  python3 tools/visualize.py --img image.png --feature_base result/0000000000 \\
       --calib_file /path/to/calib.txt
         """)
     
@@ -570,6 +468,10 @@ Examples:
                         help="Path to features (e.g., result/0000000000)")
     parser.add_argument("--calib_file", type=str, default="", 
                         help="KITTI calibration file (optional, e.g., calib_cam_to_cam.txt)")
+    parser.add_argument("--dataset_format", type=str, default="",
+                        help="可选：强制指定数据集格式（kitti / osdar23 / osdar）。不填则根据 calib_file 自动推断。")
+    parser.add_argument("--image_sensor", type=str, default="",
+                        help="可选：OSDaR23 相机 data_folder（如 rgb_center）。不填则尝试从 --img 路径推断。")
     parser.add_argument("--r_vec", type=float, nargs=3, default=None, 
                         help="Rotation Vector (rx ry rz) in radians. If not provided, will try to load from <feature_base>_calib_result.txt")
     parser.add_argument("--t_vec", type=float, nargs=3, default=None, 
@@ -621,7 +523,11 @@ Examples:
         return 1
 
     # 2. 加载相机内参/整流/投影矩阵（KITTI / OSDaR23 自动识别）
-    K, R_rect_loaded, P_rect = load_calib_auto(args.calib_file)
+    # Prefer dataset adapter to keep behavior aligned with the pipeline.
+    # For OSDaR23, allow selecting camera intrinsics by image_sensor (data_folder).
+    img_sensor = args.image_sensor.strip() or _infer_osdar_camera_from_img_path(args.img)
+    ds_fmt = args.dataset_format.strip().lower() or _infer_dataset_format_from_calib_file(args.calib_file)
+    K, R_rect_loaded, P_rect = load_calib_via_adapter(args.calib_file, dataset_format=ds_fmt, image_sensor=img_sensor)
     R_rect = R_rect_loaded
     if args.skip_rectification:
         print("[Info] Skipping rectification (R_rect = Identity)")

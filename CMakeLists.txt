@@ -20,7 +20,7 @@ find_package(Ceres REQUIRED)
 # Put project path first so we can provide tiny compatibility shims
 # (e.g. a glog namespace bridge for some conda builds).
 include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}  # 项目根目录，用于包含 "include/common.h" + shim headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp   # cpp/ 下有 include/common.h 等头文件
     ${PCL_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIRS}
@@ -52,8 +52,8 @@ target_link_libraries(lidar_extractor
 
 # --- Executable: Optimizer (Coarse-to-Fine 标定) ---
 add_executable(optimizer
-    src/main.cpp
-    src/edge_calibrator.cpp
+    cpp/main.cpp
+    cpp/edge_calibrator.cpp
     cpp/io_utils.cpp
     cpp/optimizer_data_loader.cpp
     cpp/optimizer_scoring.cpp

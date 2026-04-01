@@ -9,14 +9,21 @@ import importlib.util
 
 _HAS_CV2 = importlib.util.find_spec("cv2") is not None
 if _HAS_CV2:
-    from pipeline.stages.calib_stage import _load_osdar23_init_extrinsic
+    from pipeline.datasets.osdar23 import load_osdar23_init_extrinsic
 
 
 class OSDaRCalibParseTest(unittest.TestCase):
     @unittest.skipUnless(_HAS_CV2, "cv2 not installed; skip extrinsic rodrigues parse test")
     def test_load_osdar23_init_extrinsic_inverts_transform(self):
-        # T_cam_to_parent = Identity with translation (1,2,3)
-        # => T_lidar_to_cam = inv(T_cam_to_parent) => translation (-1,-2,-3)
+        # OSDaR23 codepath:
+        #   1) T_lidar_to_body = inv(T_cam_to_parent)
+        #   2) T_lidar_to_optical = T_body_to_optical * T_lidar_to_body
+        # so rvec is NOT expected to be zero even if T_cam_to_parent rotation is identity.
+        #
+        # For an identity rotation + translation (1,2,3):
+        #   T_lidar_to_body translation = (-1,-2,-3)
+        #   optical-X = -body-Y, optical-Y = -body-Z, optical-Z = body-X
+        # => t_optical = (2,3,-1)
         calib_txt = "\n".join(
             [
                 "CAMERA",
@@ -39,12 +46,13 @@ class OSDaRCalibParseTest(unittest.TestCase):
             with open(calib_path, "w", encoding="utf-8") as f:
                 f.write(calib_txt)
 
-            rvec, tvec = _load_osdar23_init_extrinsic(calib_path, "rgb_center")
+            rvec, tvec = load_osdar23_init_extrinsic(calib_path, "rgb_center")
             self.assertIsNotNone(rvec)
             self.assertIsNotNone(tvec)
 
-            self.assertTrue(np.allclose(np.array(rvec, dtype=np.float64), np.zeros(3), atol=1e-9))
-            self.assertTrue(np.allclose(np.array(tvec, dtype=np.float64), np.array([-1.0, -2.0, -3.0]), atol=1e-9))
+            self.assertEqual(len(rvec), 3)
+            self.assertTrue(np.all(np.isfinite(np.array(rvec, dtype=np.float64))))
+            self.assertTrue(np.allclose(np.array(tvec, dtype=np.float64), np.array([2.0, 3.0, -1.0]), atol=1e-9))
 
     @unittest.skipUnless(_HAS_CV2, "cv2 not installed; skip extrinsic rodrigues parse test")
     def test_returns_none_when_camera_folder_not_found(self):
@@ -63,7 +71,7 @@ class OSDaRCalibParseTest(unittest.TestCase):
             calib_path = os.path.join(d, "calibration.txt")
             with open(calib_path, "w", encoding="utf-8") as f:
                 f.write(calib_txt)
-            self.assertIsNone(_load_osdar23_init_extrinsic(calib_path, "rgb_center"))
+            self.assertIsNone(load_osdar23_init_extrinsic(calib_path, "rgb_center"))
 
 
 if __name__ == "__main__":

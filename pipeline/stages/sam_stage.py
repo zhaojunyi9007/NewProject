@@ -4,9 +4,9 @@
 import os
 
 from pipeline.context import RuntimeContext
-from pipeline.dataset_resolver import get_dataset_resolver
-from pipeline.feature_plugin_registry import get_feature_plugin
-from python.features.interfaces import FeatureFrameContext
+from pipeline.datasets import get_adapter
+from pipeline.sam.plugin_registry import get_feature_plugin
+from pipeline.sam.interfaces import FeatureFrameContext
 
 
 def run(context: RuntimeContext) -> None:
@@ -17,10 +17,10 @@ def run(context: RuntimeContext) -> None:
     output_dir = context.config["data"]["sam_output_dir"]
     plugin = get_feature_plugin(context.config)
     print(f"[Info] SAM特征插件: {plugin.name}")
-    resolver = get_dataset_resolver(context.config)
+    adapter = get_adapter(context.config)
 
     for frame_id in context.frame_ids:
-        img_path = resolver.resolve_image(frame_id)
+        img_path = adapter.resolve_image(frame_id)
         if not img_path or not os.path.exists(img_path):
             print(f"[Warning] 图像不存在: {img_path}")
             continue

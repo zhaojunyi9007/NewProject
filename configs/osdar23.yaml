@@ -1,3 +1,6 @@
+# Reuse common defaults
+_base: base.yaml
+
 # EdgeCalib v2.0 - OSDaR23 数据集配置
 # 使用方式: python run_pipeline.py --config configs/osdar23.yaml --frame-ids 12
 
@@ -34,35 +37,7 @@ frames:
   frame_ids: [12]
   fusion_window: 1   # 单帧验证时设为 1；多帧融合建议 3~5
 
-# ========================================
-# SAM 特征提取配置（与 KITTI 共享模型路径）
-# ========================================
-sam:
-  checkpoint_path: "/gz-data/model/sam_vit_h_4b8939.pth"
-  model_type: "vit_h"
-  feature_plugin: "sam_subprocess"
-  points_per_side: 16
-  pred_iou_thresh: 0.86
-  stability_score_thresh: 0.92
-  min_mask_region_area: 500
-  heuristics:
-    min_mask_area_ratio: 0.001
-    max_background_area_ratio: 0.15
-    sky_mask_bottom_ratio: 0.3
-    ground_region_top_ratio: 0.5
-    flat_ground_aspect_ratio: 3.0
-    structural_aspect_ratio: 3.0
-    contour_stddev_threshold: 10.0
-    min_arc_length_ratio: 0.06
-    global_min_line_length_ratio: 0.015
-    ground_min_line_length_ratio: 0.06
-    sky_min_line_length_ratio: 0.03
-    fused_top_black_ratio: 0.20
-    fused_bottom_black_ratio: 0.80
-    distance_max_ratio: 0.15
-  mask_alignment:
-    enabled: false
-    output_dir: "result_osdar23/mask_alignment"
+# SAM 配置默认来自 base.yaml；如需覆盖可在此处添加 sam: {...}
 
 # ========================================
 # LiDAR 特征提取配置（针对 OSDaR23 点云密度微调）
@@ -94,20 +69,10 @@ lidar:
 # 标定优化配置
 # ========================================
 calibration:
-  constraint_adapter: "legacy_env_constraints"
-  extrinsic_init:
-    target_camera: "cam2"
   # 初始外参由 OSDaR23 calibration.txt 自动读取，这里作为 fallback
   initial_extrinsic:
     rotation: [0.0, 0.0, 0.0]
     translation: [0.0, 0.0, 0.0]
-
-  temporal_validation:
-    enabled: false
-    smoothness_threshold: 0.05
-    history_frames: 3
-    min_confidence: 0.7
-    history_file: "calib_history.txt"
 
   ab_experiment:
     opt_translation: true

@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Protocol, Tuple
 
-from pipeline.optimizer_env_adapter import build_optimizer_env
+from pipeline.optimizer.env_builder import build_optimizer_env
 
 
 class OptimizerConstraintAdapter(Protocol):

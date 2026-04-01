@@ -18,6 +18,8 @@ compile_commands.json
 # --- 项目生成的可执行文件 (根据你的CMakeLists) ---
 lidar_extractor
 optimizer
+!pipeline/optimizer/
+!pipeline/optimizer/**
 
 # --- Python 缓存与环境 ---
 __pycache__/

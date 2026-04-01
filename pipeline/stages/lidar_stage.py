@@ -5,7 +5,7 @@ import os
 import subprocess
 
 from pipeline.context import RuntimeContext
-from pipeline.dataset_resolver import get_dataset_resolver
+from pipeline.datasets import get_adapter
 
 
 def run(context: RuntimeContext) -> None:
@@ -18,7 +18,7 @@ def run(context: RuntimeContext) -> None:
     lidar_cfg = context.config.get("lidar", {})
     ndt_cfg = lidar_cfg.get("ndt", {}) if isinstance(lidar_cfg.get("ndt", {}), dict) else {}
     temporal_filter_cfg = lidar_cfg.get("temporal_filter", {}) if isinstance(lidar_cfg.get("temporal_filter", {}), dict) else {}
-    resolver = get_dataset_resolver(context.config)
+    adapter = get_adapter(context.config)
 
     extractor_env = os.environ.copy()
     env_map = {
@@ -56,7 +56,7 @@ def run(context: RuntimeContext) -> None:
         cloud_paths = []
         missing = False
         for fid in fusion_frames:
-            p = resolver.resolve_lidar(fid)
+            p = adapter.resolve_lidar(fid)
             if not p or not os.path.exists(p):
                 missing = True
                 break

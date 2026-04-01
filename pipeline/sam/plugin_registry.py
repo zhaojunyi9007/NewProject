@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from python.features.mask_alignment_plugin import MaskAlignmentFeaturePlugin
-from python.features.plugins.sam_subprocess_plugin import SamSubprocessFeaturePlugin
+from pipeline.sam.mask_alignment_plugin import MaskAlignmentFeaturePlugin
+from pipeline.sam.subprocess_plugin import SamSubprocessFeaturePlugin
 
 
 def get_feature_plugin(config: Dict[str, Any]):
