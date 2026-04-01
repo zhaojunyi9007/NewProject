@@ -321,6 +321,41 @@ namespace IOUtils {
         return out;
     }
 
+    /// Read numbers from `first_segment`, then keep reading lines from `file` until `need_count`
+    /// values are collected (row-major). Returns false on EOF before enough numbers.
+    static bool _collect_numbers_multiline(std::ifstream& file,
+                                         const std::string& first_segment,
+                                         size_t need_count,
+                                         std::vector<double>& out,
+                                         const char* context_label) {
+        out.clear();
+        auto append_line = [&](const std::string& s) {
+            std::vector<double> nums = _extract_numbers(s);
+            for (double x : nums) {
+                if (out.size() >= need_count) {
+                    return;
+                }
+                out.push_back(x);
+            }
+        };
+        append_line(first_segment);
+        std::string extra_line;
+        while (out.size() < need_count) {
+            if (!std::getline(file, extra_line)) {
+                std::cerr << "[Error] OSDaR " << context_label << " truncated: need " << need_count
+                          << " numbers, got " << out.size() << " (EOF)" << std::endl;
+                return false;
+            }
+            append_line(extra_line);
+        }
+        if (out.size() < need_count) {
+            std::cerr << "[Error] OSDaR " << context_label << " truncated: need " << need_count
+                      << " numbers, got " << out.size() << std::endl;
+            return false;
+        }
+        return true;
+    }
+
     bool LoadOSDaRCalib(const std::string& calib_file,
                         const std::string& camera_folder,
                         Eigen::Matrix3d& K,
@@ -363,46 +398,28 @@ namespace IOUtils {
             if (!cam_match) continue;
 
             if (trimmed.rfind("camera_matrix:", 0) == 0) {
-                // This line contains first row. Next two lines contain remaining rows.
-                std::string row1 = trimmed.substr(std::string("camera_matrix:").size());
-                std::string row2, row3;
-                if (!std::getline(file, row2) || !std::getline(file, row3)) {
-                    std::cerr << "[Error] OSDaR camera_matrix truncated for " << want << std::endl;
+                std::string after_colon = trimmed.substr(std::string("camera_matrix:").size());
+                std::vector<double> nums;
+                if (!_collect_numbers_multiline(file, after_colon, 9, nums, "camera_matrix")) {
                     return false;
                 }
-                auto n1 = _extract_numbers(row1);
-                auto n2 = _extract_numbers(row2);
-                auto n3 = _extract_numbers(row3);
-                if (n1.size() < 3 || n2.size() < 3 || n3.size() < 3) {
-                    std::cerr << "[Error] Failed to parse OSDaR camera_matrix for " << want << std::endl;
-                    return false;
-                }
-                K << n1[0], n1[1], n1[2],
-                     n2[0], n2[1], n2[2],
-                     n3[0], n3[1], n3[2];
+                K << nums[0], nums[1], nums[2],
+                     nums[3], nums[4], nums[5],
+                     nums[6], nums[7], nums[8];
                 got_K = true;
                 continue;
             }
 
             if (trimmed.rfind("homogeneous transform:", 0) == 0) {
-                // Next 4 lines form 4x4.
-                std::string r1, r2, r3, r4;
-                if (!std::getline(file, r1) || !std::getline(file, r2) || !std::getline(file, r3) || !std::getline(file, r4)) {
-                    std::cerr << "[Error] OSDaR homogeneous transform truncated for " << want << std::endl;
+                std::string after_colon = trimmed.substr(std::string("homogeneous transform:").size());
+                std::vector<double> nums;
+                if (!_collect_numbers_multiline(file, after_colon, 16, nums, "homogeneous transform")) {
                     return false;
                 }
-                auto n1 = _extract_numbers(r1);
-                auto n2 = _extract_numbers(r2);
-                auto n3 = _extract_numbers(r3);
-                auto n4 = _extract_numbers(r4);
-                if (n1.size() < 4 || n2.size() < 4 || n3.size() < 4 || n4.size() < 4) {
-                    std::cerr << "[Error] Failed to parse OSDaR homogeneous transform for " << want << std::endl;
-                    return false;
-                }
-                T_cam_to_parent << n1[0], n1[1], n1[2], n1[3],
-                                   n2[0], n2[1], n2[2], n2[3],
-                                   n3[0], n3[1], n3[2], n3[3],
-                                   n4[0], n4[1], n4[2], n4[3];
+                T_cam_to_parent << nums[0],  nums[1],  nums[2],  nums[3],
+                                   nums[4],  nums[5],  nums[6],  nums[7],
+                                   nums[8],  nums[9],  nums[10], nums[11],
+                                   nums[12], nums[13], nums[14], nums[15];
                 got_T_cam_to_parent = true;
                 continue;
             }

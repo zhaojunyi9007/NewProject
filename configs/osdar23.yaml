@@ -37,7 +37,9 @@ frames:
   frame_ids: [12]
   fusion_window: 1   # 单帧验证时设为 1；多帧融合建议 3~5
 
-# SAM 配置默认来自 base.yaml；如需覆盖可在此处添加 sam: {...}
+sam:
+  mask_alignment:
+    output_dir: "result_osdar23/mask_alignment"
 
 # ========================================
 # LiDAR 特征提取配置（针对 OSDaR23 点云密度微调）
@@ -52,7 +54,7 @@ lidar:
   rail_max_lines: 2
   pole_z_min: -1.0
   pole_z_max: 3.5
-  pole_ransac_threshold: 0.08
+  pole_ransac_threshold: 0.15
   pole_vertical_tolerance: 0.15
   pole_max_lines: 60
   ndt:

@@ -42,17 +42,21 @@ def load_osdar23_init_extrinsic(calib_path: str, camera_folder: str) -> Optional
             i += 1
             continue
         if in_cam and cam_match and s.startswith("homogeneous transform:"):
-            if i + 4 >= len(lines):
+            rest = s[len("homogeneous transform:") :].strip()
+            nums: List[float] = []
+            for x in _extract_numbers(rest):
+                if len(nums) < 16:
+                    nums.append(x)
+            j = i + 1
+            while len(nums) < 16 and j < len(lines):
+                for x in _extract_numbers(lines[j]):
+                    if len(nums) < 16:
+                        nums.append(x)
+                j += 1
+            if len(nums) < 16:
                 break
-            mat_lines = [lines[i + 1], lines[i + 2], lines[i + 3], lines[i + 4]]
-            nums = []
-            for ml in mat_lines:
-                cleaned = "".join((c if (c.isdigit() or c in ".-+eE") else " ") for c in ml)
-                vals = [float(x) for x in cleaned.split() if x]
-                nums.append(vals)
-            if all(len(r) >= 4 for r in nums):
-                T_cam_to_parent = np.array([r[:4] for r in nums[:4]], dtype=np.float64)
-                break
+            T_cam_to_parent = np.array(nums[:16], dtype=np.float64).reshape(4, 4)
+            break
         i += 1
     if T_cam_to_parent is None:
         return None
@@ -119,18 +123,20 @@ def load_osdar23_intrinsics(calib_file: str, camera_folder: str) -> Tuple[np.nda
             i += 1
             continue
         if in_cam and cam_match and s.strip().startswith("camera_matrix:"):
-            row1 = s[len("camera_matrix:") :].strip()
-            # OSDaR23 may put numbers on next lines (camera_matrix: <newline> r1 r2 r3)
-            if i + 3 >= len(lines):
+            rest = s[len("camera_matrix:") :].strip()
+            nums: List[float] = []
+            for x in _extract_numbers(rest):
+                if len(nums) < 9:
+                    nums.append(x)
+            j = i + 1
+            while len(nums) < 9 and j < len(lines):
+                for x in _extract_numbers(lines[j]):
+                    if len(nums) < 9:
+                        nums.append(x)
+                j += 1
+            if len(nums) < 9:
                 break
-            r1 = row1 or lines[i + 1].strip()
-            r2 = lines[i + 2].strip()
-            r3 = lines[i + 3].strip()
-            n1 = _extract_numbers(r1)
-            n2 = _extract_numbers(r2)
-            n3 = _extract_numbers(r3)
-            if len(n1) >= 3 and len(n2) >= 3 and len(n3) >= 3:
-                K = np.array([n1[:3], n2[:3], n3[:3]], dtype=np.float64)
+            K = np.array(nums[:9], dtype=np.float64).reshape(3, 3)
             break
         i += 1
 

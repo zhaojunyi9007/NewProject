@@ -92,13 +92,6 @@ def load_runtime_config(config_path: str, cli_overrides: Iterable[Tuple[ConfigPa
     return merged
 
 
-def apply_data_paths_from_dataset(config: Dict[str, Any]) -> None:
-    """
-    Deprecated name: delegates to DatasetAdapter.apply_derived_paths (OSDaR23 path derivation).
-    """
-    get_adapter(config).apply_derived_paths(config)
-
-
 def prepare_runtime_config(config: Dict[str, Any]) -> None:
     """Apply dataset-specific path rules before validation and frame listing."""
     get_adapter(config).apply_derived_paths(config)
