@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(HSR_Lidar_Camera_Calibration)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Prefer conda environment libraries when available.
@@ -17,12 +17,14 @@ find_package(Eigen3 REQUIRED)
 find_package(Ceres REQUIRED)
 
 # --- Include Directories ---
+# Put project path first so we can provide tiny compatibility shims
+# (e.g. a glog namespace bridge for some conda builds).
 include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}  # 项目根目录，用于包含 "include/common.h" + shim headers
     ${PCL_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIRS}
     ${CERES_INCLUDE_DIRS}
-    ${CMAKE_CURRENT_SOURCE_DIR}  # 项目根目录，用于包含 "include/common.h"
 )
 
 link_directories(

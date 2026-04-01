@@ -4,6 +4,12 @@
 # 数据路径配置
 # ========================================
 data:
+  # 数据集格式：默认 kitti；OSDaR23 需设置为 osdar23，并提供 osdar_sequence_root
+  dataset_format: "kitti"   # kitti | osdar23
+  osdar_sequence_root: ""   # 例如: /path/to/1_calibration_1.1
+  image_sensor: "rgb_center"  # 仅 osdar23 生效：rgb_center / rgb_left / ...
+  osdar_duplicate_policy: "latest"  # latest | earliest（同一 counter 多文件时的选择策略）
+
   # KITTI格式数据路径
   velodyne_dir: "/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/velodyne_points/data"   # 点云数据目录
   image_dir: "/gz-data/dataset/2011_09_26/2011_09_26_drive_0001_sync/image_02/data"             # 图像数据目录

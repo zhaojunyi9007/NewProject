@@ -5,6 +5,7 @@ import os
 import subprocess
 
 from pipeline.context import RuntimeContext
+from pipeline.dataset_resolver import get_dataset_resolver
 
 
 def run(context: RuntimeContext) -> None:
@@ -12,12 +13,12 @@ def run(context: RuntimeContext) -> None:
     print("[阶段2] LiDAR特征提取 (含NDT多帧融合)")
     print("=" * 40)
 
-    velodyne_dir = context.config["data"]["velodyne_dir"]
     output_dir = context.config["data"]["lidar_output_dir"]
     fusion_window = context.config["frames"]["fusion_window"]
     lidar_cfg = context.config.get("lidar", {})
     ndt_cfg = lidar_cfg.get("ndt", {}) if isinstance(lidar_cfg.get("ndt", {}), dict) else {}
     temporal_filter_cfg = lidar_cfg.get("temporal_filter", {}) if isinstance(lidar_cfg.get("temporal_filter", {}), dict) else {}
+    resolver = get_dataset_resolver(context.config)
 
     extractor_env = os.environ.copy()
     env_map = {
@@ -52,17 +53,27 @@ def run(context: RuntimeContext) -> None:
             if j < len(context.frame_ids):
                 fusion_frames.append(context.frame_ids[j])
 
-        bin_paths = [os.path.join(velodyne_dir, f"{fid:010d}.bin") for fid in fusion_frames]
-        if not all(os.path.exists(p) for p in bin_paths):
+        cloud_paths = []
+        missing = False
+        for fid in fusion_frames:
+            p = resolver.resolve_lidar(fid)
+            if not p or not os.path.exists(p):
+                missing = True
+                break
+            cloud_paths.append(p)
+        if missing:
             print(f"[Warning] 部分点云文件不存在，跳过帧 {frame_id:010d}")
             continue
 
         output_base = os.path.join(output_dir, f"{frame_id:010d}")
 
-        print(f"\n处理帧 {frame_id:010d}，融合 {len(bin_paths)} 帧...")
+        print(f"\n处理帧 {frame_id:010d}，融合 {len(cloud_paths)} 帧...")
+        print(f"  logical_frame_id={frame_id:010d}")
+        print(f"  source_lidar={cloud_paths[-1] if cloud_paths else None}")
         print(f"  融合帧: {[f'{fid:010d}' for fid in fusion_frames]}")
+        print(f"  融合点云: {cloud_paths}")
 
-        cmd = ["./build/lidar_extractor", *bin_paths, output_base]
+        cmd = ["./build/lidar_extractor", *cloud_paths, output_base]
         subprocess.run(cmd, check=True, env=extractor_env)
 
     print(f"\n[完成] LiDAR特征已保存到: {output_dir}")

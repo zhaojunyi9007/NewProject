@@ -2,6 +2,10 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <vector>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 
@@ -297,6 +301,128 @@ namespace IOUtils {
             R_rect = Eigen::Matrix3d::Identity();
         }
         
+        return true;
+    }
+
+    static std::vector<double> _extract_numbers(const std::string& s) {
+        std::string buf;
+        buf.reserve(s.size());
+        for (char c : s) {
+            if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E') {
+                buf.push_back(c);
+            } else {
+                buf.push_back(' ');
+            }
+        }
+        std::stringstream ss(buf);
+        std::vector<double> out;
+        double v;
+        while (ss >> v) out.push_back(v);
+        return out;
+    }
+
+    bool LoadOSDaRCalib(const std::string& calib_file,
+                        const std::string& camera_folder,
+                        Eigen::Matrix3d& K,
+                        Eigen::Matrix4d& T_lidar_to_cam) {
+        std::ifstream file(calib_file);
+        if (!file.is_open()) {
+            std::cerr << "[Error] Cannot open OSDaR calibration file: " << calib_file << std::endl;
+            return false;
+        }
+
+        const std::string want = camera_folder.empty() ? "rgb_center" : camera_folder;
+        bool in_cam = false;
+        bool cam_match = false;
+        bool got_K = false;
+        bool got_T_cam_to_parent = false;
+        Eigen::Matrix4d T_cam_to_parent = Eigen::Matrix4d::Identity();
+
+        std::string line;
+        while (std::getline(file, line)) {
+            const std::string trimmed = [&] {
+                std::string t = line;
+                t.erase(t.begin(), std::find_if(t.begin(), t.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+                t.erase(std::find_if(t.rbegin(), t.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(), t.end());
+                return t;
+            }();
+
+            if (trimmed == "CAMERA") {
+                in_cam = true;
+                cam_match = false;
+                continue;
+            }
+            if (!in_cam) continue;
+
+            if (trimmed.rfind("data_folder:", 0) == 0) {
+                std::string folder = trimmed.substr(std::string("data_folder:").size());
+                folder.erase(folder.begin(), std::find_if(folder.begin(), folder.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+                cam_match = (folder == want);
+                continue;
+            }
+            if (!cam_match) continue;
+
+            if (trimmed.rfind("camera_matrix:", 0) == 0) {
+                // This line contains first row. Next two lines contain remaining rows.
+                std::string row1 = trimmed.substr(std::string("camera_matrix:").size());
+                std::string row2, row3;
+                if (!std::getline(file, row2) || !std::getline(file, row3)) {
+                    std::cerr << "[Error] OSDaR camera_matrix truncated for " << want << std::endl;
+                    return false;
+                }
+                auto n1 = _extract_numbers(row1);
+                auto n2 = _extract_numbers(row2);
+                auto n3 = _extract_numbers(row3);
+                if (n1.size() < 3 || n2.size() < 3 || n3.size() < 3) {
+                    std::cerr << "[Error] Failed to parse OSDaR camera_matrix for " << want << std::endl;
+                    return false;
+                }
+                K << n1[0], n1[1], n1[2],
+                     n2[0], n2[1], n2[2],
+                     n3[0], n3[1], n3[2];
+                got_K = true;
+                continue;
+            }
+
+            if (trimmed.rfind("homogeneous transform:", 0) == 0) {
+                // Next 4 lines form 4x4.
+                std::string r1, r2, r3, r4;
+                if (!std::getline(file, r1) || !std::getline(file, r2) || !std::getline(file, r3) || !std::getline(file, r4)) {
+                    std::cerr << "[Error] OSDaR homogeneous transform truncated for " << want << std::endl;
+                    return false;
+                }
+                auto n1 = _extract_numbers(r1);
+                auto n2 = _extract_numbers(r2);
+                auto n3 = _extract_numbers(r3);
+                auto n4 = _extract_numbers(r4);
+                if (n1.size() < 4 || n2.size() < 4 || n3.size() < 4 || n4.size() < 4) {
+                    std::cerr << "[Error] Failed to parse OSDaR homogeneous transform for " << want << std::endl;
+                    return false;
+                }
+                T_cam_to_parent << n1[0], n1[1], n1[2], n1[3],
+                                   n2[0], n2[1], n2[2], n2[3],
+                                   n3[0], n3[1], n3[2], n3[3],
+                                   n4[0], n4[1], n4[2], n4[3];
+                got_T_cam_to_parent = true;
+                continue;
+            }
+
+            // Stop after we have both.
+            if (got_K && got_T_cam_to_parent) {
+                break;
+            }
+        }
+
+        if (!got_K || !got_T_cam_to_parent) {
+            std::cerr << "[Error] OSDaR calib missing K/T for camera_folder=" << want << " in " << calib_file << std::endl;
+            return false;
+        }
+
+        // Convention assumption:
+        // File provides T_cam_to_parent: p_parent = R * p_cam + t
+        // For projection we need p_cam = R^T * (p_parent - t)
+        // With merged lidar being parent (identity), T_lidar_to_cam = inverse(T_cam_to_parent).
+        T_lidar_to_cam = T_cam_to_parent.inverse();
         return true;
     }
 }

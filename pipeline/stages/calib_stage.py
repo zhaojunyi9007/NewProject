@@ -10,6 +10,55 @@ import numpy as np
 from pipeline.context import RuntimeContext
 from pipeline.optimizer_constraint_adapter import get_optimizer_constraint_adapter
 
+def _load_osdar23_init_extrinsic(calib_path: str, camera_folder: str):
+    """
+    Parse OSDaR23 calibration.txt to get initial LiDAR->Camera extrinsic.
+    Assumption (matches C++ loader):
+      homogeneous transform in file is T_cam_to_parent: p_parent = R * p_cam + t
+      merged lidar frame equals parent -> T_lidar_to_cam = inverse(T_cam_to_parent)
+    """
+    if not calib_path or not os.path.exists(calib_path):
+        return None
+    want = (camera_folder or "rgb_center").strip()
+    in_cam = False
+    cam_match = False
+    T_cam_to_parent = None
+    with open(calib_path, "r", encoding="utf-8") as f:
+        lines = list(f)
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if s == "CAMERA":
+            in_cam = True
+            cam_match = False
+            i += 1
+            continue
+        if in_cam and s.startswith("data_folder:"):
+            folder = s.split(":", 1)[1].strip()
+            cam_match = (folder == want)
+            i += 1
+            continue
+        if in_cam and cam_match and s.startswith("homogeneous transform:"):
+            if i + 4 >= len(lines):
+                break
+            mat_lines = [lines[i + 1], lines[i + 2], lines[i + 3], lines[i + 4]]
+            nums = []
+            for ml in mat_lines:
+                cleaned = "".join((c if (c.isdigit() or c in ".-+eE") else " ") for c in ml)
+                vals = [float(x) for x in cleaned.split() if x]
+                nums.append(vals)
+            if all(len(r) >= 4 for r in nums):
+                T_cam_to_parent = np.array([r[:4] for r in nums[:4]], dtype=np.float64)
+                break
+        i += 1
+    if T_cam_to_parent is None:
+        return None
+    T_lidar_to_cam = np.linalg.inv(T_cam_to_parent)
+    R = T_lidar_to_cam[:3, :3]
+    t = T_lidar_to_cam[:3, 3]
+    rvec, _ = cv2.Rodrigues(R)
+    return rvec.reshape(-1).tolist(), t.reshape(-1).tolist()
+
 
 def _parse_velo_to_cam_file(calib_path):
     if not calib_path:
@@ -137,13 +186,23 @@ def run(context: RuntimeContext) -> None:
 
     init_r = context.config["calibration"]["initial_extrinsic"]["rotation"]
     init_t = context.config["calibration"]["initial_extrinsic"]["translation"]
-    velo_to_cam = _load_velo_to_cam_extrinsic(context.config)
-    if velo_to_cam:
-        init_r, init_t = velo_to_cam
-        print("[Info] 使用calib_velo_to_cam.txt中的R/T作为初始外参")
+    ds_fmt = str(context.config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
+    if ds_fmt in {"osdar23", "osdar"}:
+        cam_folder = str(context.config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
+        osdar_init = _load_osdar23_init_extrinsic(calib_file, cam_folder)
+        if osdar_init:
+            init_r, init_t = osdar_init
+            print(f"[Info] 使用OSDaR23 calibration.txt 读取初始外参, camera={cam_folder}")
+    else:
+        velo_to_cam = _load_velo_to_cam_extrinsic(context.config)
+        if velo_to_cam:
+            init_r, init_t = velo_to_cam
+            print("[Info] 使用calib_velo_to_cam.txt中的R/T作为初始外参")
 
     adapter = get_optimizer_constraint_adapter(context.config)
     optimizer_env, has_ab_overrides = adapter.build_env(context.config, os.environ.copy())
+    if ds_fmt in {"osdar23", "osdar"}:
+        optimizer_env["EDGECALIB_OSDAR_CAMERA"] = str(context.config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
     print(f"[Info] 优化约束适配器: {adapter.name}")
     if has_ab_overrides:
         print("[Info] 已加载 calibration.ab_experiment 参数并传递给 optimizer")
@@ -158,6 +217,9 @@ def run(context: RuntimeContext) -> None:
             continue
 
         print(f"\n优化帧 {frame_id:010d}...")
+        print(f"  logical_frame_id={frame_id:010d}")
+        print(f"  feature_base={feature_base}")
+        print(f"  sam_base={sam_base}")
         cmd = [
             "./build/optimizer",
             feature_base,

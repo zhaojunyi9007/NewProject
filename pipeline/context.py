@@ -46,7 +46,30 @@ def load_runtime_config(config_path: str, cli_overrides: Iterable[Tuple[ConfigPa
     return merged
 
 
+def apply_data_paths_from_dataset(config: Dict[str, Any]) -> None:
+    """
+    When dataset_format is OSDaR23 and osdar_sequence_root is set, derive standard paths:
+    image_dir = <root>/<image_sensor>, velodyne_dir = <root>/lidar, calib_file = <root>/calibration.txt
+    KITTI paths in yaml are left unchanged when dataset_format=kitti or root is empty.
+    """
+    data = config.setdefault("data", {})
+    fmt = str(data.get("dataset_format", "kitti") or "kitti").lower()
+    root = str(data.get("osdar_sequence_root", "") or "").strip()
+    if fmt in {"osdar23", "osdar"} and root:
+        sensor = str(data.get("image_sensor", "rgb_center") or "rgb_center").strip() or "rgb_center"
+        data["image_dir"] = os.path.join(root, sensor)
+        data["velodyne_dir"] = os.path.join(root, "lidar")
+        data["calib_file"] = os.path.join(root, "calibration.txt")
+
+
+def prepare_runtime_config(config: Dict[str, Any]) -> None:
+    """Apply dataset-specific path rules before validation and frame listing."""
+    apply_data_paths_from_dataset(config)
+
+
 def validate_config(config: Dict[str, Any]) -> None:
+    # Ensure dataset-derived paths are applied before validation.
+    prepare_runtime_config(config)
     required_paths = [
         ("data", "result_dir"),
         ("data", "sam_output_dir"),
@@ -69,10 +92,33 @@ def validate_config(config: Dict[str, Any]) -> None:
     if mode not in {"select", "all"}:
         raise ValueError(f"frames.mode 仅支持 select/all，当前: {mode}")
 
+    ds_fmt = str(config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
+    if ds_fmt not in {"kitti", "osdar23", "osdar"}:
+        raise ValueError(f"data.dataset_format 仅支持 kitti / osdar23，当前: {ds_fmt}")
+
     if mode == "select":
         frame_ids = config["frames"].get("frame_ids")
         if not isinstance(frame_ids, list) or not frame_ids:
             raise ValueError("frames.mode=select 时，frames.frame_ids 必须是非空列表")
+        _log_resolved_paths(config, [int(x) for x in frame_ids[:10]])
+
+
+def _log_resolved_paths(config: Dict[str, Any], frame_ids: list[int]) -> None:
+    if not frame_ids:
+        return
+    try:
+        from pipeline.dataset_resolver import get_dataset_resolver
+
+        resolver = get_dataset_resolver(config)
+    except Exception as e:
+        print(f"[Warning] Dataset resolver init failed: {e}")
+        return
+
+    print("[Info] Frame source resolution preview (up to 10 frames):")
+    for fid in frame_ids:
+        img = resolver.resolve_image(fid)
+        lidar = resolver.resolve_lidar(fid)
+        print(f"  frame_id={fid} image={img} lidar={lidar}")
 
 
 def parse_frame_ids(frame_ids_text: str | None) -> list[int] | None:
@@ -121,20 +167,15 @@ def create_output_dirs(config: Dict[str, Any]) -> None:
 
 
 def get_frame_list(config: Dict[str, Any]) -> list[int]:
+    from pipeline.dataset_resolver import get_dataset_resolver
+
     frames_cfg = config.get("frames", {})
     mode = frames_cfg.get("mode", "select")
     if mode == "select":
         return [int(x) for x in frames_cfg.get("frame_ids", [])]
 
-    image_dir = config.get("data", {}).get("image_dir", "")
-    if not image_dir or not os.path.isdir(image_dir):
-        return []
-
-    frame_ids: list[int] = []
-    for name in os.listdir(image_dir):
-        stem, ext = os.path.splitext(name)
-        if ext.lower() != ".png" or not stem.isdigit():
-            continue
-        frame_ids.append(int(stem))
-    frame_ids.sort()
+    prepare_runtime_config(config)
+    resolver = get_dataset_resolver(config)
+    frame_ids = resolver.list_available_frames()
+    _log_resolved_paths(config, frame_ids[:10])
     return frame_ids

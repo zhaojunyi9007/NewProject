@@ -24,6 +24,7 @@ class SamSubprocessFeaturePlugin:
             "--image", context.image_path,
             "--checkpoint", checkpoint,
             "--output_dir", context.output_dir,
+            "--output_prefix", f"{context.frame_id:010d}",
             "--model_type", str(sam_cfg.get("model_type", "vit_h")),
             "--points_per_side", str(sam_cfg.get("points_per_side", 16)),
             "--pred_iou_thresh", str(sam_cfg.get("pred_iou_thresh", 0.86)),
