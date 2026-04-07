@@ -6,6 +6,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+_repo_root = os.path.abspath(os.path.join(current_dir, ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 from sam_extractor import FeatureExtractor
 
 def main():
@@ -40,6 +44,23 @@ def main():
     parser.add_argument("--output_prefix", type=str, default="",
                         help="Override output filename prefix (e.g. '0000000012'). "
                              "When empty, falls back to image filename stem.")
+    parser.add_argument(
+        "--semantic_bundle",
+        action="store_true",
+        help="Phase 2: 输出语义概率、语义边缘、pseudo-BEV 等完整包（仍写入与 process_image 兼容的 sam 前缀文件）",
+    )
+    parser.add_argument(
+        "--calib_file",
+        type=str,
+        default="",
+        help="OSDaR23 calibration.txt（用于 pseudo-BEV 投影；不设则使用默认内参/单位外参）",
+    )
+    parser.add_argument(
+        "--camera_folder",
+        type=str,
+        default="rgb_center",
+        help="与 calibration.txt 中 data_folder 一致（默认 rgb_center）",
+    )
 
     args = parser.parse_args()
 
@@ -89,16 +110,85 @@ def main():
         },
     )
 
-   # 4. 处理图像
+    # 4. 处理图像
     if args.image:
         # 单个图像处理模式
         if not os.path.exists(args.image):
             print(f"[Error] Image file does not exist: {args.image}")
             sys.exit(1)
-        
+
+        stem = os.path.splitext(os.path.basename(args.image))[0]
+        prefix = (args.output_prefix or stem).strip()
+        try:
+            prefix10 = f"{int(prefix):010d}" if prefix.isdigit() else prefix
+        except ValueError:
+            prefix10 = prefix
+
         print(f"--- Processing single image: {args.image} ---")
-        extractor.process_image(args.image, args.output_dir,
-                                output_prefix=args.output_prefix or None)
+        if args.semantic_bundle:
+            import numpy as np
+
+            try:
+                from pipeline.datasets.osdar23 import load_osdar23_init_extrinsic, load_osdar23_intrinsics
+            except ImportError:
+                load_osdar23_intrinsics = None
+                load_osdar23_init_extrinsic = None
+
+            K = np.array(
+                [[1000.0, 0.0, 960.0], [0.0, 1000.0, 540.0], [0.0, 0.0, 1.0]], dtype=np.float64
+            )
+            rvec = np.zeros(3, dtype=np.float64)
+            tvec = np.array([0.0, -0.3, 1.8], dtype=np.float64)
+            if args.calib_file and load_osdar23_intrinsics and os.path.isfile(args.calib_file):
+                K, _, _ = load_osdar23_intrinsics(args.calib_file, args.camera_folder)
+                ext = load_osdar23_init_extrinsic(args.calib_file, args.camera_folder)
+                if ext:
+                    rvec = np.asarray(ext[0], dtype=np.float64).reshape(3)
+                    tvec = np.asarray(ext[1], dtype=np.float64).reshape(3)
+
+            frame_bundle_dir = os.path.join(args.output_dir, prefix10)
+            sam_output_base = os.path.join(args.output_dir, prefix10)
+            image_features_cfg = {
+                "semantic_classes": [
+                    "rail",
+                    "ballast",
+                    "pole",
+                    "signal",
+                    "platform",
+                    "building",
+                    "road",
+                    "vehicle",
+                    "vegetation",
+                    "sky",
+                ],
+                "save_logits": True,
+                "rail_class_names": ["rail", "ballast"],
+                "vertical_structure_classes": ["pole", "signal"],
+                "bottom_crop_ratio_for_edges": 0.0,
+                "keep_diagonal_lines": True,
+                "restrict_lsd_by_semantics": True,
+            }
+            bev_cfg = {
+                "x_range": [0.0, 80.0],
+                "y_range": [-20.0, 20.0],
+                "resolution": 0.1,
+            }
+            dataset_meta = {"reference_z": 0.0, "semantic_classes": image_features_cfg["semantic_classes"]}
+            extractor.process_image_feature_bundle(
+                args.image,
+                frame_bundle_dir,
+                sam_output_base,
+                image_features_cfg,
+                bev_cfg,
+                K,
+                rvec,
+                tvec,
+                dataset_meta,
+            )
+        else:
+            extractor.process_image(
+                args.image, args.output_dir, output_prefix=args.output_prefix or None
+            )
         print(f"\n[Done] Feature extracted and saved to: {args.output_dir}")
     
     else:

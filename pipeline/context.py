@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from copy import deepcopy
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 import os
 
 import yaml
@@ -19,8 +19,17 @@ ConfigPath = Tuple[str, ...]
 
 @dataclass
 class RuntimeContext:
+    """Per-run pipeline state. Phase 1+ pose fields filled by later stages."""
+
     config: Dict[str, Any]
     frame_ids: list[int]
+    current_pose_init: Any = None
+    current_pose_bev: Any = None
+    bev_pose_by_frame: Dict[int, Any] = field(default_factory=dict)
+    current_pose_semantic: Any = None
+    current_pose_refined: Any = None
+    frame_bundle_ids: Optional[List[int]] = None
+    paths: Dict[str, str] = field(default_factory=dict)
 
 
 def _set_nested(config: Dict[str, Any], path: ConfigPath, value: Any) -> None:
@@ -169,6 +178,9 @@ def apply_cli_semantic_overrides(config: Dict[str, Any], result_dir: str | None,
             "lidar_output_dir": "lidar_features",
             "calib_output_dir": "calibration",
             "visual_output_dir": "visualization",
+            "image_features_output_dir": "image_features",
+            "bev_init_output_dir": "bev_init",
+            "refinement_output_dir": "refinement",
         }
         for key, default_leaf in linked_dirs.items():
             current_path = str(data_cfg.get(key, "")).strip()
@@ -179,19 +191,65 @@ def apply_cli_semantic_overrides(config: Dict[str, Any], result_dir: str | None,
         frames_cfg["mode"] = "select"
 
 
+def resolve_stage_paths(config: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve canonical output directories for each pipeline stage."""
+    data = config.get("data", {})
+    rd = str(data.get("result_dir", "result") or "result")
+
+    def _abs(key: str, default_leaf: str) -> str:
+        p = data.get(key)
+        if p is not None and str(p).strip():
+            return os.path.abspath(str(p))
+        return os.path.abspath(os.path.join(rd, default_leaf))
+
+    return {
+        "result_dir": os.path.abspath(rd),
+        "sam": _abs("sam_output_dir", "sam_features"),
+        "lidar": _abs("lidar_output_dir", "lidar_features"),
+        "calib": _abs("calib_output_dir", "calibration"),
+        "visual": _abs("visual_output_dir", "visualization"),
+        "image_features": _abs("image_features_output_dir", "image_features"),
+        "bev_init": _abs("bev_init_output_dir", "bev_init"),
+        "refinement": _abs("refinement_output_dir", "refinement"),
+    }
+
+
+def attach_stage_paths_to_context(context: RuntimeContext) -> None:
+    context.paths = resolve_stage_paths(context.config)
+
+
+def resolve_frame_bundle_window(config: Dict[str, Any], center_frame_id: int) -> List[int]:
+    """Return frame IDs for a sliding window around center_frame_id (refine.window_size)."""
+    refine_cfg = config.get("refine", {}) if isinstance(config.get("refine"), dict) else {}
+    w = int(refine_cfg.get("window_size", 5) or 5)
+    w = max(1, w)
+    half = w // 2
+    return [center_frame_id - half + i for i in range(w)]
+
+
+def load_refinement_state_if_exists(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Load persisted refinement state if present. Phase 1: optional JSON stub."""
+    paths = resolve_stage_paths(config)
+    cand = os.path.join(paths["refinement"], "state.json")
+    if not os.path.isfile(cand):
+        return None
+    try:
+        import json
+
+        with open(cand, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def create_output_dirs(config: Dict[str, Any]) -> None:
-    data_cfg = config.get("data", {})
-    output_keys = [
-        "result_dir",
-        "sam_output_dir",
-        "lidar_output_dir",
-        "calib_output_dir",
-        "visual_output_dir",
-    ]
-    for key in output_keys:
-        path = data_cfg.get(key)
-        if path:
+    paths = resolve_stage_paths(config)
+    for _k, path in paths.items():
+        if path and _k != "result_dir":
             os.makedirs(path, exist_ok=True)
+    rd = paths.get("result_dir")
+    if rd:
+        os.makedirs(rd, exist_ok=True)
 
 
 def get_frame_list(config: Dict[str, Any]) -> list[int]:

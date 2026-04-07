@@ -44,10 +44,25 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 add_executable(lidar_extractor 
     cpp/lidar_extractor.cpp 
     cpp/io_utils.cpp
+    cpp/bev_builder.cpp
+    cpp/rail_bev_extractor.cpp
+    cpp/vertical_structure_extractor.cpp
 )
 target_link_libraries(lidar_extractor 
     ${PCL_LIBRARIES}
     ${OpenCV_LIBS}
+)
+
+# --- Executable: BEV coarse initializer (Phase 4) ---
+add_executable(bev_initializer
+    cpp/bev_initializer.cpp
+    cpp/bev_matcher.cpp
+    cpp/bev_builder.cpp
+)
+target_link_libraries(bev_initializer
+    ${PCL_LIBRARIES}
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
 )
 
 # --- Executable: Optimizer (Coarse-to-Fine 标定) ---
@@ -57,6 +72,7 @@ add_executable(optimizer
     cpp/io_utils.cpp
     cpp/optimizer_data_loader.cpp
     cpp/optimizer_scoring.cpp
+    cpp/optimizer_semantic_scoring.cpp
 )
 target_link_libraries(optimizer
     ${PCL_LIBRARIES}
