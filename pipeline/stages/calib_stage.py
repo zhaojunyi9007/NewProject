@@ -18,9 +18,11 @@ def run(context: RuntimeContext) -> None:
     lidar_dir = context.config["data"]["lidar_output_dir"]
     calib_dir = context.config["data"]["calib_output_dir"]
     calib_file = context.config["data"]["calib_file"]
-    history_cfg = context.config.get("calibration", {}).get("temporal_validation", {}).get("history_file", "")
+    temporal_cfg = context.config.get("calibration", {}).get("temporal_validation", {})
+    history_enabled = bool(temporal_cfg.get("enabled", False))
+    history_cfg = temporal_cfg.get("history_file", "")
     history_file = ""
-    if history_cfg:
+    if history_enabled and history_cfg:
         history_file = str(history_cfg)
         if not os.path.isabs(history_file):
             history_file = os.path.join(calib_dir, history_file)
@@ -48,6 +50,10 @@ def run(context: RuntimeContext) -> None:
     print(f"[Info] 优化约束适配器: {adapter.name}")
     if has_ab_overrides:
         print("[Info] 已加载 calibration.ab_experiment 参数并传递给 optimizer")
+    if history_file:
+        print(f"[Info] 时序平滑已启用，history_file={history_file}")
+    else:
+        print("[Info] 时序平滑已禁用，不加载历史标定结果")
 
     for frame_id in context.frame_ids:
         feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")

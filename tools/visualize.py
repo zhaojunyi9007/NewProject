@@ -709,13 +709,11 @@ Examples:
     print("\n[Projecting Features]")
 
     # Optional: overlay edge distance map (helps judge alignment visually).
-    # Default behavior: enabled, because visual_stage does not pass flags.
+    # Keep it opt-in: the heatmap can mask projection quality and look like false color artifacts.
     sam_base = _infer_sam_base_from_feature_base(args.feature_base)
     dist01, _ = load_edge_dist_map(sam_base)
-    if dist01 is not None:
-        do_overlay = True if (not hasattr(args, "overlay_edge_dist")) else (args.overlay_edge_dist or True)
-        if do_overlay:
-            img = overlay_edge_dist(img, dist01, alpha=args.edge_dist_alpha)
+    if dist01 is not None and args.overlay_edge_dist:
+        img = overlay_edge_dist(img, dist01, alpha=args.edge_dist_alpha)
     
     # 先画点 (作为背景)
     if points:
