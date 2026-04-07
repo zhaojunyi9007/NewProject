@@ -498,7 +498,15 @@ Examples:
                         help="Overlay SAM edge distance map on output image (auto-infer sam_base from feature_base).")
     parser.add_argument("--edge_dist_alpha", type=float, default=0.35,
                         help="Alpha for edge distance overlay (0..1).")
-    
+    parser.add_argument("--diag", action="append", choices=["bev", "semantic", "refine"],
+                        help="Phase 7：额外生成诊断拼图（bev/semantic/refine，可重复指定）")
+    parser.add_argument("--image_features_frame", type=str, default="",
+                        help="image_features 下单帧目录，如 .../image_features/0000000012（用于 BEV 拼图）")
+    parser.add_argument("--sam_frame_dir", type=str, default="",
+                        help="SAM 单帧目录（含 semantic_argmax.png 时优先）或留空由 feature_base 推断 sam_features")
+    parser.add_argument("--refinement_dir", type=str, default="",
+                        help="refinement 输出目录（含 state.json，用于精修曲线）")
+
     args = parser.parse_args()
 
     print("=== HSR Lidar-Camera Calibration Visualization ===")
@@ -518,6 +526,7 @@ Examples:
         print(f"[Error] Cannot read image: {args.img}")
         return 1
 
+    img_clean = img.copy()
     print(f"[Info] Image loaded: {img.shape[1]}x{img.shape[0]}")
 
     # 1. 加载特征
@@ -722,6 +731,39 @@ Examples:
     # 再画线 (更显眼)
     if lines_3d:
         img = project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t_vec)
+
+    # 4b. Phase 7 诊断图（在图例之前，使用干净背景做语义拼图）
+    if args.diag:
+        _tools_d = os.path.dirname(os.path.abspath(__file__))
+        if _tools_d not in sys.path:
+            sys.path.insert(0, _tools_d)
+        import visualize_diag as vd  # noqa: E402
+
+        out_root, out_ext = os.path.splitext(args.output)
+        if not out_ext:
+            out_ext = ".png"
+        sam_d = args.sam_frame_dir.strip() or _infer_sam_base_from_feature_base(args.feature_base)
+        if "bev" in args.diag and args.image_features_frame.strip():
+            vd.render_bev_panel(args.feature_base, args.image_features_frame.strip(), out_root + "_diag_bev.png")
+        elif "bev" in args.diag:
+            print("[Warning] --diag bev 需要 --image_features_frame")
+        if "semantic" in args.diag:
+            vd.render_semantic_panel(
+                img_clean,
+                args.feature_base,
+                sam_d,
+                sam_d,
+                K,
+                R_rect,
+                P_rect,
+                R,
+                t_vec,
+                out_root + "_diag_semantic.png",
+            )
+        if "refine" in args.diag and args.refinement_dir.strip():
+            vd.render_refine_curves(args.refinement_dir.strip(), out_root + "_diag_refine.png")
+        elif "refine" in args.diag:
+            print("[Warning] --diag refine 需要 --refinement_dir")
 
     # 5. 添加图例
     img = add_legend(img)

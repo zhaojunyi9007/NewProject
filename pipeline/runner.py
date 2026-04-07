@@ -4,8 +4,21 @@
 import subprocess
 import sys
 
-from pipeline.context import RuntimeContext, create_output_dirs, get_frame_list
-from pipeline.stages import calib_stage, lidar_stage, sam_stage, visual_stage
+from pipeline.context import (
+    RuntimeContext,
+    attach_stage_paths_to_context,
+    create_output_dirs,
+    get_frame_list,
+)
+from pipeline.stages import (
+    bev_stage,
+    calib_stage,
+    image_feature_stage,
+    lidar_stage,
+    refine_stage,
+    sam_stage,
+    visual_stage,
+)
 
 
 class PipelineRunner:
@@ -13,6 +26,7 @@ class PipelineRunner:
         self.context = RuntimeContext(config=config, frame_ids=[])
         create_output_dirs(self.context.config)
         self.context.frame_ids = get_frame_list(self.context.config)
+        attach_stage_paths_to_context(self.context)
 
         print("=== EdgeCalib v2.0 Pipeline ===")
         print(f"处理帧数: {len(self.context.frame_ids)}")
@@ -34,12 +48,31 @@ class PipelineRunner:
 
     def run_all(self, skip_sam=False, skip_lidar=False, skip_calib=False, skip_visual=False):
         try:
-            if not skip_sam:
+            img_cfg = self.context.config.get("image_features") or {}
+            use_image_feature = bool(img_cfg.get("enabled", False))
+
+            if use_image_feature:
+                print("\n" + "=" * 40)
+                print("[Info] image_features.enabled=true，运行 image_feature_stage（SAM 阶段跳过）")
+                print("=" * 40)
+                image_feature_stage.run(self.context)
+            elif not skip_sam:
                 self.run_sam_extraction()
+
             if not skip_lidar:
                 self.run_lidar_extraction()
+
+            bev_cfg = self.context.config.get("bev") or {}
+            if bool(bev_cfg.get("enabled", False)):
+                bev_stage.run(self.context)
+
             if not skip_calib:
                 self.run_calibration()
+
+            refine_cfg = self.context.config.get("refine") or {}
+            if bool(refine_cfg.get("enabled", False)):
+                refine_stage.run(self.context)
+
             if not skip_visual:
                 self.run_visualization()
 

@@ -2,7 +2,310 @@ import numpy as np
 import cv2
 import torch
 import os
+import sys
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+
+_tools_dir = os.path.dirname(os.path.abspath(__file__))
+if _tools_dir not in sys.path:
+    sys.path.insert(0, _tools_dir)
+from semantic_to_bev import semantic_probs_to_pseudo_bev
+
+
+def _semantic_class_indices(semantic_classes, names):
+    out = []
+    for n in names:
+        if n in semantic_classes:
+            out.append(semantic_classes.index(n))
+    return out
+
+
+def _mask_to_class_weights(mask_dict, h, w, semantic_classes):
+    """Heuristic soft class weights for one SAM mask -> vector len C."""
+    C = len(semantic_classes)
+    wts = np.zeros(C, dtype=np.float32)
+    bbox = mask_dict["bbox"]
+    x, y, bw, bh = bbox
+    area = float(mask_dict.get("area", bw * bh))
+    image_area = float(h * w)
+    cy = (y + bh * 0.5) / max(h, 1)
+    aspect = max(bw, bh) / (min(bw, bh) + 1e-6)
+    ar = area / (image_area + 1e-8)
+
+    def add(name, val):
+        if name in semantic_classes:
+            wts[semantic_classes.index(name)] += val
+
+    if cy < 0.26:
+        add("sky", 3.0)
+    if cy > 0.36 and aspect > 2.0 and bw >= bh * 0.9:
+        add("rail", 2.8)
+        add("ballast", 1.6)
+    if aspect < 0.52 and bh > bw * 1.15 and 0.08 < cy < 0.92:
+        add("pole", 2.6)
+    if ar > 0.012 and aspect < 5.0:
+        add("building", 2.0)
+    if cy > 0.52 and aspect > 1.4 and bw >= bh:
+        add("road", 1.8)
+    if 0.008 < ar < 0.09 and cy > 0.42:
+        add("vehicle", 1.6)
+    if 0.25 < cy < 0.72 and 0.002 < ar < 0.06:
+        add("vegetation", 1.2)
+    if cy < 0.36 and ar < 0.012:
+        add("signal", 1.8)
+    if 0.012 < ar < 0.11 and 0.28 < cy < 0.72:
+        add("platform", 1.2)
+
+    if wts.sum() < 1e-6:
+        wts[:] = 1.0 / C
+    else:
+        wts = wts / (wts.sum() + 1e-8)
+    return wts
+
+
+def extract_semantic_probabilities(image, masks, config):
+    """
+    由 SAM masks 估计每像素语义概率（启发式，与类别顺序一致）。
+    config 需含 semantic_classes: List[str]
+    返回 (semantic_probs, semantic_logits)，形状 H×W×C，float32。
+    """
+    h, w = image.shape[:2]
+    semantic_classes = list(config.get("semantic_classes", []))
+    if not semantic_classes:
+        semantic_classes = [
+            "rail",
+            "ballast",
+            "pole",
+            "signal",
+            "platform",
+            "building",
+            "road",
+            "vehicle",
+            "vegetation",
+            "sky",
+        ]
+    C = len(semantic_classes)
+    acc = np.zeros((h, w, C), dtype=np.float32)
+    for mask in masks:
+        seg = mask.get("segmentation")
+        if seg is None:
+            continue
+        m = seg.astype(np.float32)
+        cw = _mask_to_class_weights(mask, h, w, semantic_classes)
+        acc += m[:, :, None] * cw[None, None, :]
+
+    s = acc.sum(axis=2, keepdims=True) + 1e-8
+    probs = acc / s
+    empty = acc.sum(axis=2) < 1e-5
+    if np.any(empty):
+        uni = np.ones(C, dtype=np.float32) / C
+        probs[empty] = uni
+    sky_i = semantic_classes.index("sky") if "sky" in semantic_classes else -1
+    if sky_i >= 0:
+        for row in range(int(h * 0.22)):
+            probs[row, :, sky_i] += 0.25
+    probs = probs / (probs.sum(axis=2, keepdims=True) + 1e-8)
+    logits = np.log(np.clip(probs, 1e-8, 1.0))
+    return probs.astype(np.float32), logits.astype(np.float32)
+
+
+def build_semantic_edge_map(semantic_probs, config):
+    """
+    在 rail / pole / platform / building 概率通道上取梯度能量并融合为 uint8 边缘图。
+    """
+    semantic_classes = list(config.get("semantic_classes", []))
+    names = ("rail", "pole", "platform", "building")
+    idxs = [semantic_classes.index(n) for n in names if n in semantic_classes]
+    if not idxs:
+        h, w = semantic_probs.shape[:2]
+        return np.zeros((h, w), dtype=np.uint8)
+    energy = np.zeros(semantic_probs.shape[:2], dtype=np.float32)
+    for i in idxs:
+        ch = semantic_probs[:, :, i].astype(np.float32)
+        gx = cv2.Sobel(ch, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(ch, cv2.CV_32F, 0, 1, ksize=3)
+        energy += np.sqrt(gx * gx + gy * gy)
+    emax = float(energy.max()) + 1e-8
+    out = np.clip(energy / emax * 255.0, 0, 255).astype(np.uint8)
+    return out
+
+
+def _line_semantic_support_map(semantic_probs, config):
+    """融合 rail/ballast、pole/signal、platform/building 边界用于 LSD 门控。"""
+    semantic_classes = list(config.get("semantic_classes", []))
+    h, w = semantic_probs.shape[:2]
+    rail_names = list(config.get("rail_class_names", ["rail", "ballast"]))
+    vert_names = list(config.get("vertical_structure_classes", ["pole", "signal"]))
+    ri = _semantic_class_indices(semantic_classes, rail_names)
+    vi = _semantic_class_indices(semantic_classes, vert_names)
+    pi = _semantic_class_indices(semantic_classes, ["platform", "building"])
+
+    rail_p = np.zeros((h, w), dtype=np.float32)
+    for i in ri:
+        rail_p += semantic_probs[:, :, i]
+    pole_p = np.zeros((h, w), dtype=np.float32)
+    for i in vi:
+        pole_p += semantic_probs[:, :, i]
+    struct = np.zeros((h, w), dtype=np.float32)
+    for i in pi:
+        struct += semantic_probs[:, :, i]
+    gx = cv2.Sobel(struct, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(struct, cv2.CV_32F, 0, 1, ksize=3)
+    struct_edge = np.sqrt(gx * gx + gy * gy)
+    smax = float(struct_edge.max()) + 1e-8
+    struct_edge = struct_edge / smax
+
+    support = np.maximum(rail_p, pole_p) + 0.45 * struct_edge
+    support = np.clip(support, 0.0, 1.0)
+    return support.astype(np.float32)
+
+
+def extract_lines_2d(
+    image,
+    edge_map,
+    config,
+    semantic_probs=None,
+    heuristics=None,
+    image_features_cfg=None,
+    require_edge_overlap=None,
+):
+    """
+    LSD 2D 线段；可选用语义支持图门控；保留斜线（type=2）。
+    config: 可为空 dict；image_features_cfg 覆盖 bottom_crop、门控阈值等。
+    返回 list of (u1,v1,u2,v2,type,semantic_support)，type: 0=水平,1=垂直,2=斜向。
+    """
+    heuristics = heuristics or {}
+    ifc = image_features_cfg if isinstance(image_features_cfg, dict) else {}
+    bottom_crop = float(ifc.get("bottom_crop_ratio_for_edges", config.get("bottom_crop_ratio_for_edges", 0.0)))
+    restrict_sem = bool(ifc.get("restrict_lsd_by_semantics", config.get("restrict_lsd_by_semantics", True)))
+    keep_diag = bool(ifc.get("keep_diagonal_lines", config.get("keep_diagonal_lines", True)))
+    support_thresh = float(ifc.get("line_semantic_support_threshold", config.get("line_semantic_support_threshold", 0.12)))
+    if require_edge_overlap is None:
+        require_edge_overlap = semantic_probs is not None
+
+    print("[SAM] Extracting 2D line features...")
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = image.shape[:2]
+
+    support_map = None
+    if semantic_probs is not None and restrict_sem:
+        support_map = _line_semantic_support_map(semantic_probs, {**config, **ifc})
+        if bottom_crop > 1e-6:
+            y0 = int(h * (1.0 - bottom_crop))
+            support_map[y0:h, :] = 0.0
+        ksz = max(3, int(round(min(h, w) * 0.002)) | 1)
+        support_map = cv2.dilate(support_map, np.ones((ksz, ksz), np.uint8))
+
+    lsd = cv2.createLineSegmentDetector(0)
+    lines, _, _, _ = lsd.detect(gray)
+    if lines is None:
+        print("[SAM] No lines detected")
+        return []
+
+    lines_2d = []
+    line_mask = np.zeros((h, w), dtype=np.uint8)
+    max_dim = max(h, w)
+    min_length = max_dim * float(heuristics.get("global_min_line_length_ratio", 0.015))
+    min_ground_length = max_dim * float(heuristics.get("ground_min_line_length_ratio", 0.06))
+    min_sky_length = max_dim * float(heuristics.get("sky_min_line_length_ratio", 0.03))
+    ground_top = float(heuristics.get("ground_region_top_ratio", 0.5))
+
+    em_crop = edge_map
+    if bottom_crop > 1e-6 and edge_map is not None:
+        y0 = int(h * (1.0 - bottom_crop))
+        em_crop = edge_map.copy()
+        em_crop[y0:h, :] = 0
+
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        if length < min_length:
+            continue
+
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        if dy > dx * 2:
+            line_type = 1
+        elif dx > dy * 2:
+            line_type = 0
+        else:
+            line_type = 2
+            if not keep_diag:
+                continue
+
+        mid_y = (y1 + y2) * 0.5
+        if mid_y > h * ground_top:
+            if length < min_ground_length:
+                continue
+        else:
+            if line_type == 0 and length < min_sky_length:
+                continue
+
+        sem_score = 1.0
+        if support_map is not None:
+            n = max(8, int(length / 5.0))
+            xs = np.linspace(x1, x2, n)
+            ys = np.linspace(y1, y2, n)
+            vals = []
+            for xi, yi in zip(xs, ys):
+                u, v = int(np.clip(xi, 0, w - 1)), int(np.clip(yi, 0, h - 1))
+                vals.append(support_map[v, u])
+            sem_score = float(np.mean(vals)) if vals else 0.0
+            if sem_score < support_thresh:
+                continue
+        if require_edge_overlap and em_crop is not None and np.any(em_crop > 0):
+            n = max(6, int(length / 8.0))
+            xs = np.linspace(x1, x2, n)
+            ys = np.linspace(y1, y2, n)
+            on_edge = 0
+            for xi, yi in zip(xs, ys):
+                u, v = int(np.clip(xi, 0, w - 1)), int(np.clip(yi, 0, h - 1))
+                if em_crop[v, u] > 0:
+                    on_edge += 1
+            if on_edge < max(1, n // 6):
+                continue
+
+        lines_2d.append((x1, y1, x2, y2, line_type, sem_score))
+        cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
+
+    print(f"[SAM] Extracted {len(lines_2d)} 2D line features")
+    return lines_2d
+
+
+def save_image_feature_bundle(output_dir, bundle, prefix=""):
+    """
+    保存图像特征包到 output_dir（prefix 用于扁平文件名前缀，可为空）。
+    bundle: dict，含 semantic_probs, semantic_logits, edge_map, edge_weight_u16,
+      line_mask, lines_2d, rail_png, pole_png, semantic_argmax, pseudo_bev_path 等。
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    if "semantic_probs" in bundle:
+        np.save(os.path.join(output_dir, "semantic_probs.npy"), bundle["semantic_probs"])
+    if "semantic_logits" in bundle and bundle.get("save_logits", True):
+        np.save(os.path.join(output_dir, "semantic_logits.npy"), bundle["semantic_logits"])
+    if "semantic_argmax" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "semantic_argmax.png"), bundle["semantic_argmax"])
+    if "rail_prob_png" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "rail_prob.png"), bundle["rail_prob_png"])
+    if "pole_prob_png" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "pole_prob.png"), bundle["pole_prob_png"])
+    if "edge_map" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "edge_map.png"), bundle["edge_map"])
+    if "edge_weight_u16" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "edge_weight.png"), bundle["edge_weight_u16"])
+    if "line_mask" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "line_map.png"), bundle["line_mask"])
+    if "lines_2d" in bundle:
+        with open(os.path.join(output_dir, "lines_2d.txt"), "w", encoding="utf-8") as f:
+            f.write("# u1 v1 u2 v2 type semantic_support (type: 0=H, 1=V, 2=diagonal)\n")
+            for t in bundle["lines_2d"]:
+                if len(t) >= 6:
+                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} {t[5]:.4f}\n")
+                else:
+                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000\n")
+    if "pseudo_bev" in bundle and bundle["pseudo_bev"] is not None:
+        path = os.path.join(output_dir, "pseudo_bev.npz")
+        np.savez_compressed(path, **bundle["pseudo_bev"])
+
 
 class FeatureExtractor:
     """
@@ -66,14 +369,15 @@ class FeatureExtractor:
         
         print(f"[SAM] Model loaded successfully")
 
-    def extract_edges(self, image):
+    def extract_edges(self, image, masks=None):
         """
-        提取边缘,返回二值边缘图、权重图和mask id图
+        提取边缘,返回二值边缘图、权重图和mask id图。
+        若传入 masks（与 generate 相同结构），则跳过重复 SAM 推理。
         """
-        # 1. 生成原始掩码
-        print("[SAM] Generating masks...")
-        masks = self.mask_generator.generate(image)
-        print(f"[SAM] Generated {len(masks)} masks")
+        if masks is None:
+            print("[SAM] Generating masks...")
+            masks = self.mask_generator.generate(image)
+        print(f"[SAM] Using {len(masks)} masks for edge extraction")
         
         # 2. 初始化最终边缘图
         h, w = image.shape[:2]
@@ -187,83 +491,29 @@ class FeatureExtractor:
 
     def extract_lines_2d(self, image, edge_map=None, return_mask=False):
         """
-        使用LSD (Line Segment Detector) 提取2D线特征
-        返回格式: [(u1, v1, u2, v2, type), ...]
-        type: 0=Horizontal, 1=Vertical
+        使用 LSD 提取 2D 线（兼容旧行为：仅水平/垂直，无语义门控）。
+        返回 [(u1, v1, u2, v2, type), ...]，type: 0=Horizontal, 1=Vertical
         """
-        print("[SAM] Extracting 2D line features...") 
-
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) 
-        
-        # 如果没有提供edge_map，先提取边缘
         if edge_map is None:
             edge_map, _, _ = self.extract_edges(image)
-        
-        # 使用OpenCV的LSD检测器（基于灰度图）
-        lsd = cv2.createLineSegmentDetector(0)
-        lines, _, _, _ = lsd.detect(gray)
-        
-        if lines is None:
-            print("[SAM] No lines detected")
-            return []
-        
-        # 过滤和分类线段
-        lines_2d = []
-        h, w = image.shape[:2]
-        line_mask = np.zeros((h, w), dtype=np.uint8)
-        min_length = 20  # 最小线段长度（像素）
-        top_region = int(h * 0.4)  # 图像上方区域（电缆）
-
-        # --- 新增：计算动态线段长度阈值 ---
-        max_dim = max(h, w)
-        min_length = max_dim * float(self.heuristics["global_min_line_length_ratio"])
-        min_ground_length = max_dim * float(self.heuristics["ground_min_line_length_ratio"])
-        min_sky_length = max_dim * float(self.heuristics["sky_min_line_length_ratio"])
-        # --------------------------------
-        
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            
-            # 计算线段长度
-            length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-            if length < min_length:
-                continue
-            
-            # 计算线段方向，判断水平/垂直
-            dx = abs(x2 - x1)
-            dy = abs(y2 - y1)
-            
-            # 判断类型：dy/dx > 2 为垂直，dx/dy > 2 为水平
-            if dy > dx * 2:
-                line_type = 1  # Vertical
-            elif dx > dy * 2:
-                line_type = 0  # Horizontal
-            else:
-                continue  # 跳过斜线
-
-            # ===== 新增的严厉过滤逻辑 =====
-            # 计算这条线的中心点Y坐标
-            mid_y = (y1 + y2) / 2.0
-            
-            # 判断线在图像的下半部(地面)还是上半部(天空/建筑)
-            if mid_y > h * float(self.heuristics["ground_region_top_ratio"]): 
-                # 【情况A：在地面】
-                # 地面上有很多斑马线、阴影。我们只想要铁轨！
-                # 铁轨通常很长，所以把长度小于 80 像素的短线全部干掉。
-                if length < min_ground_length:
-                    continue 
-            else:
-                # 【情况B：在天上或背景里】
-                # 天上的横线可能是电缆，但也可能是树枝。把小于 40 的短横线干掉。
-                if line_type == 0 and length < min_sky_length: 
-                    continue
-            # ==============================
-            
-            # 如果能活过上面的重重过滤，才把它加进最终的特征里
-            lines_2d.append((x1, y1, x2, y2, line_type))
-            cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
-        
-        print(f"[SAM] Extracted {len(lines_2d)} 2D line features")
+        legacy_cfg = {
+            "restrict_lsd_by_semantics": False,
+            "keep_diagonal_lines": False,
+            "bottom_crop_ratio_for_edges": 0.0,
+        }
+        lines_6 = extract_lines_2d(
+            image,
+            edge_map,
+            legacy_cfg,
+            semantic_probs=None,
+            heuristics=self.heuristics,
+            image_features_cfg=legacy_cfg,
+            require_edge_overlap=False,
+        )
+        lines_2d = [(a[0], a[1], a[2], a[3], a[4]) for a in lines_6]
+        line_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        for ln in lines_2d:
+            cv2.line(line_mask, (int(ln[0]), int(ln[1])), (int(ln[2]), int(ln[3])), 255, 1)
         if return_mask:
             return lines_2d, line_mask
         return lines_2d
@@ -354,6 +604,163 @@ class FeatureExtractor:
         print(f"[Saved] {output_base}_lines_2d.txt ({len(lines_2d)} lines)")
         
         print(f"[Complete] {filename}")
+        return True
+
+    def process_image_feature_bundle(
+        self,
+        image_path,
+        frame_bundle_dir,
+        sam_output_base,
+        image_features_cfg,
+        bev_cfg,
+        intrinsics,
+        rvec,
+        tvec,
+        dataset_meta,
+    ):
+        """
+        语义优先：在 frame_bundle_dir 写入 Phase 2 全量产物，
+        并写入 sam_output_base_* 与 process_image 一致，供 C++ 优化器读取。
+        """
+        print(f"\n[Processing semantic bundle] {image_path}")
+        image = cv2.imread(image_path)
+        if image is None:
+            print(f"[Error] Cannot read image: {image_path}")
+            return False
+
+        merged = dict(image_features_cfg or {})
+        merged.setdefault(
+            "semantic_classes",
+            [
+                "rail",
+                "ballast",
+                "pole",
+                "signal",
+                "platform",
+                "building",
+                "road",
+                "vehicle",
+                "vegetation",
+                "sky",
+            ],
+        )
+
+        print("[SAM] Generating masks (single forward)...")
+        masks = self.mask_generator.generate(image)
+
+        probs, logits = extract_semantic_probabilities(image, masks, merged)
+        edge_sem = build_semantic_edge_map(probs, merged)
+
+        edge_map_sam, weight_map, mask_id_map = self.extract_edges(image, masks=masks)
+
+        lines_full = extract_lines_2d(
+            image,
+            edge_sem,
+            merged,
+            semantic_probs=probs,
+            heuristics=self.heuristics,
+            image_features_cfg=merged,
+            require_edge_overlap=True,
+        )
+
+        h, w = image.shape[:2]
+        line_mask = np.zeros((h, w), dtype=np.uint8)
+        for ln in lines_full:
+            cv2.line(
+                line_mask,
+                (int(ln[0]), int(ln[1])),
+                (int(ln[2]), int(ln[3])),
+                255,
+                1,
+            )
+
+        fused_edge_map = cv2.bitwise_or(edge_sem, line_mask)
+        fused_edge_map = cv2.bitwise_or(fused_edge_map, edge_map_sam)
+        fused_edge_map[0 : int(h * float(self.heuristics["fused_top_black_ratio"])), :] = 0
+        bottom_crop = float(merged.get("bottom_crop_ratio_for_edges", 0.0))
+        if bottom_crop > 1e-6:
+            fused_edge_map[int(h * (1.0 - bottom_crop)) : h, :] = 0
+        else:
+            fused_edge_map[int(h * float(self.heuristics["fused_bottom_black_ratio"])) : h, :] = 0
+
+        dist_map = self.get_distance_transform(fused_edge_map)
+        dist_map = cv2.GaussianBlur(dist_map, (5, 5), 0)
+        weight_map = cv2.GaussianBlur(weight_map, (5, 5), 0)
+
+        max_weight = float(weight_map.max()) if weight_map.size else 0.0
+        if max_weight > 0:
+            weight_norm = np.clip(weight_map / max_weight, 0, 1)
+        else:
+            weight_norm = np.zeros_like(weight_map, dtype=np.float32)
+        weight_u16 = (weight_norm * 65535.0).astype(np.uint16)
+        dist_u16 = (np.clip(dist_map, 0, 1) * 65535.0).astype(np.uint16)
+
+        classes = list(merged["semantic_classes"])
+        argmax = np.argmax(probs, axis=2).astype(np.uint8)
+        denom = max(1, len(classes) - 1)
+        argmax_vis = (argmax.astype(np.float32) / float(denom) * 255.0).astype(np.uint8)
+
+        def _ci(name):
+            return classes.index(name) if name in classes else -1
+
+        ri, bi = _ci("rail"), _ci("ballast")
+        rail_ch = np.zeros((h, w), dtype=np.float32)
+        if ri >= 0:
+            rail_ch += probs[:, :, ri]
+        if bi >= 0:
+            rail_ch += probs[:, :, bi]
+        rail_png = np.clip(rail_ch * 255.0, 0, 255).astype(np.uint8)
+
+        pi, si = _ci("pole"), _ci("signal")
+        pole_ch = np.zeros((h, w), dtype=np.float32)
+        if pi >= 0:
+            pole_ch += probs[:, :, pi]
+        if si >= 0:
+            pole_ch += probs[:, :, si]
+        pole_png = np.clip(pole_ch * 255.0, 0, 255).astype(np.uint8)
+
+        dm = dict(dataset_meta or {})
+        dm.setdefault("semantic_classes", classes)
+        bev_cfg = bev_cfg if isinstance(bev_cfg, dict) else {}
+        pseudo = semantic_probs_to_pseudo_bev(probs, intrinsics, (rvec, tvec), bev_cfg, dm)
+
+        bundle = {
+            "semantic_probs": probs,
+            "semantic_logits": logits,
+            "save_logits": merged.get("save_logits", True),
+            "semantic_argmax": argmax_vis,
+            "rail_prob_png": rail_png,
+            "pole_prob_png": pole_png,
+            "edge_map": edge_sem,
+            "edge_weight_u16": weight_u16,
+            "line_mask": line_mask,
+            "lines_2d": lines_full,
+            "pseudo_bev": pseudo,
+        }
+        os.makedirs(frame_bundle_dir, exist_ok=True)
+        save_image_feature_bundle(frame_bundle_dir, bundle)
+
+        out_dir = os.path.dirname(sam_output_base)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(sam_output_base + "_edge_map.png", edge_map_sam)
+        cv2.imwrite(sam_output_base + "_line_map.png", line_mask)
+        cv2.imwrite(sam_output_base + "_edge_fused.png", fused_edge_map)
+        cv2.imwrite(sam_output_base + "_edge_dist.png", dist_u16)
+        cv2.imwrite(sam_output_base + "_edge_weight.png", weight_u16)
+        cv2.imwrite(sam_output_base + "_mask_ids.png", mask_id_map.astype(np.uint16))
+        cv2.imwrite(sam_output_base + "_semantic_map.png", mask_id_map.astype(np.uint16))
+
+        with open(sam_output_base + "_lines_2d.txt", "w", encoding="utf-8") as f:
+            f.write("# u1 v1 u2 v2 type semantic_support (type: 0=H, 1=V, 2=diagonal)\n")
+            for t in lines_full:
+                if len(t) >= 6:
+                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} {t[5]:.4f}\n")
+                else:
+                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000\n")
+
+        print(f"[Saved] bundle -> {frame_bundle_dir}")
+        print(f"[Saved] optimizer inputs -> {sam_output_base}_*")
         return True
 
 

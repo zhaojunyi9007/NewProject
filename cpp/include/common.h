@@ -54,6 +54,21 @@ struct Line3D {
         : p1(pt1), p2(pt2), type(t) {}
 };
 
+// Phase 3: 语义点记录（与 PointFeature 兼容，增加显式 semantic_id）
+struct SemanticPointRecord {
+    Eigen::Vector3d p;
+    float intensity;
+    Eigen::Vector3d normal;
+    int label;
+    double weight;
+    int semantic_id;
+};
+
+// Phase 4+: 粗位姿增量占位
+struct PoseDelta6 {
+    double rx = 0, ry = 0, rz = 0, tx = 0, ty = 0, tz = 0;
+};
+
 // 3. 用于 Fine 阶段的 2D 线特征 
 struct Line2D {
     Eigen::Vector2d p1; // 端点1 (u, v)

@@ -1,4 +1,7 @@
 #include "include/common.h"
+#include "include/bev_builder.h"
+#include "include/rail_bev_extractor.h"
+#include "include/vertical_structure_extractor.h"
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -299,6 +302,56 @@ int GetEnvInt(const char* name, int default_value) {
     long parsed = std::strtol(value, &end, 10);
     if (end == value) return default_value;
     return static_cast<int>(parsed);
+}
+
+bool GetEnvBool(const char* name, bool default_value) {
+    const char* value = std::getenv(name);
+    if (!value) return default_value;
+    if (std::strcmp(value, "1") == 0) return true;
+    if (std::strcmp(value, "0") == 0) return false;
+    return default_value;
+}
+
+struct ExtractorCli {
+    std::vector<std::string> cloud_paths;
+    std::string out_base;
+    bool save_semantic_points = false;
+    bool save_bev_maps = false;
+};
+
+static ExtractorCli ParseExtractorCli(int argc, char** argv) {
+    ExtractorCli c;
+    std::vector<std::string> pos;
+    for (int i = 1; i < argc;) {
+        const char* a = argv[i];
+        if (a[0] == '-' && a[1] == '-') {
+            std::string key = a;
+            if (key == "--save_semantic_points") {
+                c.save_semantic_points = true;
+                ++i;
+                continue;
+            }
+            if (key == "--save_bev_maps") {
+                c.save_bev_maps = true;
+                ++i;
+                continue;
+            }
+            std::cerr << "[Error] Unknown option: " << key << std::endl;
+            std::exit(-1);
+        }
+        pos.emplace_back(a);
+        ++i;
+    }
+    if (pos.size() < 2) {
+        std::cerr << "Usage: ./lidar_extractor [options] <cloud_1> [...] <output_base>\n"
+                     "Options:\n"
+                     "  --save_semantic_points\n"
+                     "  --save_bev_maps\n";
+        std::exit(-1);
+    }
+    c.out_base = pos.back();
+    c.cloud_paths.assign(pos.begin(), pos.end() - 1);
+    return c;
 }
 
 NDTFusionResult FuseMultiFrameNDT(
@@ -610,16 +663,16 @@ std::vector<double> ComputeTemporalConsistencyOptimized(
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: ./lidar_extractor <cloud_path_1(.bin/.pcd)> [<cloud_path_2> ...] <output_base_path>" << std::endl;
+        std::cerr << "Usage: ./lidar_extractor [options] <cloud_path_1(.bin/.pcd)> [<cloud_path_2> ...] <output_base_path>" << std::endl;
         return -1;
     }
 
-    // 解析参数：最后一个是输出路径，前面都是输入点云
-    std::vector<std::string> cloud_paths;
-    for (int i = 1; i < argc - 1; ++i) {
-        cloud_paths.emplace_back(argv[i]);
-    }
-    std::string out_base = argv[argc - 1];
+    ExtractorCli cli = ParseExtractorCli(argc, argv);
+    const std::vector<std::string>& cloud_paths = cli.cloud_paths;
+    const std::string& out_base = cli.out_base;
+
+    const bool phase3 = cli.save_semantic_points || cli.save_bev_maps ||
+                        GetEnvBool("EDGECALIB_LIDAR_PHASE3", false);
     // Ensure output directory exists (out_base is a prefix, not a directory).
     {
         const std::string::size_type slash = out_base.find_last_of("/\\");
@@ -691,12 +744,25 @@ int main(int argc, char** argv) {
     std::cout << "  Downsampled to " << cloud_ds->size() << " points" << std::endl;
 
     // ========================================
-    // 阶段4: 深度不连续性边缘提取 (README2.0 第二阶段 2.2)
+    // 阶段4: 深度不连续性边缘（range image）；Phase3 默认关闭以去除 64×1024 假设，改由 BEV 结构边生成 edge_points
     // ========================================
+    DepthEdgeResult depth_edges;
+    const bool legacy_range_image =
+        !phase3 || GetEnvBool("EDGECALIB_LIDAR_USE_LEGACY_RANGE_IMAGE", false);
+    if (legacy_range_image) {
+        std::cout << "\n[Stage 4] Depth discontinuity edge extraction (range image)..." << std::endl;
+        depth_edges = DetectDepthDiscontinuityEdges(cloud_ds, 1024, 64, 2.0f, -24.9f, 0.5f);
+        std::cout << "  Edge points detected: " << depth_edges.edge_count << std::endl;
+    } else {
+        std::cout << "\n[Stage 4] Phase3: skip fixed range-image depth edges (edge_points from BEV gradients)\n";
+        depth_edges.edge_flags.assign(cloud_ds->size(), false);
+        depth_edges.edge_types.assign(cloud_ds->size(), 0);
+        depth_edges.edge_count = 0;
+    }
 
-    std::cout << "\n[Stage 4] Depth discontinuity edge extraction..." << std::endl;
-    DepthEdgeResult depth_edges = DetectDepthDiscontinuityEdges(cloud_ds, 1024, 64, 2.0f, -24.9f, 0.5f);
-    std::cout << "  Edge points detected: " << depth_edges.edge_count << std::endl;
+    BEVChannels bev_data;
+    std::vector<float> bev_edge_strength;
+    bool bev_edge_ready = false;
 
     // ========================================
     // 阶段5: 法向量估计
@@ -801,6 +867,32 @@ int main(int argc, char** argv) {
         if(label < 5) stats[label]++;
     }
 
+    if (phase3) {
+        std::cout << "\n[Stage 7b] LiDAR BEV (structural edge_points + optional bev_maps export)..." << std::endl;
+        BEVGridSpec spec;
+        spec.xmin = GetEnvDouble("EDGECALIB_LIDAR_BEV_XMIN", 0.0);
+        spec.xmax = GetEnvDouble("EDGECALIB_LIDAR_BEV_XMAX", 100.0);
+        spec.ymin = GetEnvDouble("EDGECALIB_LIDAR_BEV_YMIN", -25.0);
+        spec.ymax = GetEnvDouble("EDGECALIB_LIDAR_BEV_YMAX", 25.0);
+        spec.resolution = GetEnvDouble("EDGECALIB_LIDAR_BEV_RESOLUTION", 0.2);
+        spec.reference_plane_z = GetEnvDouble("EDGECALIB_LIDAR_REFERENCE_PLANE_Z", 0.0);
+        const double rbmin = GetEnvDouble("EDGECALIB_LIDAR_RAIL_BAND_ZMIN", -0.5);
+        const double rbmax = GetEnvDouble("EDGECALIB_LIDAR_RAIL_BAND_ZMAX", 0.5);
+        if (BuildLidarBEV(cloud_ds, normals, spec, rbmin, rbmax, &bev_data)) {
+            if (cli.save_bev_maps) {
+                SaveBEVChannelsRaw(out_base, bev_data);
+            }
+            if (ComputeBEVStructuralEdgeStrength(bev_data, &bev_edge_strength)) {
+                bev_edge_ready = true;
+                std::cout << "  BEV structural edge strength map ready (" << bev_data.nx << "x" << bev_data.ny << ")\n";
+            } else {
+                std::cerr << "[Warning] ComputeBEVStructuralEdgeStrength failed\n";
+            }
+        } else {
+            std::cerr << "[Warning] BuildLidarBEV failed\n";
+        }
+    }
+
     // ========================================
     // 阶段8: 保存点特征
     // ========================================
@@ -824,68 +916,154 @@ int main(int argc, char** argv) {
               << ", Veg=" << stats[LABEL_VEGETATION] 
               << ", Struct=" << stats[LABEL_STRUCTURE] << std::endl;
 
+    if (phase3) {
+        std::ofstream out_sem(out_base + "_semantic_points.txt");
+        if (!out_sem.is_open()) {
+            std::cerr << "[Warning] Cannot create semantic_points.txt" << std::endl;
+        } else {
+            out_sem << "# Semantic points: x y z intensity nx ny nz label weight semantic_id\n";
+            for (const auto& pf : labeled_points) {
+                out_sem << pf.p.x() << " " << pf.p.y() << " " << pf.p.z() << " "
+                        << pf.intensity << " " << pf.normal.x() << " " << pf.normal.y() << " " << pf.normal.z()
+                        << " " << pf.label << " " << pf.weight << " " << pf.label << "\n";
+            }
+            out_sem.close();
+            std::cout << "  Saved " << out_base << "_semantic_points.txt" << std::endl;
+        }
+    }
+
     // ========================================
-    // 阶段9: 保存边缘点特征 (深度不连续性)
+    // 阶段9: 边缘点 — Phase3 用 BEV 多通道梯度反投影；否则用 range-image 深度跳变
     // ========================================
-    std::cout << "\n[Stage 9] Saving depth edge points..." << std::endl;
+    std::cout << "\n[Stage 9] Saving edge points -> " << out_base << "_edge_points.txt" << std::endl;
     std::ofstream out_edges(out_base + "_edge_points.txt");
 
-    // 日志统计变量
     int count_total = 0, count_veg = 0, count_ground = 0;
     int keep_unknown = 0, keep_road = 0, keep_struct = 0;
+    int saved_edges = 0;
 
     if (!out_edges.is_open()) {
         std::cerr << "[Warning] Cannot create edge output file: " << out_base << "_edge_points.txt" << std::endl;
     } else {
-        out_edges << "# Depth Edge Points: x y z intensity\n";
-        int saved_edges = 0;
-        for (size_t i = 0; i < cloud_ds->size(); ++i) {
-            if (!depth_edges.edge_flags.empty() && depth_edges.edge_flags[i]) {
-                count_total++;
+        const float edge_grad_thresh =
+            static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_BEV_EDGE_GRAD_RATIO", 0.35));
+
+        if (phase3 && bev_edge_ready && static_cast<int>(bev_edge_strength.size()) == bev_data.nx * bev_data.ny) {
+            out_edges << "# BEV structural edge points (Phase3): x y z intensity\n";
+            for (size_t i = 0; i < cloud_ds->size(); ++i) {
                 const auto& p = cloud_ds->points[i];
                 int label = point_labels_1to1[i];
-
-                // 过滤1：抛弃植被 (树叶)
                 if (label == 2) {
                     count_veg++;
                     continue;
                 }
-                
-                // 过滤2：抛弃地面 (把阈值提高到 -1.2，确保彻底杀死路面噪点)
-                if (p.z <= -1.2) {
+                if (p.z <= -1.2f) {
                     count_ground++;
                     continue;
                 }
-
-                // 统计存活下来的点到底是什么身份
+                int ix = 0, iy = 0;
+                if (!BEVWorldToCell(static_cast<double>(p.x), static_cast<double>(p.y), bev_data, &ix, &iy)) {
+                    continue;
+                }
+                const float s = bev_edge_strength[static_cast<size_t>(iy * bev_data.nx + ix)];
+                if (s < edge_grad_thresh) {
+                    continue;
+                }
+                count_total++;
                 if (label == 0) keep_unknown++;
                 else if (label == 1) keep_road++;
                 else if (label == 3) keep_struct++;
-                
-                if (p.z > -1.4) {
-                    out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
+                if (p.z > -1.4f) {
+                    float w = p.intensity;
+                    if (label == 3) {
+                        w *= 1.15f;
+                    }
+                    w *= (0.4f + 0.6f * s);
+                    out_edges << p.x << " " << p.y << " " << p.z << " " << w << "\n";
                     saved_edges++;
+                }
+            }
+        } else if (phase3) {
+            out_edges << "# Phase3 fallback: structure label points (BEV edge unavailable): x y z intensity\n";
+            for (size_t i = 0; i < cloud_ds->size(); ++i) {
+                const auto& p = cloud_ds->points[i];
+                int label = point_labels_1to1[i];
+                if (label != 3) continue;
+                if (p.z <= -1.2f) continue;
+                if (p.z <= -1.4f) continue;
+                out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
+                saved_edges++;
+            }
+            std::cout << "  [Phase3] edge_points fallback (structure-only): " << saved_edges << std::endl;
+        } else {
+            out_edges << "# Depth edge points (range image): x y z intensity\n";
+            for (size_t i = 0; i < cloud_ds->size(); ++i) {
+                if (!depth_edges.edge_flags.empty() && depth_edges.edge_flags[i]) {
+                    count_total++;
+                    const auto& p = cloud_ds->points[i];
+                    int label = point_labels_1to1[i];
+
+                    if (label == 2) {
+                        count_veg++;
+                        continue;
+                    }
+                    if (p.z <= -1.2) {
+                        count_ground++;
+                        continue;
+                    }
+
+                    if (label == 0) keep_unknown++;
+                    else if (label == 1) keep_road++;
+                    else if (label == 3) keep_struct++;
+
+                    if (p.z > -1.4) {
+                        out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
+                        saved_edges++;
+                    }
                 }
             }
         }
         out_edges.close();
         std::cout << "  Saved " << saved_edges << " edge points." << std::endl;
-
-        // 打印诊断日志
-        std::cout << "  [DEBUG] Total Raw Edges: " << count_total << std::endl;
-        std::cout << "  [DEBUG] Removed Vegetation: " << count_veg << std::endl;
-        std::cout << "  [DEBUG] Removed Ground (z <= -1.2): " << count_ground << std::endl;
-        std::cout << "  [DEBUG] Kept Edges: " << saved_edges << std::endl;
-        std::cout << "          -> Unknown (Label 0): " << keep_unknown << " (可能是噪点或锐角车框)" << std::endl;
-        std::cout << "          -> Road (Label 1): " << keep_road << std::endl;
-        std::cout << "          -> Structure (Label 3): " << keep_struct << " (高质量物理边缘!)" << std::endl;
+        if (!phase3 || bev_edge_ready) {
+            std::cout << "  [DEBUG] Raw edge candidates (total): " << count_total << std::endl;
+            std::cout << "  [DEBUG] Removed Vegetation: " << count_veg << std::endl;
+            std::cout << "  [DEBUG] Removed Ground (z <= -1.2): " << count_ground << std::endl;
+            std::cout << "  [DEBUG] Kept: " << saved_edges << std::endl;
+            std::cout << "          -> Unknown: " << keep_unknown << std::endl;
+            std::cout << "          -> Road: " << keep_road << std::endl;
+            std::cout << "          -> Structure: " << keep_struct << std::endl;
+        }
     }
-    
+
     // ========================================
     // 阶段10: 提取3D线特征 (铁轨 + 立柱)
     // ========================================
     std::cout << "\n[Stage 10] Extracting 3D line features..." << std::endl;
     std::vector<Line3D> lines;
+    if (phase3) {
+        RailPriorConfig rcfg;
+        rcfg.rail_prob_thresh = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_BEV_PROB_THRESH", 0.12));
+        rcfg.min_component_cells = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_BEV_MIN_CELLS", 40.0));
+        rcfg.smooth_ksize = std::max(3, GetEnvInt("EDGECALIB_LIDAR_RAIL_BEV_SMOOTH_K", 5));
+        const double ref_z = GetEnvDouble("EDGECALIB_LIDAR_REFERENCE_PLANE_Z", 0.0);
+        const int max_rail_seg = std::max(1, GetEnvInt("EDGECALIB_LIDAR_RAIL_BEV_MAX_SEGMENTS", 6));
+        std::vector<Line3D> rail_lines =
+            ExtractMultiRailLinesFromBEV(bev_data, rcfg, ref_z, max_rail_seg);
+        VerticalStructureConfig vcfg;
+        vcfg.z_min = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MIN", -1.0);
+        vcfg.z_max = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MAX", 5.0);
+        vcfg.cluster_tolerance = GetEnvDouble("EDGECALIB_LIDAR_VERT_CLUSTER_TOL", 0.35);
+        vcfg.min_cluster_size = std::max(10, GetEnvInt("EDGECALIB_LIDAR_VERT_MIN_CLUSTER", 25));
+        std::vector<Line3D> pole_lines =
+            ExtractVerticalStructures(cloud_ds, point_labels_1to1, vcfg, -1);
+        lines.insert(lines.end(), rail_lines.begin(), rail_lines.end());
+        lines.insert(lines.end(), pole_lines.begin(), pole_lines.end());
+        std::cout << "  Phase3 lines: rail segments=" << rail_lines.size() << ", poles=" << pole_lines.size()
+                  << std::endl;
+    }
+
+    if (!phase3) {
     const double ground_z_min = GetEnvDouble("EDGECALIB_LIDAR_GROUND_Z_MIN", -3.0);
     const double ground_z_max = GetEnvDouble("EDGECALIB_LIDAR_GROUND_Z_MAX", -1.2);
     const double rail_ransac_threshold = GetEnvDouble("EDGECALIB_LIDAR_RAIL_RANSAC_THRESHOLD", 0.15);
@@ -1009,6 +1187,7 @@ int main(int argc, char** argv) {
             }
         }
     }
+    }  // !phase3 legacy rail/pole
 
     // 保存线特征
     std::ofstream out_lines(out_base + "_lines_3d.txt");
@@ -1030,6 +1209,12 @@ int main(int argc, char** argv) {
     std::cout << "  - " << out_base << "_points.txt" << std::endl;
     std::cout << "  - " << out_base << "_edge_points.txt" << std::endl;
     std::cout << "  - " << out_base << "_lines_3d.txt" << std::endl;
-    
+    if (phase3) {
+        std::cout << "  - " << out_base << "_semantic_points.txt" << std::endl;
+        if (cli.save_bev_maps) {
+            std::cout << "  - " << out_base << "_bev_channels.bin / _bev_meta.json (-> bev_maps.npz via Python)" << std::endl;
+        }
+    }
+
     return 0;
 }

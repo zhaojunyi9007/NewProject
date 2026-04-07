@@ -8,6 +8,8 @@ import sys
 from pipeline.context import RuntimeContext
 from pipeline.datasets import get_adapter
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
 
 def run(context: RuntimeContext) -> None:
     print("\n" + "=" * 40)
@@ -38,13 +40,13 @@ def run(context: RuntimeContext) -> None:
 
         with open(calib_result_file, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-
-        if len(lines) < 3:
+        data_lines = [ln for ln in lines if not ln.startswith("#")]
+        if len(data_lines) < 2:
             print(f"[Warning] 标定结果格式异常(行数不足)，跳过帧 {frame_id:010d}: {calib_result_file}")
             continue
 
-        r_vec = lines[1].split()
-        t_vec = lines[2].split()
+        r_vec = data_lines[0].split()
+        t_vec = data_lines[1].split()
         if len(r_vec) != 3 or len(t_vec) != 3:
             print(f"[Warning] 标定结果格式异常(R/T维度错误)，跳过帧 {frame_id:010d}: {calib_result_file}")
             continue
@@ -65,6 +67,33 @@ def run(context: RuntimeContext) -> None:
         ]
         if img_sensor:
             cmd.extend(["--image_sensor", img_sensor])
-        subprocess.run(cmd, check=True)
+
+        vis_cfg = context.config.get("visualization") or {}
+        if bool(vis_cfg.get("enable_diag_panels", True)):
+            img_feat = os.path.join(
+                context.config["data"].get("image_features_output_dir", "") or "",
+                f"{frame_id:010d}",
+            )
+            ref_dir = ""
+            if context.paths:
+                ref_dir = context.paths.get("refinement", "") or ""
+            if not ref_dir:
+                ref_dir = context.config["data"].get("refinement_output_dir", "") or ""
+            cmd.extend(
+                [
+                    "--diag",
+                    "bev",
+                    "--diag",
+                    "semantic",
+                    "--diag",
+                    "refine",
+                    "--image_features_frame",
+                    os.path.abspath(img_feat),
+                    "--refinement_dir",
+                    os.path.abspath(ref_dir) if ref_dir else "",
+                ]
+            )
+
+        subprocess.run(cmd, check=True, cwd=_REPO_ROOT)
 
     print(f"\n[完成] 可视化结果已保存到: {visual_dir}")

@@ -12,6 +12,16 @@ data:
   lidar_output_dir: "result/lidar_features"
   calib_output_dir: "result/calibration"
   visual_output_dir: "result/visualization"
+  # Phase 1+ 扩展输出目录（与 result_dir 组合使用，可由数据集配置覆盖）
+  image_features_output_dir: "result/image_features"
+  bev_init_output_dir: "result/bev_init"
+  refinement_output_dir: "result/refinement"
+
+# ========================================
+# 可视化（Phase 7：额外生成 BEV/语义/精修诊断拼图）
+# ========================================
+visualization:
+  enable_diag_panels: true
 
 # ========================================
 # 帧选择配置
@@ -78,6 +88,27 @@ lidar:
     position_threshold: 0.5
     static_weight: 1.0
     dynamic_weight: 0.1
+  # Phase 3：LiDAR-BEV、语义点、BEV 轨/聚类立柱（由 lidar_extractor 新路径生成）
+  phase3:
+    enabled: false
+    save_semantic_points: true
+    save_bev_maps: true
+    reference_plane_z: 0.0
+    rail_band_zmin: -0.5
+    rail_band_zmax: 0.5
+    bev_xmin: 0.0
+    bev_xmax: 100.0
+    bev_ymin: -25.0
+    bev_ymax: 25.0
+    bev_resolution: 0.2
+    rail_bev_prob_thresh: 0.12
+    rail_bev_min_cells: 40.0
+    rail_bev_smooth_k: 5
+    rail_bev_max_segments: 6
+    vert_cluster_tolerance: 0.35
+    vert_min_cluster: 25
+    use_legacy_range_image: false
+    bev_edge_gradient_ratio: 0.35
 
 # ========================================
 # 标定优化配置
@@ -131,4 +162,81 @@ visualization:
   show_edges: true
   show_lines: true
   show_projections: true
+
+# ========================================
+# 图像特征前端（语义优先流水线；默认关闭以保持旧行为）
+# ========================================
+image_features:
+  enabled: false
+  enable_semantic_probs: true
+  enable_edges: true
+  enable_lines: true
+  semantic_classes: [rail, ballast, pole, signal, platform, building, road, vehicle, vegetation, sky]
+  save_logits: true
+  rail_class_names: [rail, ballast]
+  vertical_structure_classes: [pole, signal]
+  bottom_crop_ratio_for_edges: 0.0
+  keep_diagonal_lines: true
+  restrict_lsd_by_semantics: true
+  line_semantic_support_threshold: 0.12
+
+# ========================================
+# BEV 粗初始化（默认关闭）
+# ========================================
+bev:
+  enabled: false
+  x_range: [0.0, 80.0]
+  y_range: [-20.0, 20.0]
+  z_range: [-2.0, 5.0]
+  resolution: 0.1
+  channels: [density, max_height, min_height, mean_height, intensity, verticality, rail_prob]
+  optimize_dofs: [yaw, tx, ty]
+  rail_prior_weight: 1.0
+  pole_prior_weight: 0.6
+  # Phase 4：bev_initializer 搜索范围（度 / 米），可由环境变量 EDGECALIB_BEV_* 覆盖
+  yaw_min_deg: -6.0
+  yaw_max_deg: 6.0
+  yaw_step_deg: 1.0
+  tx_min_m: -2.0
+  tx_max_m: 2.0
+  ty_min_m: -2.0
+  ty_max_m: 2.0
+  trans_step_m: 0.5
+  initializer_binary: ""
+
+# ========================================
+# 语义概率场标定（默认关闭）
+# ========================================
+semantic_calib:
+  enabled: false
+  pyramid_scales: [1.0, 0.5, 0.25]
+  semantic_js_weight: 3.0
+  histogram_weight: 0.5
+  edge_weight: 1.0
+  line_weight: 0.6
+  anchor_fixed_sampling: true
+  direction_aware_yaw_weighting: true
+  class_weights:
+    rail: 3.0
+    ballast: 2.0
+    pole: 2.0
+    signal: 2.0
+    platform: 1.5
+    building: 1.0
+    road: 0.8
+    vehicle: 1.0
+    vegetation: 0.2
+    sky: 0.0
+
+# ========================================
+# 多帧滑动窗口精修（默认关闭）
+# ========================================
+refine:
+  enabled: false
+  window_size: 5
+  min_observability_score: 0.35
+  max_pose_jump_deg: 0.8
+  max_pose_jump_m: 0.15
+  temporal_smoothing_lambda: 0.4
+  update_stride: 1
 
