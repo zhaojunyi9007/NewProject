@@ -29,48 +29,36 @@ from pipeline.refinement_state import (
 def _parse_calib_result(path: str) -> Optional[Dict[str, Any]]:
     if not os.path.isfile(path):
         return None
-    nums: List[float] = []
-    score: Optional[float] = None
+    kv: Dict[str, str] = {}
     breakdown: Dict[str, float] = {}
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             s = line.strip()
             if not s:
                 continue
-            if s.startswith("#"):
-                if "Score:" in s:
+            if ":" in s:
+                k, v = s.split(":", 1)
+                kv[k.strip()] = v.strip()
+                # capture numeric breakdown for debug
+                vv = v.strip().split()[0] if v.strip() else ""
+                if vv:
                     try:
-                        rest = s.split("Score:", 1)[1].strip().split()
-                        if rest:
-                            score = float(rest[0])
-                    except (ValueError, IndexError):
+                        breakdown[k.strip()] = float(vv)
+                    except ValueError:
                         pass
-                if "semantic_js_divergence:" in s:
-                    try:
-                        breakdown["semantic_js"] = float(s.split(":", 1)[1].strip().split()[0])
-                    except (ValueError, IndexError):
-                        pass
-                if "semantic_hist_similarity:" in s:
-                    try:
-                        breakdown["semantic_hist"] = float(s.split(":", 1)[1].strip().split()[0])
-                    except (ValueError, IndexError):
-                        pass
-                if "edge_term_norm:" in s:
-                    try:
-                        breakdown["edge_term"] = float(s.split(":", 1)[1].strip().split()[0])
-                    except (ValueError, IndexError):
-                        pass
-                continue
-            for part in s.split():
-                try:
-                    nums.append(float(part))
-                except ValueError:
-                    pass
-    if len(nums) < 6:
+    if "r" not in kv or "t" not in kv:
         return None
+    try:
+        r = [float(x) for x in kv["r"].split()[:3]]
+        t = [float(x) for x in kv["t"].split()[:3]]
+    except ValueError:
+        return None
+    if len(r) != 3 or len(t) != 3:
+        return None
+    score = breakdown.get("Score")
     return {
-        "rvec": nums[0:3],
-        "tvec": nums[3:6],
+        "rvec": r,
+        "tvec": t,
         "score": score,
         "breakdown": breakdown,
     }
@@ -132,7 +120,7 @@ def run(context: RuntimeContext) -> None:
     state = load_state(state_path) or RefinementState()
 
     lidar_dir = context.config["data"]["lidar_output_dir"]
-    sam_dir = context.config["data"]["sam_output_dir"]
+    image_features_dir = context.config["data"]["image_features_output_dir"]
     calib_dir = context.config["data"]["calib_output_dir"]
 
     prev_refined_r: Optional[List[float]] = None
@@ -155,7 +143,9 @@ def run(context: RuntimeContext) -> None:
             print(f"[Warning] 无标定结果，跳过帧 {fid}")
             continue
 
-        obs, dbg = compute_frame_observability(frame_id, lidar_dir=lidar_dir, sam_dir=sam_dir, config=context.config)
+        obs, dbg = compute_frame_observability(
+            frame_id, lidar_dir=lidar_dir, image_features_dir=image_features_dir, config=context.config
+        )
         br = parsed.get("breakdown") or {}
 
         append_frame_result(

@@ -44,7 +44,7 @@ def compute_frame_observability(
     frame_id: int,
     *,
     lidar_dir: str,
-    sam_dir: str,
+    image_features_dir: str,
     config: Optional[Dict[str, Any]] = None,
 ) -> tuple[float, Dict[str, float]]:
     """
@@ -54,12 +54,12 @@ def compute_frame_observability(
     _ = config
     fid = f"{frame_id:010d}"
     base_l = os.path.join(lidar_dir, fid)
-    base_s = os.path.join(sam_dir, fid)
+    base_i = os.path.join(image_features_dir, fid)
 
     dbg: Dict[str, float] = {}
     score = 0.25
 
-    npy_sem = os.path.join(base_s, "semantic_probs.npy")
+    npy_sem = os.path.join(base_i, "semantic_probs.npy")
     if os.path.isfile(npy_sem):
         mm = _safe_mean_max_prob(npy_sem)
         if mm is not None:
@@ -75,21 +75,22 @@ def compute_frame_observability(
         except OSError:
             pass
 
-    n_lines = _line_count(base_s + "_lines_2d.txt")
+    # Phase A2: 统一从 image_features/<frame_id>/lines_2d.txt 读取
+    n_lines = _line_count(os.path.join(base_i, "lines_2d.txt"))
     dbg["lines_2d_count"] = float(n_lines)
     score += 0.12 * min(1.0, n_lines / 80.0)
 
-    if _file_nonempty(base_s + "_edge_dist.png"):
-        score += 0.1
-        dbg["has_edge_dist"] = 1.0
+    if _file_nonempty(os.path.join(base_i, "edge_map.png")):
+        score += 0.08
+        dbg["has_edge_map"] = 1.0
     else:
-        dbg["has_edge_dist"] = 0.0
+        dbg["has_edge_map"] = 0.0
 
-    if _file_nonempty(base_s + "_semantic_map.png"):
+    if _file_nonempty(os.path.join(base_i, "semantic_argmax.png")):
         score += 0.06
-        dbg["has_semantic_map"] = 1.0
+        dbg["has_semantic_argmax"] = 1.0
     else:
-        dbg["has_semantic_map"] = 0.0
+        dbg["has_semantic_argmax"] = 0.0
 
     # LiDAR：BEV / 语义点存在
     if _file_nonempty(base_l + "_bev_maps.npz") or _file_nonempty(base_l + "_bev_channels.bin"):

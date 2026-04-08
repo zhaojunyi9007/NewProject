@@ -7,6 +7,59 @@
 #include <sstream>
 #include <string>
 
+bool ParseCSVToDoubles(const std::string& csv, std::vector<double>& out) {
+    out.clear();
+    std::stringstream ss(csv);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) continue;
+        char* end = nullptr;
+        const double v = std::strtod(item.c_str(), &end);
+        if (end != item.c_str()) {
+            out.push_back(v);
+        }
+    }
+    return !out.empty();
+}
+
+bool LoadSemanticProbabilityMaps(const std::string& path, SemanticProbMaps& out) {
+    return LoadSemanticProbabilityMapsBinary(path, out);
+}
+
+bool LoadInitPoseFromBEV(const std::string& path, double r_out[3], double t_out[3]) {
+    if (path.empty()) {
+        return false;
+    }
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cerr << "[LoadInitPoseFromBEV] Cannot open " << path << std::endl;
+        return false;
+    }
+    std::vector<double> nums;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::stringstream ss(line);
+        std::string part;
+        while (ss >> part) {
+            char* end = nullptr;
+            double v = std::strtod(part.c_str(), &end);
+            if (end != part.c_str()) nums.push_back(v);
+        }
+    }
+    if (nums.size() < 6) {
+        std::cerr << "[LoadInitPoseFromBEV] Need 6 numbers in " << path << std::endl;
+        return false;
+    }
+    r_out[0] = nums[0];
+    r_out[1] = nums[1];
+    r_out[2] = nums[2];
+    t_out[0] = nums[3];
+    t_out[1] = nums[4];
+    t_out[2] = nums[5];
+    return true;
+}
+
 void CalibHistory::push(const Eigen::Vector3d& r, const Eigen::Vector3d& t, double score) {
     rotation_history.push_back(r);
     translation_history.push_back(t);

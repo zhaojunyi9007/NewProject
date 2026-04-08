@@ -11,6 +11,7 @@
 
 #include "include/optimizer_cost_function.h"
 #include "include/optimizer_scoring.h"
+#include "include/optimizer_semantic_scoring.h"
 
 namespace {
 bool GetEnvBool(const char* name, bool default_value) {
@@ -63,6 +64,8 @@ void PrintProjectionStats(const char* tag,
 EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(config) {
     std::copy(config_.init_r, config_.init_r + 3, r_curr_);
     std::copy(config_.init_t, config_.init_t + 3, t_curr_);
+    sem_cfg_.class_weights = config_.class_weights;
+    sem_cfg_.pyramid_scales = config_.pyramid_scales;
 }
 
 bool EdgeCalibrator::LoadData() {
@@ -85,6 +88,20 @@ bool EdgeCalibrator::LoadData() {
     bool used_default = false;
     if (!LoadCalib(config_.calib_file, K_, R_rect_, P_rect_, &used_default)) return false;
 
+    // Phase B5: semantic-probability inputs
+    semantic_inputs_ready_ = false;
+    if (!config_.semantic_probs_path.empty() && !config_.lidar_semantic_points_path.empty()) {
+        if (LoadSemanticProbabilityMaps(config_.semantic_probs_path, semantic_probs_) &&
+            LoadSemanticPoints(config_.lidar_semantic_points_path, semantic_points_) &&
+            !semantic_probs_.empty() && !semantic_points_.empty()) {
+            semantic_inputs_ready_ = true;
+            std::cout << "[Info] Semantic inputs ready: probs=" << semantic_probs_.W << "x" << semantic_probs_.H
+                      << "x" << semantic_probs_.C << ", points=" << semantic_points_.size() << std::endl;
+        } else {
+            std::cout << "[Warning] Semantic inputs specified but failed to load." << std::endl;
+        }
+    }
+
     if (!config_.history_file.empty()) {
         LoadCalibHistory(config_.history_file, history_);
     }
@@ -95,8 +112,156 @@ bool EdgeCalibrator::LoadData() {
     return true;
 }
 
+void EdgeCalibrator::ApplyPoseFromBEVIfProvided() {
+    if (config_.init_pose_from_bev_path.empty()) {
+        return;
+    }
+    double r_bev[3] = {0, 0, 0};
+    double t_bev[3] = {0, 0, 0};
+    if (LoadInitPoseFromBEV(config_.init_pose_from_bev_path, r_bev, t_bev)) {
+        r_curr_[0] = r_bev[0];
+        r_curr_[1] = r_bev[1];
+        r_curr_[2] = r_bev[2];
+        t_curr_[0] = t_bev[0];
+        t_curr_[1] = t_bev[1];
+        t_curr_[2] = t_bev[2];
+        std::cout << "[Info] Applied init pose from BEV: r=[" << r_curr_[0] << "," << r_curr_[1] << "," << r_curr_[2]
+                  << "], t=[" << t_curr_[0] << "," << t_curr_[1] << "," << t_curr_[2] << "]" << std::endl;
+    }
+}
+
+void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
+    if (!semantic_inputs_ready_) {
+        return;
+    }
+    std::cout << "[Stage 2] Semantic coarse optimization (dominant scoring)..." << std::endl;
+
+    const double angle_range = GetEnvDouble("EDGECALIB_COARSE_ANGLE_RANGE", 0.15);
+    const double angle_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_ANGLE_STEP", 0.05));
+    double tx_range = GetEnvDouble("EDGECALIB_COARSE_TX_RANGE", 0.10);
+    double ty_range = GetEnvDouble("EDGECALIB_COARSE_TY_RANGE", 0.30);
+    double tz_range = GetEnvDouble("EDGECALIB_COARSE_TZ_RANGE", 0.30);
+    double tx_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TX_STEP", 0.05));
+    double ty_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TY_STEP", 0.15));
+    double tz_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TZ_STEP", 0.15));
+
+    double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
+    double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
+
+    Eigen::Matrix3d R0;
+    ceres::AngleAxisToRotationMatrix(r_curr_, R0.data());
+    Eigen::Vector3d t0(t_curr_[0], t_curr_[1], t_curr_[2]);
+
+    const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
+    const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
+
+    best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, semantic_points_,
+                                                              semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
+                                                              config_.semantic_js_weight, config_.histogram_weight,
+                                                              w_edge, w_line, sem_cfg_, &last_score_breakdown_);
+    PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
+
+    for (double tx = t_curr_[0] - tx_range; tx <= t_curr_[0] + tx_range + 1e-12; tx += tx_step) {
+        for (double ty = t_curr_[1] - ty_range; ty <= t_curr_[1] + ty_range + 1e-12; ty += ty_step) {
+            for (double tz = t_curr_[2] - tz_range; tz <= t_curr_[2] + tz_range + 1e-12; tz += tz_step) {
+                for (double rx = r_curr_[0] - angle_range; rx <= r_curr_[0] + angle_range + 1e-9; rx += angle_step) {
+                    for (double ry = r_curr_[1] - angle_range; ry <= r_curr_[1] + angle_range + 1e-9; ry += angle_step) {
+                        for (double rz = r_curr_[2] - angle_range; rz <= r_curr_[2] + angle_range + 1e-9; rz += angle_step) {
+                            double r_try[3] = {rx, ry, rz};
+                            Eigen::Matrix3d R_try;
+                            ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
+                            Eigen::Vector3d t_try(tx, ty, tz);
+                            TotalScoreBreakdown bd;
+                            const double score =
+                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, semantic_points_,
+                                                                             semantic_probs_, R_rect_, P_rect_, W_, H_,
+                                                                             R_try, t_try, config_.semantic_js_weight,
+                                                                             config_.histogram_weight, w_edge, w_line,
+                                                                             sem_cfg_, &bd);
+                            if (score > best_score_) {
+                                best_score_ = score;
+                                std::copy(r_try, r_try + 3, best_r);
+                                best_t[0] = tx;
+                                best_t[1] = ty;
+                                best_t[2] = tz;
+                                last_score_breakdown_ = bd;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::copy(best_r, best_r + 3, r_curr_);
+    std::copy(best_t, best_t + 3, t_curr_);
+    PrintProjectionStats("after_semantic_coarse", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
+}
+
+void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
+    if (!semantic_inputs_ready_) {
+        return;
+    }
+    std::cout << "[Stage 2b] Semantic fine optimization (local search)..." << std::endl;
+
+    const double a_range = GetEnvDouble("EDGECALIB_SEM_FINE_ANGLE_RANGE", 0.04);
+    const double a_step = std::max(1e-6, GetEnvDouble("EDGECALIB_SEM_FINE_ANGLE_STEP", 0.02));
+    const double t_range = GetEnvDouble("EDGECALIB_SEM_FINE_TRANS_RANGE", 0.08);
+    const double t_step = std::max(1e-6, GetEnvDouble("EDGECALIB_SEM_FINE_TRANS_STEP", 0.04));
+
+    const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
+    const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
+
+    double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
+    double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
+    double local_best = best_score_;
+
+    for (double tx = t_curr_[0] - t_range; tx <= t_curr_[0] + t_range + 1e-12; tx += t_step) {
+        for (double ty = t_curr_[1] - t_range; ty <= t_curr_[1] + t_range + 1e-12; ty += t_step) {
+            for (double tz = t_curr_[2] - t_range; tz <= t_curr_[2] + t_range + 1e-12; tz += t_step) {
+                for (double rx = r_curr_[0] - a_range; rx <= r_curr_[0] + a_range + 1e-9; rx += a_step) {
+                    for (double ry = r_curr_[1] - a_range; ry <= r_curr_[1] + a_range + 1e-9; ry += a_step) {
+                        for (double rz = r_curr_[2] - a_range; rz <= r_curr_[2] + a_range + 1e-9; rz += a_step) {
+                            double r_try[3] = {rx, ry, rz};
+                            Eigen::Matrix3d R_try;
+                            ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
+                            Eigen::Vector3d t_try(tx, ty, tz);
+                            TotalScoreBreakdown bd;
+                            const double score =
+                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, semantic_points_,
+                                                                             semantic_probs_, R_rect_, P_rect_, W_, H_,
+                                                                             R_try, t_try, config_.semantic_js_weight,
+                                                                             config_.histogram_weight, w_edge, w_line,
+                                                                             sem_cfg_, &bd);
+                            if (score > local_best) {
+                                local_best = score;
+                                std::copy(r_try, r_try + 3, best_r);
+                                best_t[0] = tx;
+                                best_t[1] = ty;
+                                best_t[2] = tz;
+                                last_score_breakdown_ = bd;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best_score_ = local_best;
+    std::copy(best_r, best_r + 3, r_curr_);
+    std::copy(best_t, best_t + 3, t_curr_);
+    PrintProjectionStats("after_semantic_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
+}
+
 void EdgeCalibrator::PerformCoarseSearch() {
     std::cout << "[Stage 2] Coarse Calibration..." << std::endl;
+    // Phase B5: apply BEV init pose first if provided.
+    ApplyPoseFromBEVIfProvided();
+    // Phase B5: semantic coarse optimization becomes the primary driver when inputs exist.
+    PerformSemanticCoarseOptimizationIfEnabled();
+    if (semantic_inputs_ready_) {
+        return;
+    }
     const bool use_edge = !edge_dist_.empty();
     const bool use_semantic = !semantic_map_.empty() && !use_edge;
 
@@ -172,7 +337,7 @@ void EdgeCalibrator::PerformCoarseSearch() {
     PrintProjectionStats("after_coarse", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 }
 
-void EdgeCalibrator::PerformFineOptimization() {
+void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     if (edge_dist_.empty() && semantic_map_.empty()) return;
 
     std::cout << "[Stage 3] Fine Calibration..." << std::endl;
@@ -289,6 +454,12 @@ void EdgeCalibrator::PerformFineOptimization() {
     PrintProjectionStats("after_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 }
 
+void EdgeCalibrator::PerformFineOptimization() {
+    // Phase B5: semantic fine optimization (local search) then geometric regularized refinement.
+    PerformSemanticFineOptimizationIfEnabled();
+    PerformGeometricRegularizedRefinement();
+}
+
 void EdgeCalibrator::ApplyTemporalSmoothing() {
     std::cout << "[Stage 4] Temporal smoothing..." << std::endl;
     r_result_ = Eigen::Vector3d(r_curr_[0], r_curr_[1], r_curr_[2]);
@@ -311,9 +482,19 @@ bool EdgeCalibrator::SaveResult() const {
     std::ofstream result_file(output);
     if (!result_file.is_open()) return false;
 
-    result_file << "# EdgeCalib v2.0 Calibration Result\n";
-    result_file << r_result_[0] << " " << r_result_[1] << " " << r_result_[2] << "\n";
-    result_file << t_result_[0] << " " << t_result_[1] << " " << t_result_[2] << "\n";
-    result_file << "# Score: " << best_score_ << "\n";
+    // Phase A3: stable key-value output for downstream parsing.
+    // Do NOT rely on optional fields existing; always write the same keys.
+    // Values not yet supported by current optimizer are written as 0.0 placeholders.
+    result_file << "r: " << r_result_[0] << " " << r_result_[1] << " " << r_result_[2] << "\n";
+    result_file << "t: " << t_result_[0] << " " << t_result_[1] << " " << t_result_[2] << "\n";
+    result_file << "Score: " << best_score_ << "\n";
+    // Phase B5: write cached semantic/regularizer terms (0.0 if not available).
+    result_file << "semantic_js_divergence: " << last_score_breakdown_.semantic_js_divergence << "\n";
+    result_file << "semantic_hist_similarity: " << last_score_breakdown_.semantic_hist_similarity << "\n";
+    result_file << "edge_term_norm: " << last_score_breakdown_.edge_score_norm << "\n";
+    result_file << "line_term_norm: " << last_score_breakdown_.line_score_norm << "\n";
+    // Phase C5: unified confidences (still 0.0 placeholders until computed upstream).
+    result_file << "rail_confidence: " << last_score_breakdown_.rail_confidence << "\n";
+    result_file << "vertical_structure_confidence: " << last_score_breakdown_.vertical_structure_confidence << "\n";
     return true;
 }

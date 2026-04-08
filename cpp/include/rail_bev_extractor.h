@@ -35,6 +35,8 @@ std::vector<Line3D> ExtractMultiRailLinesFromBEV(
     const BEVChannels& bev,
     const RailPriorConfig& cfg,
     double reference_plane_z,
-    int max_lines = 6);
+    int max_lines = 6,
+    float* out_rail_confidence = nullptr,
+    bool* out_branch_detected = nullptr);
 
 #endif

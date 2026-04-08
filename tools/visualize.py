@@ -413,16 +413,21 @@ def load_calib_result(calib_result_file):
             r_vec = None
             t_vec = None
             
-            # 尝试解析 EdgeCalib v2.0 格式（简单格式）
-            data_lines = [line.strip() for line in lines if line.strip() and not line.strip().startswith('#')]
-            if len(data_lines) >= 2:
-                # 第一行是旋转，第二行是平移
-                r_vals = list(map(float, data_lines[0].split()))
-                t_vals = list(map(float, data_lines[1].split()))
+            # Phase A3：稳定 key-value 格式
+            kv = {}
+            for line in lines:
+                s = line.strip()
+                if not s or ":" not in s:
+                    continue
+                k, v = s.split(":", 1)
+                kv[k.strip()] = v.strip()
+            if "r" in kv and "t" in kv:
+                r_vals = list(map(float, kv["r"].split()[:3]))
+                t_vals = list(map(float, kv["t"].split()[:3]))
                 if len(r_vals) == 3 and len(t_vals) == 3:
                     r_vec = np.array(r_vals)
                     t_vec = np.array(t_vals)
-                    print(f"[Info] Loaded calibration result from {calib_result_file} (EdgeCalib v2.0 format)")
+                    print(f"[Info] Loaded calibration result from {calib_result_file} (Phase A3 kv format)")
                     return r_vec, t_vec
             
             # 尝试解析旧格式

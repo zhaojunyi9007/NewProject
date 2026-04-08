@@ -38,15 +38,20 @@ def run(context: RuntimeContext) -> None:
             print(f"[Warning] 标定结果不存在，跳过帧 {frame_id:010d}")
             continue
 
+        kv: dict[str, str] = {}
         with open(calib_result_file, "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f if line.strip()]
-        data_lines = [ln for ln in lines if not ln.startswith("#")]
-        if len(data_lines) < 2:
-            print(f"[Warning] 标定结果格式异常(行数不足)，跳过帧 {frame_id:010d}: {calib_result_file}")
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                if ":" in s:
+                    k, v = s.split(":", 1)
+                    kv[k.strip()] = v.strip()
+        if "r" not in kv or "t" not in kv:
+            print(f"[Warning] 标定结果格式异常(缺少 r/t)，跳过帧 {frame_id:010d}: {calib_result_file}")
             continue
-
-        r_vec = data_lines[0].split()
-        t_vec = data_lines[1].split()
+        r_vec = kv["r"].split()
+        t_vec = kv["t"].split()
         if len(r_vec) != 3 or len(t_vec) != 3:
             print(f"[Warning] 标定结果格式异常(R/T维度错误)，跳过帧 {frame_id:010d}: {calib_result_file}")
             continue
@@ -88,6 +93,8 @@ def run(context: RuntimeContext) -> None:
                     "--diag",
                     "refine",
                     "--image_features_frame",
+                    os.path.abspath(img_feat),
+                    "--sam_frame_dir",
                     os.path.abspath(img_feat),
                     "--refinement_dir",
                     os.path.abspath(ref_dir) if ref_dir else "",
