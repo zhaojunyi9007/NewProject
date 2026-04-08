@@ -916,6 +916,16 @@ int main(int argc, char** argv) {
               << ", Veg=" << stats[LABEL_VEGETATION] 
               << ", Struct=" << stats[LABEL_STRUCTURE] << std::endl;
 
+    // Cache for Phase C1 semantic_id assignment.
+    const double ref_z = GetEnvDouble("EDGECALIB_LIDAR_REFERENCE_PLANE_Z", 0.0);
+    const double rail_prob_thresh =
+        static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_BEV_PROB_THRESH", 0.12));
+    const double rail_band_zmin = GetEnvDouble("EDGECALIB_LIDAR_RAIL_BAND_ZMIN", -0.5);
+    const double rail_band_zmax = GetEnvDouble("EDGECALIB_LIDAR_RAIL_BAND_ZMAX", 0.5);
+    // Phase C3: 用 reference_z 的相对高度替代硬编码阈值（-1.2/-1.4）。
+    const double near_ground_zmin = GetEnvDouble("EDGECALIB_LIDAR_NEAR_GROUND_ZMIN", -0.25);
+    const double edge_keep_zmin = GetEnvDouble("EDGECALIB_LIDAR_EDGE_KEEP_ZMIN", near_ground_zmin);
+
     if (phase3) {
         std::ofstream out_sem(out_base + "_semantic_points.txt");
         if (!out_sem.is_open()) {
@@ -923,9 +933,32 @@ int main(int argc, char** argv) {
         } else {
             out_sem << "# Semantic points: x y z intensity nx ny nz label weight semantic_id\n";
             for (const auto& pf : labeled_points) {
+                int sem_id = SEM_UNKNOWN;
+                // Default mapping from coarse PCA label -> railway semantic id.
+                if (pf.label == LABEL_ROAD) sem_id = SEM_BALLAST_GROUND;
+                else if (pf.label == LABEL_VEGETATION) sem_id = SEM_VEGETATION_LIKE;
+                else if (pf.label == LABEL_STRUCTURE) sem_id = SEM_VERTICAL_STRUCTURE;
+                else if (pf.label == LABEL_VEHICLE) sem_id = SEM_VEHICLE_LIKE;
+
+                // Upgrade to rail_like if BEV rail_probability supports it.
+                // This makes semantic_points significantly more useful for railway alignment.
+                if (!bev_data.rail_probability.empty() && bev_data.nx > 0 && bev_data.ny > 0) {
+                    const double dz = pf.p.z() - ref_z;
+                    if (dz >= rail_band_zmin && dz <= rail_band_zmax) {
+                        int ix = 0, iy = 0;
+                        if (BEVWorldToCell(pf.p.x(), pf.p.y(), bev_data, &ix, &iy)) {
+                            const size_t idx = static_cast<size_t>(iy * bev_data.nx + ix);
+                            if (idx < bev_data.rail_probability.size()) {
+                                if (bev_data.rail_probability[idx] >= rail_prob_thresh) {
+                                    sem_id = SEM_RAIL_LIKE;
+                                }
+                            }
+                        }
+                    }
+                }
                 out_sem << pf.p.x() << " " << pf.p.y() << " " << pf.p.z() << " "
                         << pf.intensity << " " << pf.normal.x() << " " << pf.normal.y() << " " << pf.normal.z()
-                        << " " << pf.label << " " << pf.weight << " " << pf.label << "\n";
+                        << " " << pf.label << " " << pf.weight << " " << sem_id << "\n";
             }
             out_sem.close();
             std::cout << "  Saved " << out_base << "_semantic_points.txt" << std::endl;
@@ -957,7 +990,8 @@ int main(int argc, char** argv) {
                     count_veg++;
                     continue;
                 }
-                if (p.z <= -1.2f) {
+                const double dz = static_cast<double>(p.z) - ref_z;
+                if (dz <= near_ground_zmin) {
                     count_ground++;
                     continue;
                 }
@@ -973,7 +1007,7 @@ int main(int argc, char** argv) {
                 if (label == 0) keep_unknown++;
                 else if (label == 1) keep_road++;
                 else if (label == 3) keep_struct++;
-                if (p.z > -1.4f) {
+                if (dz > edge_keep_zmin) {
                     float w = p.intensity;
                     if (label == 3) {
                         w *= 1.15f;
@@ -989,8 +1023,9 @@ int main(int argc, char** argv) {
                 const auto& p = cloud_ds->points[i];
                 int label = point_labels_1to1[i];
                 if (label != 3) continue;
-                if (p.z <= -1.2f) continue;
-                if (p.z <= -1.4f) continue;
+                const double dz = static_cast<double>(p.z) - ref_z;
+                if (dz <= near_ground_zmin) continue;
+                if (dz <= edge_keep_zmin) continue;
                 out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
                 saved_edges++;
             }
@@ -1007,7 +1042,8 @@ int main(int argc, char** argv) {
                         count_veg++;
                         continue;
                     }
-                    if (p.z <= -1.2) {
+                    const double dz = static_cast<double>(p.z) - ref_z;
+                    if (dz <= near_ground_zmin) {
                         count_ground++;
                         continue;
                     }
@@ -1016,7 +1052,7 @@ int main(int argc, char** argv) {
                     else if (label == 1) keep_road++;
                     else if (label == 3) keep_struct++;
 
-                    if (p.z > -1.4) {
+                    if (dz > edge_keep_zmin) {
                         out_edges << p.x << " " << p.y << " " << p.z << " " << p.intensity << "\n";
                         saved_edges++;
                     }
@@ -1028,7 +1064,7 @@ int main(int argc, char** argv) {
         if (!phase3 || bev_edge_ready) {
             std::cout << "  [DEBUG] Raw edge candidates (total): " << count_total << std::endl;
             std::cout << "  [DEBUG] Removed Vegetation: " << count_veg << std::endl;
-            std::cout << "  [DEBUG] Removed Ground (z <= -1.2): " << count_ground << std::endl;
+            std::cout << "  [DEBUG] Removed Ground (dz <= near_ground_zmin): " << count_ground << std::endl;
             std::cout << "  [DEBUG] Kept: " << saved_edges << std::endl;
             std::cout << "          -> Unknown: " << keep_unknown << std::endl;
             std::cout << "          -> Road: " << keep_road << std::endl;
@@ -1048,19 +1084,27 @@ int main(int argc, char** argv) {
         rcfg.smooth_ksize = std::max(3, GetEnvInt("EDGECALIB_LIDAR_RAIL_BEV_SMOOTH_K", 5));
         const double ref_z = GetEnvDouble("EDGECALIB_LIDAR_REFERENCE_PLANE_Z", 0.0);
         const int max_rail_seg = std::max(1, GetEnvInt("EDGECALIB_LIDAR_RAIL_BEV_MAX_SEGMENTS", 6));
+        float rail_confidence = 0.f;
+        bool rail_branch_detected = false;
         std::vector<Line3D> rail_lines =
-            ExtractMultiRailLinesFromBEV(bev_data, rcfg, ref_z, max_rail_seg);
+            ExtractMultiRailLinesFromBEV(
+                bev_data, rcfg, ref_z, max_rail_seg,
+                &rail_confidence, &rail_branch_detected);
         VerticalStructureConfig vcfg;
         vcfg.z_min = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MIN", -1.0);
         vcfg.z_max = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MAX", 5.0);
         vcfg.cluster_tolerance = GetEnvDouble("EDGECALIB_LIDAR_VERT_CLUSTER_TOL", 0.35);
         vcfg.min_cluster_size = std::max(10, GetEnvInt("EDGECALIB_LIDAR_VERT_MIN_CLUSTER", 25));
+        // Phase C2: 使用语义标签筛选竖直结构候选点（默认 LABEL_STRUCTURE）。
+        // 可通过环境变量覆盖，设为 -1 可禁用语义筛选回退到“仅高度筛选”。 
+        const int structure_label_id = GetEnvInt("EDGECALIB_LIDAR_VERT_STRUCTURE_LABEL_ID", LABEL_STRUCTURE);
         std::vector<Line3D> pole_lines =
-            ExtractVerticalStructures(cloud_ds, point_labels_1to1, vcfg, -1);
+            ExtractVerticalStructures(cloud_ds, point_labels_1to1, vcfg, structure_label_id);
         lines.insert(lines.end(), rail_lines.begin(), rail_lines.end());
         lines.insert(lines.end(), pole_lines.begin(), pole_lines.end());
-        std::cout << "  Phase3 lines: rail segments=" << rail_lines.size() << ", poles=" << pole_lines.size()
-                  << std::endl;
+        std::cout << "  Phase3 lines: rail segments=" << rail_lines.size()
+                  << " (confidence=" << rail_confidence << ", branch=" << (rail_branch_detected ? 1 : 0) << ")"
+                  << ", poles=" << pole_lines.size() << std::endl;
     }
 
     if (!phase3) {

@@ -2,6 +2,7 @@
 
 #include "include/common.h"
 #include "include/optimizer_cost_function.h"
+#include "include/optimizer_semantic_scoring.h"
 
 #include <vector>
 
@@ -63,3 +64,24 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
                            int W, int H,
                            const Eigen::Matrix3d& R,
                            const Eigen::Vector3d& t);
+
+// Phase C5: unify breakdown structure in common.h
+using TotalScoreBreakdown = ScoreBreakdown;
+
+double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeature>& edge_points,
+                                                    const cv::Mat& edge_dist,
+                                                    const cv::Mat& edge_weight,
+                                                    const std::vector<SemanticPointRecord>& lidar_semantic_points,
+                                                    const SemanticProbMaps& image_semantic_probs,
+                                                    const Eigen::Matrix3d& R_rect,
+                                                    const Eigen::Matrix<double, 3, 4>& P_rect,
+                                                    int W,
+                                                    int H,
+                                                    const Eigen::Matrix3d& R,
+                                                    const Eigen::Vector3d& t,
+                                                    double w_semantic_js,
+                                                    double w_semantic_hist,
+                                                    double w_edge,
+                                                    double w_line,
+                                                    const SemanticScoringConfig& sem_cfg,
+                                                    TotalScoreBreakdown* breakdown);

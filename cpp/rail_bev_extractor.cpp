@@ -97,7 +97,9 @@ std::vector<Line3D> ExtractMultiRailLinesFromBEV(
     const BEVChannels& bev,
     const RailPriorConfig& cfg,
     double reference_plane_z,
-    int max_lines) {
+    int max_lines,
+    float* out_rail_confidence,
+    bool* out_branch_detected) {
     std::vector<Line3D> lines;
     if (bev.nx <= 0 || bev.ny <= 0 || bev.rail_probability.empty()) return lines;
 
@@ -119,13 +121,37 @@ std::vector<Line3D> ExtractMultiRailLinesFromBEV(
         float area;
     };
     std::vector<Comp> comps;
+    float total_area = 0.f;
     for (int l = 1; l < ncomp; ++l) {
         const int a = stats.at<int>(l, cv::CC_STAT_AREA);
         if (static_cast<float>(a) >= cfg.min_component_cells) {
-            comps.push_back({l, static_cast<float>(a)});
+            const float af = static_cast<float>(a);
+            comps.push_back({l, af});
+            total_area += af;
         }
     }
     std::sort(comps.begin(), comps.end(), [](const Comp& A, const Comp& B) { return A.area > B.area; });
+
+    // Phase C4: simple confidence + branch detection.
+    // - confidence: total rail component area normalized by a soft cap.
+    // - branch_detected: at least two sizable components with comparable areas.
+    if (out_rail_confidence) {
+        const float denom = std::max(1.f, cfg.min_component_cells * 8.f);
+        *out_rail_confidence = std::min(1.f, total_area / denom);
+    }
+    if (out_branch_detected) {
+        bool branch = false;
+        if (comps.size() >= 2) {
+            const float a0 = comps[0].area;
+            const float a1 = comps[1].area;
+            if (a0 > 1e-3f) {
+                const float ratio = a1 / a0;
+                // If the 2nd component is not negligible, it often indicates a split / fork.
+                branch = (ratio >= 0.35f);
+            }
+        }
+        *out_branch_detected = branch;
+    }
 
     for (size_t ci = 0; ci < comps.size() && static_cast<int>(lines.size()) < max_lines; ++ci) {
         const int lbl = comps[ci].id;
@@ -169,7 +195,14 @@ std::vector<Line3D> ExtractMultiRailLinesFromBEV(
         L.type = 0;
         lines.push_back(L);
     }
-    std::cout << "[RailBEV] Multi-segment rail lines: " << lines.size() << std::endl;
+    std::cout << "[RailBEV] Multi-segment rail lines: " << lines.size();
+    if (out_rail_confidence) {
+        std::cout << ", rail_confidence=" << *out_rail_confidence;
+    }
+    if (out_branch_detected) {
+        std::cout << ", branch_detected=" << (*out_branch_detected ? 1 : 0);
+    }
+    std::cout << std::endl;
     return lines;
 }
 

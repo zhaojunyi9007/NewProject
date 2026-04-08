@@ -218,3 +218,53 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
     if (visible_count < 50) return -1e5 + visible_count;
     return total_score;
 }
+
+double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeature>& edge_points,
+                                                    const cv::Mat& edge_dist,
+                                                    const cv::Mat& edge_weight,
+                                                    const std::vector<SemanticPointRecord>& lidar_semantic_points,
+                                                    const SemanticProbMaps& image_semantic_probs,
+                                                    const Eigen::Matrix3d& R_rect,
+                                                    const Eigen::Matrix<double, 3, 4>& P_rect,
+                                                    int W,
+                                                    int H,
+                                                    const Eigen::Matrix3d& R,
+                                                    const Eigen::Vector3d& t,
+                                                    double w_semantic_js,
+                                                    double w_semantic_hist,
+                                                    double w_edge,
+                                                    double w_line,
+                                                    const SemanticScoringConfig& sem_cfg,
+                                                    TotalScoreBreakdown* breakdown) {
+    TotalScoreBreakdown bd;
+
+    // Semantic terms (dominant).
+    SemanticScoreBreakdown sem_bd;
+    bd.semantic_js_divergence =
+        ComputeSemanticJSDivergence(lidar_semantic_points, image_semantic_probs, R_rect, P_rect, R, t, sem_cfg, &sem_bd);
+    bd.semantic_hist_similarity = sem_bd.semantic_hist_similarity;
+
+    bd.semantic_js_score = -bd.semantic_js_divergence;
+    bd.semantic_hist_score = bd.semantic_hist_similarity;
+
+    // Edge term: normalize by point count for scale stability.
+    bd.edge_score_norm = 0.0;
+    if (!edge_dist.empty() && !edge_points.empty()) {
+        const double raw = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R, t);
+        const double n = static_cast<double>(std::max<size_t>(1, edge_points.size()));
+        bd.edge_score_norm = raw / n;
+    }
+
+    // Line term placeholder (Phase B5/C5 will implement real line alignment score).
+    bd.line_score_norm = 0.0;
+
+    bd.edge_score = w_edge * bd.edge_score_norm;
+    bd.line_score = w_line * bd.line_score_norm;
+
+    bd.total_score = w_semantic_js * bd.semantic_js_score + w_semantic_hist * bd.semantic_hist_score + bd.edge_score + bd.line_score;
+
+    if (breakdown) {
+        *breakdown = bd;
+    }
+    return bd.total_score;
+}
