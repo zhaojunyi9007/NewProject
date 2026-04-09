@@ -76,6 +76,7 @@ struct LineReprojectionError {
 
         for (const auto& l2d : l2ds_) {
             if (l2d.type != l3d_.type) continue;
+            if (l3d_.class_id > 0 && l2d.class_id >= 0 && l2d.class_id != l3d_.class_id) continue;
 
             double lx1 = l2d.p1.x(), ly1 = l2d.p1.y();
             double lx2 = l2d.p2.x(), ly2 = l2d.p2.y();
@@ -90,9 +91,14 @@ struct LineReprojectionError {
             T d1 = ceres::abs(T(A) * u1 + T(B) * v1 + T(C)) / T(norm);
             T d2 = ceres::abs(T(A) * u2 + T(B) * v2 + T(C)) / T(norm);
 
+            const double l3_conf = std::max(0.05f, std::min(1.0f, l3d_.confidence));
+            const double l2_sem = std::max(0.0, std::min(1.0, l2d.semantic_support));
+            const double l2_conf = std::max(0.05f, std::min(1.0f, l2d.confidence));
+            const double pair_w = std::max(0.05, l3_conf * (0.5 * l2_sem + 0.5 * l2_conf));
             T avg_dist = (d1 + d2) / T(2.0);
-            if (avg_dist < min_dist) {
-                min_dist = avg_dist;
+            T weighted_dist = avg_dist / T(pair_w);
+            if (weighted_dist < min_dist) {
+                min_dist = weighted_dist;
                 found = true;
             }
         }
@@ -183,6 +189,7 @@ inline LineMatchStats EvaluateLineMatchStats(const Line3D& l3d,
 
     for (const auto& l2d : l2ds) {
         if (l2d.type != l3d.type) continue;
+        if (l3d.class_id > 0 && l2d.class_id >= 0 && l2d.class_id != l3d.class_id) continue;
         stats.found_type_match = true;
 
         double lx1 = l2d.p1.x(), ly1 = l2d.p1.y();
@@ -195,7 +202,11 @@ inline LineMatchStats EvaluateLineMatchStats(const Line3D& l3d,
 
         double d1 = std::abs(A * u1 + B * v1 + C) / norm;
         double d2 = std::abs(A * u2 + B * v2 + C) / norm;
-        double avg_dist = 0.5 * (d1 + d2);
+        const double l3_conf = std::max(0.05f, std::min(1.0f, l3d.confidence));
+        const double l2_sem = std::max(0.0, std::min(1.0, l2d.semantic_support));
+        const double l2_conf = std::max(0.05f, std::min(1.0f, l2d.confidence));
+        const double pair_w = std::max(0.05, l3_conf * (0.5 * l2_sem + 0.5 * l2_conf));
+        double avg_dist = 0.5 * (d1 + d2) / pair_w;
         if (avg_dist < stats.min_dist) {
             stats.min_dist = avg_dist;
         }

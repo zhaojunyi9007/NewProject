@@ -193,6 +193,9 @@ std::vector<Line3D> ExtractMultiRailLinesFromBEV(
         L.p1 = Eigen::Vector3d(static_cast<double>(c0.x), static_cast<double>(c0.y), reference_plane_z);
         L.p2 = Eigen::Vector3d(static_cast<double>(c1.x), static_cast<double>(c1.y), reference_plane_z);
         L.type = 0;
+        L.class_id = SEM_RAIL_LIKE;
+        const float comp_conf = std::min(1.0f, comps[ci].area / std::max(1.0f, cfg.min_component_cells * 3.0f));
+        L.confidence = comp_conf;
         lines.push_back(L);
     }
     std::cout << "[RailBEV] Multi-segment rail lines: " << lines.size();
@@ -216,6 +219,8 @@ std::vector<Line3D> RailBEVToLine3D(const BEVChannels& bev, const RailBEVResult&
         L.p1 = Eigen::Vector3d(static_cast<double>(a.x), static_cast<double>(a.y), reference_plane_z);
         L.p2 = Eigen::Vector3d(static_cast<double>(b.x), static_cast<double>(b.y), reference_plane_z);
         L.type = 0;
+        L.class_id = SEM_RAIL_LIKE;
+        L.confidence = std::max(0.05f, rail.confidence);
         lines.push_back(L);
     }
     return lines;

@@ -155,7 +155,7 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
     const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
     const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
 
-    best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, semantic_points_,
+    best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
                                                               semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
                                                               config_.semantic_js_weight, config_.histogram_weight,
                                                               w_edge, w_line, sem_cfg_, &last_score_breakdown_);
@@ -173,7 +173,7 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
                             Eigen::Vector3d t_try(tx, ty, tz);
                             TotalScoreBreakdown bd;
                             const double score =
-                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, semantic_points_,
+                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
                                                                              semantic_probs_, R_rect_, P_rect_, W_, H_,
                                                                              R_try, t_try, config_.semantic_js_weight,
                                                                              config_.histogram_weight, w_edge, w_line,
@@ -228,7 +228,7 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
                             Eigen::Vector3d t_try(tx, ty, tz);
                             TotalScoreBreakdown bd;
                             const double score =
-                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, semantic_points_,
+                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
                                                                              semantic_probs_, R_rect_, P_rect_, W_, H_,
                                                                              R_try, t_try, config_.semantic_js_weight,
                                                                              config_.histogram_weight, w_edge, w_line,

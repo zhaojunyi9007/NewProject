@@ -5,6 +5,69 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+double ComputeLineAlignmentScoreWeighted(const std::vector<Line3D>& lines3d,
+                                         const std::vector<Line2D>& lines2d,
+                                         const Eigen::Matrix3d& R_rect,
+                                         const Eigen::Matrix<double, 3, 4>& P_rect,
+                                         const Eigen::Matrix3d& R,
+                                         const Eigen::Vector3d& t) {
+    if (lines3d.empty() || lines2d.empty()) return 0.0;
+    constexpr double kMinZ = 0.1;
+    constexpr double kScalePx = 40.0;
+    double score_sum = 0.0;
+    int used = 0;
+
+    for (const auto& l3d : lines3d) {
+        Eigen::Vector3d p1_cam = R * l3d.p1 + t;
+        Eigen::Vector3d p2_cam = R * l3d.p2 + t;
+        Eigen::Vector3d p1_rect = R_rect * p1_cam;
+        Eigen::Vector3d p2_rect = R_rect * p2_cam;
+        if (p1_rect.z() < kMinZ || p2_rect.z() < kMinZ) continue;
+
+        Eigen::Vector4d p1_h(p1_rect.x(), p1_rect.y(), p1_rect.z(), 1.0);
+        Eigen::Vector4d p2_h(p2_rect.x(), p2_rect.y(), p2_rect.z(), 1.0);
+        Eigen::Vector3d uv1 = P_rect * p1_h;
+        Eigen::Vector3d uv2 = P_rect * p2_h;
+        const double u1 = uv1.x() / uv1.z();
+        const double v1 = uv1.y() / uv1.z();
+        const double u2 = uv2.x() / uv2.z();
+        const double v2 = uv2.y() / uv2.z();
+
+        double best = -1.0;
+        for (const auto& l2d : lines2d) {
+            if (l2d.type != l3d.type) continue;
+            if (l3d.class_id > 0 && l2d.class_id >= 0 && l2d.class_id != l3d.class_id) continue;
+
+            const double lx1 = l2d.p1.x(), ly1 = l2d.p1.y();
+            const double lx2 = l2d.p2.x(), ly2 = l2d.p2.y();
+            const double A = ly1 - ly2;
+            const double B = lx2 - lx1;
+            const double C = lx1 * ly2 - lx2 * ly1;
+            const double norm = std::sqrt(A * A + B * B);
+            if (norm < 1e-6) continue;
+
+            const double d1 = std::abs(A * u1 + B * v1 + C) / norm;
+            const double d2 = std::abs(A * u2 + B * v2 + C) / norm;
+            const double avg_dist = 0.5 * (d1 + d2);
+
+            const double l3_conf = std::max(0.05f, std::min(1.0f, l3d.confidence));
+            const double l2_sem = std::max(0.0, std::min(1.0, l2d.semantic_support));
+            const double l2_conf = std::max(0.05f, std::min(1.0f, l2d.confidence));
+            const double pair_w = std::max(0.05, l3_conf * (0.5 * l2_sem + 0.5 * l2_conf));
+            const double sim = std::exp(-avg_dist / kScalePx) * pair_w;  // [0,1]
+            if (sim > best) best = sim;
+        }
+        if (best >= 0.0) {
+            score_sum += best;
+            used++;
+        }
+    }
+    if (used <= 0) return 0.0;
+    return score_sum / static_cast<double>(used);
+}
+}  // namespace
+
 bool Project(const Eigen::Vector3d& p_lidar,
              const Eigen::Matrix3d& R_rect,
              const Eigen::Matrix<double, 3, 4>& P_rect,
@@ -222,6 +285,8 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
 double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeature>& edge_points,
                                                     const cv::Mat& edge_dist,
                                                     const cv::Mat& edge_weight,
+                                                    const std::vector<Line3D>& lines3d,
+                                                    const std::vector<Line2D>& lines2d,
                                                     const std::vector<SemanticPointRecord>& lidar_semantic_points,
                                                     const SemanticProbMaps& image_semantic_probs,
                                                     const Eigen::Matrix3d& R_rect,
@@ -255,8 +320,8 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
         bd.edge_score_norm = raw / n;
     }
 
-    // Line term placeholder (Phase B5/C5 will implement real line alignment score).
-    bd.line_score_norm = 0.0;
+    // Phase C5: weighted line alignment score with semantic/class support.
+    bd.line_score_norm = ComputeLineAlignmentScoreWeighted(lines3d, lines2d, R_rect, P_rect, R, t);
 
     bd.edge_score = w_edge * bd.edge_score_norm;
     bd.line_score = w_line * bd.line_score_norm;

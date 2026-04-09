@@ -68,9 +68,104 @@ inline double L1(const std::vector<double>& a, const std::vector<double>& b) {
     return s;
 }
 
-inline void OneHot(int idx, int C, std::vector<double>* out) {
+inline void AddMassIfValid(std::vector<double>* out, int idx, double mass) {
+    if (!out) return;
+    if (idx < 0 || idx >= static_cast<int>(out->size())) return;
+    (*out)[static_cast<size_t>(idx)] += mass;
+}
+
+inline void BuildLidarSemanticPriorDistribution(const SemanticPointRecord& sp,
+                                                int C,
+                                                std::vector<double>* out) {
     out->assign(static_cast<size_t>(C), 0.0);
-    if (idx >= 0 && idx < C) (*out)[static_cast<size_t>(idx)] = 1.0;
+    if (C <= 0) {
+        return;
+    }
+
+    // 默认先放均匀小底噪，避免后续 KL/JSD 中出现极端零分布。
+    const double eps = 1e-6;
+    for (int c = 0; c < C; ++c) {
+        (*out)[static_cast<size_t>(c)] = eps;
+    }
+
+    // 图像语义通道 canonical 顺序（与 base.yaml 默认 semantic_classes 对齐）：
+    // [rail, ballast, pole, signal, platform, building, road, vehicle, vegetation, sky]
+    // 重要：此处是“显式映射规则”，不再把 LiDAR semantic_id 当作通道索引。
+    constexpr int CH_RAIL = 0;
+    constexpr int CH_BALLAST = 1;
+    constexpr int CH_POLE = 2;
+    constexpr int CH_SIGNAL = 3;
+    constexpr int CH_PLATFORM = 4;
+    constexpr int CH_BUILDING = 5;
+    constexpr int CH_ROAD = 6;
+    constexpr int CH_VEHICLE = 7;
+    constexpr int CH_VEGETATION = 8;
+    // sky(9) 不作为 LiDAR 几何点主要候选，不主动加权。
+
+    auto add_ground = [&](double scale) {
+        AddMassIfValid(out, CH_BALLAST, 0.60 * scale);
+        AddMassIfValid(out, CH_ROAD, 0.30 * scale);
+        AddMassIfValid(out, CH_RAIL, 0.10 * scale);
+    };
+    auto add_vertical = [&](double scale) {
+        AddMassIfValid(out, CH_POLE, 0.45 * scale);
+        AddMassIfValid(out, CH_SIGNAL, 0.25 * scale);
+        AddMassIfValid(out, CH_BUILDING, 0.20 * scale);
+        AddMassIfValid(out, CH_PLATFORM, 0.10 * scale);
+    };
+
+    switch (sp.semantic_id) {
+        case SEM_RAIL_LIKE:
+            AddMassIfValid(out, CH_RAIL, 0.78);
+            AddMassIfValid(out, CH_BALLAST, 0.17);
+            AddMassIfValid(out, CH_ROAD, 0.05);
+            break;
+        case SEM_BALLAST_GROUND:
+            add_ground(1.0);
+            break;
+        case SEM_VERTICAL_STRUCTURE:
+            add_vertical(1.0);
+            break;
+        case SEM_PLATFORM_OR_BUILDING:
+            AddMassIfValid(out, CH_PLATFORM, 0.45);
+            AddMassIfValid(out, CH_BUILDING, 0.45);
+            AddMassIfValid(out, CH_POLE, 0.05);
+            AddMassIfValid(out, CH_SIGNAL, 0.05);
+            break;
+        case SEM_VEHICLE_LIKE:
+            AddMassIfValid(out, CH_VEHICLE, 0.90);
+            AddMassIfValid(out, CH_ROAD, 0.10);
+            break;
+        case SEM_VEGETATION_LIKE:
+            AddMassIfValid(out, CH_VEGETATION, 0.90);
+            AddMassIfValid(out, CH_BUILDING, 0.10);
+            break;
+        case SEM_UNKNOWN:
+        default:
+            // semantic_id 缺失/未知时，使用 legacy label 的粗映射作为后备。
+            switch (sp.label) {
+                case LABEL_ROAD:
+                    add_ground(1.0);
+                    break;
+                case LABEL_STRUCTURE:
+                    add_vertical(1.0);
+                    break;
+                case LABEL_VEHICLE:
+                    AddMassIfValid(out, CH_VEHICLE, 0.85);
+                    AddMassIfValid(out, CH_ROAD, 0.15);
+                    break;
+                case LABEL_VEGETATION:
+                    AddMassIfValid(out, CH_VEGETATION, 0.85);
+                    AddMassIfValid(out, CH_BUILDING, 0.15);
+                    break;
+                default:
+                    // 无法判别时保持近似均匀（仅 eps）
+                    break;
+            }
+            break;
+    }
+
+    NormalizeProb(out);
 }
 
 inline bool SampleSemanticProbNN(const SemanticProbMaps& m, int u, int v, std::vector<double>* out) {
@@ -167,21 +262,17 @@ double ComputeSemanticJSDivergence(const std::vector<SemanticPointRecord>& lidar
     const int C = image_probs.C;
     std::vector<double> Pdist(static_cast<size_t>(C), 0.0);
     std::vector<double> Qdist(static_cast<size_t>(C), 0.0);
-    std::vector<double> p_one;
+    std::vector<double> p_prior;
     std::vector<double> q_uv;
     int used = 0;
     for (const auto& sp : lidar_sem) {
         int u = 0, v = 0;
         if (!ProjectPoint(sp.p, R_rect, P_rect, R, t, image_probs.W, image_probs.H, u, v)) continue;
-        if (sp.semantic_id >= 0 && sp.semantic_id < C) {
-            OneHot(sp.semantic_id, C, &p_one);
-        } else {
-            OneHot(sp.label, C, &p_one);
-        }
+        BuildLidarSemanticPriorDistribution(sp, C, &p_prior);
         if (!SampleSemanticProbNN(image_probs, u, v, &q_uv)) continue;
         NormalizeProb(&q_uv);
         for (int c = 0; c < C; ++c) {
-            Pdist[static_cast<size_t>(c)] += p_one[static_cast<size_t>(c)];
+            Pdist[static_cast<size_t>(c)] += p_prior[static_cast<size_t>(c)];
             Qdist[static_cast<size_t>(c)] += q_uv[static_cast<size_t>(c)];
         }
         used++;
@@ -217,21 +308,17 @@ double ComputeSemanticHistogramConsistency(const std::vector<SemanticPointRecord
     const int C = image_probs.C;
     std::vector<double> Pdist(static_cast<size_t>(C), 0.0);
     std::vector<double> Qdist(static_cast<size_t>(C), 0.0);
-    std::vector<double> p_one;
+    std::vector<double> p_prior;
     std::vector<double> q_uv;
     int used = 0;
     for (const auto& sp : lidar_sem) {
         int u = 0, v = 0;
         if (!ProjectPoint(sp.p, R_rect, P_rect, R, t, image_probs.W, image_probs.H, u, v)) continue;
-        if (sp.semantic_id >= 0 && sp.semantic_id < C) {
-            OneHot(sp.semantic_id, C, &p_one);
-        } else {
-            OneHot(sp.label, C, &p_one);
-        }
+        BuildLidarSemanticPriorDistribution(sp, C, &p_prior);
         if (!SampleSemanticProbNN(image_probs, u, v, &q_uv)) continue;
         NormalizeProb(&q_uv);
         for (int c = 0; c < C; ++c) {
-            Pdist[static_cast<size_t>(c)] += p_one[static_cast<size_t>(c)];
+            Pdist[static_cast<size_t>(c)] += p_prior[static_cast<size_t>(c)];
             Qdist[static_cast<size_t>(c)] += q_uv[static_cast<size_t>(c)];
         }
         used++;

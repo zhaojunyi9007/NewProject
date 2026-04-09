@@ -171,7 +171,9 @@ def extract_lines_2d(
     """
     LSD 2D 线段；可选用语义支持图门控；保留斜线（type=2）。
     config: 可为空 dict；image_features_cfg 覆盖 bottom_crop、门控阈值等。
-    返回 list of (u1,v1,u2,v2,type,semantic_support)，type: 0=水平,1=垂直,2=斜向。
+    返回 list of
+      (u1,v1,u2,v2,type,semantic_support,class_id,confidence)，
+    其中 type: 0=水平,1=垂直,2=斜向。
     """
     heuristics = heuristics or {}
     ifc = image_features_cfg if isinstance(image_features_cfg, dict) else {}
@@ -241,17 +243,25 @@ def extract_lines_2d(
                 continue
 
         sem_score = 1.0
+        cls_id = -1
+        cls_conf = 1.0
         if support_map is not None:
             n = max(8, int(length / 5.0))
             xs = np.linspace(x1, x2, n)
             ys = np.linspace(y1, y2, n)
             vals = []
+            cls_vecs = []
             for xi, yi in zip(xs, ys):
                 u, v = int(np.clip(xi, 0, w - 1)), int(np.clip(yi, 0, h - 1))
                 vals.append(support_map[v, u])
+                cls_vecs.append(semantic_probs[v, u, :])
             sem_score = float(np.mean(vals)) if vals else 0.0
             if sem_score < support_thresh:
                 continue
+            if cls_vecs:
+                m = np.mean(np.asarray(cls_vecs, dtype=np.float32), axis=0)
+                cls_id = int(np.argmax(m))
+                cls_conf = float(np.max(m))
         if require_edge_overlap and em_crop is not None and np.any(em_crop > 0):
             n = max(6, int(length / 8.0))
             xs = np.linspace(x1, x2, n)
@@ -264,7 +274,10 @@ def extract_lines_2d(
             if on_edge < max(1, n // 6):
                 continue
 
-        lines_2d.append((x1, y1, x2, y2, line_type, sem_score))
+        # confidence combines semantic certainty and line geometry quality.
+        geom_conf = float(np.clip(length / (0.25 * max(h, w) + 1e-6), 0.0, 1.0))
+        line_conf = float(np.clip(0.6 * cls_conf + 0.4 * geom_conf, 0.0, 1.0))
+        lines_2d.append((x1, y1, x2, y2, line_type, sem_score, cls_id, line_conf))
         cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
 
     print(f"[SAM] Extracted {len(lines_2d)} 2D line features")
@@ -296,12 +309,20 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
         cv2.imwrite(os.path.join(output_dir, "line_map.png"), bundle["line_mask"])
     if "lines_2d" in bundle:
         with open(os.path.join(output_dir, "lines_2d.txt"), "w", encoding="utf-8") as f:
-            f.write("# u1 v1 u2 v2 type semantic_support (type: 0=H, 1=V, 2=diagonal)\n")
+            f.write("# u1 v1 u2 v2 type semantic_support class_id confidence (type: 0=H, 1=V, 2=diagonal)\n")
             for t in bundle["lines_2d"]:
-                if len(t) >= 6:
-                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} {t[5]:.4f}\n")
+                if len(t) >= 8:
+                    f.write(
+                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
+                        f"{t[4]} {t[5]:.4f} {int(t[6])} {float(t[7]):.4f}\n"
+                    )
+                elif len(t) >= 6:
+                    f.write(
+                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
+                        f"{t[4]} {t[5]:.4f} -1 1.0000\n"
+                    )
                 else:
-                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000\n")
+                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000 -1 1.0000\n")
     if "pseudo_bev" in bundle and bundle["pseudo_bev"] is not None:
         path = os.path.join(output_dir, "pseudo_bev.npz")
         np.savez_compressed(path, **bundle["pseudo_bev"])
@@ -752,12 +773,20 @@ class FeatureExtractor:
         cv2.imwrite(sam_output_base + "_semantic_map.png", mask_id_map.astype(np.uint16))
 
         with open(sam_output_base + "_lines_2d.txt", "w", encoding="utf-8") as f:
-            f.write("# u1 v1 u2 v2 type semantic_support (type: 0=H, 1=V, 2=diagonal)\n")
+            f.write("# u1 v1 u2 v2 type semantic_support class_id confidence (type: 0=H, 1=V, 2=diagonal)\n")
             for t in lines_full:
-                if len(t) >= 6:
-                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} {t[5]:.4f}\n")
+                if len(t) >= 8:
+                    f.write(
+                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
+                        f"{t[4]} {t[5]:.4f} {int(t[6])} {float(t[7]):.4f}\n"
+                    )
+                elif len(t) >= 6:
+                    f.write(
+                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
+                        f"{t[4]} {t[5]:.4f} -1 1.0000\n"
+                    )
                 else:
-                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000\n")
+                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000 -1 1.0000\n")
 
         print(f"[Saved] bundle -> {frame_bundle_dir}")
         print(f"[Saved] optimizer inputs -> {sam_output_base}_*")
