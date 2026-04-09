@@ -98,7 +98,10 @@ namespace IOUtils {
         return true;
     }
 
-    // 加载 lidar_extractor 生成的 3D 线特征 (x1 y1 z1 x2 y2 z2 type)
+    // 加载 lidar_extractor 生成的 3D 线特征
+    // 兼容格式:
+    //   - legacy: x1 y1 z1 x2 y2 z2 type
+    //   - C5+:    x1 y1 z1 x2 y2 z2 type class_id confidence
     bool LoadLines3D(const std::string& filepath, std::vector<Line3D>& lines) {
         std::ifstream file(filepath);
         if (!file.is_open()) {
@@ -116,9 +119,17 @@ namespace IOUtils {
             
             std::stringstream ss(line);
             double x1, y1, z1, x2, y2, z2;
-            int type;
+            int type = 0;
+            int class_id = 0;
+            float confidence = 1.0f;
             
             if (ss >> x1 >> y1 >> z1 >> x2 >> y2 >> z2 >> type) {
+                if (!(ss >> class_id)) {
+                    class_id = (type == 0) ? SEM_RAIL_LIKE : ((type == 1) ? SEM_VERTICAL_STRUCTURE : 0);
+                }
+                if (!(ss >> confidence)) {
+                    confidence = 1.0f;
+                }
                 // 添加数据有效性检查
                 if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(z1) ||
                     !std::isfinite(x2) || !std::isfinite(y2) || !std::isfinite(z2)) {
@@ -140,6 +151,8 @@ namespace IOUtils {
                 l.p1 = p1;
                 l.p2 = p2;
                 l.type = type;
+                l.class_id = class_id;
+                l.confidence = std::max(0.0f, std::min(1.0f, confidence));
                 lines.push_back(l);
             } else {
                 std::cerr << "[Warning] Failed to parse line " << line_num << ": " << line << std::endl;
@@ -156,7 +169,11 @@ namespace IOUtils {
         return true;
     }
 
-    // 加载 sam_extractor 生成的 2D 线特征 (u1 v1 u2 v2 type)
+    // 加载 sam_extractor 生成的 2D 线特征
+    // 兼容格式:
+    //   - legacy: u1 v1 u2 v2 type
+    //   - B/C:    u1 v1 u2 v2 type semantic_support
+    //   - C5+:    u1 v1 u2 v2 type semantic_support class_id confidence
     bool LoadLines2D(const std::string& filepath, std::vector<Line2D>& lines) {
         std::ifstream file(filepath);
         if (!file.is_open()) {
@@ -174,9 +191,21 @@ namespace IOUtils {
             
             std::stringstream ss(line);
             double u1, v1, u2, v2;
-            int type;
+            int type = 0;
+            double semantic_support = 1.0;
+            int class_id = -1;
+            float confidence = 1.0f;
             
             if (ss >> u1 >> v1 >> u2 >> v2 >> type) {
+                if (!(ss >> semantic_support)) {
+                    semantic_support = 1.0;
+                }
+                if (!(ss >> class_id)) {
+                    class_id = -1;
+                }
+                if (!(ss >> confidence)) {
+                    confidence = static_cast<float>(std::max(0.0, std::min(1.0, semantic_support)));
+                }
                 // 添加数据有效性检查
                 if (!std::isfinite(u1) || !std::isfinite(v1) || 
                     !std::isfinite(u2) || !std::isfinite(v2)) {
@@ -198,6 +227,9 @@ namespace IOUtils {
                 l.p1 = p1;
                 l.p2 = p2;
                 l.type = type;
+                l.semantic_support = std::max(0.0, std::min(1.0, semantic_support));
+                l.class_id = class_id;
+                l.confidence = std::max(0.0f, std::min(1.0f, confidence));
                 lines.push_back(l);
             } else {
                 std::cerr << "[Warning] Failed to parse line " << line_num << ": " << line << std::endl;

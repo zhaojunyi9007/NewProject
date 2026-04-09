@@ -71,6 +71,8 @@ using TotalScoreBreakdown = ScoreBreakdown;
 double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeature>& edge_points,
                                                     const cv::Mat& edge_dist,
                                                     const cv::Mat& edge_weight,
+                                                    const std::vector<Line3D>& lines3d,
+                                                    const std::vector<Line2D>& lines2d,
                                                     const std::vector<SemanticPointRecord>& lidar_semantic_points,
                                                     const SemanticProbMaps& image_semantic_probs,
                                                     const Eigen::Matrix3d& R_rect,

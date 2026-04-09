@@ -61,6 +61,9 @@ std::vector<Line3D> ExtractVerticalStructures(
         L.p1 = Eigen::Vector3d(sx, sy, szmin);
         L.p2 = Eigen::Vector3d(sx, sy, szmax);
         L.type = 1;
+        L.class_id = SEM_VERTICAL_STRUCTURE;
+        const double n_ratio = n / std::max(1.0, static_cast<double>(cfg.min_cluster_size) * 2.0);
+        L.confidence = static_cast<float>(std::min(1.0, std::max(0.05, n_ratio)));
         lines.push_back(L);
         if (static_cast<int>(lines.size()) >= 32) break;
     }

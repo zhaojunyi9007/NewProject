@@ -1159,6 +1159,9 @@ int main(int argc, char** argv) {
                 line.p1 = Eigen::Vector3d(cx - dx * 20.0, cy - dy * 20.0, cz - dz * 20.0);
                 line.p2 = Eigen::Vector3d(cx + dx * 20.0, cy + dy * 20.0, cz + dz * 20.0);
                 line.type = 0; // 铁轨
+                line.class_id = SEM_RAIL_LIKE;
+                line.confidence = static_cast<float>(
+                    std::min(1.0, static_cast<double>(inliers->indices.size()) / 250.0));
                 lines.push_back(line);
                 
                 std::cout << "      Found rail line " << (i+1) << " with " << inliers->indices.size() << " inliers" << std::endl;
@@ -1218,6 +1221,9 @@ int main(int argc, char** argv) {
                 line.p1 = Eigen::Vector3d(cx, cy, min_z);
                 line.p2 = Eigen::Vector3d(cx, cy, max_z);
                 line.type = 1; // 立柱
+                line.class_id = SEM_VERTICAL_STRUCTURE;
+                line.confidence = static_cast<float>(
+                    std::min(1.0, static_cast<double>(inliers->indices.size()) / 200.0));
                 lines.push_back(line);
                 
                 std::cout << "      Found pole " << (i+1) << " with " << inliers->indices.size() << " inliers" << std::endl;
@@ -1240,10 +1246,11 @@ int main(int argc, char** argv) {
         return -1;
     }
     
-    out_lines << "# 3D Line Features: x1 y1 z1 x2 y2 z2 type (0=Rail, 1=Pole)\n";
+    out_lines << "# 3D Line Features: x1 y1 z1 x2 y2 z2 type class_id confidence (0=Rail, 1=Pole)\n";
     for (const auto& l : lines) {
         out_lines << l.p1.x() << " " << l.p1.y() << " " << l.p1.z() << " " 
-                  << l.p2.x() << " " << l.p2.y() << " " << l.p2.z() << " " << l.type << "\n";
+                  << l.p2.x() << " " << l.p2.y() << " " << l.p2.z() << " "
+                  << l.type << " " << l.class_id << " " << l.confidence << "\n";
     }
     out_lines.close();
     std::cout << "  Saved " << lines.size() << " 3D line features" << std::endl;
