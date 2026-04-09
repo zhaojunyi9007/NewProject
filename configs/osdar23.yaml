@@ -131,13 +131,13 @@ calibration:
     line_soft_cap: 100
     t_prior_weight: 20
     w_consistency: 0.0
-    coarse_angle_range: 0.18
-    coarse_angle_step: 0.05
-    coarse_tx_range: 0.60
+    coarse_angle_range: 0.08
+    coarse_angle_step: 0.04
+    coarse_tx_range: 0.15
     coarse_tx_step: 0.05
-    coarse_ty_range: 0.60
+    coarse_ty_range: 0.20
     coarse_ty_step: 0.10
-    coarse_tz_range: 1.00
+    coarse_tz_range: 0.20
     coarse_tz_step: 0.10
     fine_margin_switch_inimage: 0.15
     fine_margin_low: 4
