@@ -36,11 +36,16 @@ def run(context: RuntimeContext) -> None:
     bev_cfg: Dict[str, Any] = dict(cfg.get("bev") or {})
     paths = context.paths or {}
     out_root = paths.get("image_features") or cfg.get("data", {}).get("image_features_output_dir", "")
+    sam_root = paths.get("sam") or cfg.get("data", {}).get("sam_output_dir", "")
     if not out_root:
         print("[Error] 缺少 image_features 输出路径")
         return
+    if not sam_root:
+        print("[Error] 缺少 sam_output_dir（optimizer 图像输入输出前缀）")
+        return
 
     os.makedirs(out_root, exist_ok=True)
+    os.makedirs(sam_root, exist_ok=True)
 
     ckpt = str(sam_cfg.get("checkpoint_path", "") or "").strip()
     if not ckpt or not os.path.isfile(ckpt):
@@ -85,10 +90,8 @@ def run(context: RuntimeContext) -> None:
             continue
 
         frame_dir = os.path.join(out_root, f"{frame_id:010d}")
-        # Phase A2：统一图像侧输入来源为 image_features/<frame_id>/。
-        # 为保持 C++ 优化器旧接口兼容，将 optimizer 所需的 *_edge_dist.png / *_lines_2d.txt 等
-        # 也写入到该目录下的一个固定前缀（而不是旧 sam_output_dir）。
-        sam_base = os.path.join(frame_dir, "optimizer")
+        # 统一 optimizer 图像输入前缀：sam_output_dir/<frame_id>
+        sam_base = os.path.join(sam_root, f"{frame_id:010d}")
 
         print(f"\n处理帧 {frame_id:010d}...")
         print(f"  image={img_path}")

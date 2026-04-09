@@ -1,4 +1,9 @@
-# EdgeCalib v2.0 Calibration Result
-1.07503 -1.43228 1.00529
--0.376387 3.07471 0.373459
-# Score: 414.62
+r: 0.994066 -1.23587 1.12836
+t: -2.28975 4.50605 0.311945
+Score: -0.447972
+semantic_js_divergence: 0.195184
+semantic_hist_similarity: 0
+edge_term_norm: 0.687896
+line_term_norm: 0
+rail_confidence: 0
+vertical_structure_confidence: 0

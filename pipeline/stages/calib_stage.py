@@ -25,6 +25,9 @@ def _parse_calib_breakdown(path: str) -> dict:
                 continue
             k, v = s.split(":", 1)
             k = k.strip()
+            if k in {"r", "t"}:
+                # Pose vectors are parsed by _parse_calib_pose; do not pollute breakdown with scalar fragments.
+                continue
             v = v.strip().split()[0] if v.strip() else ""
             if not v:
                 continue
@@ -64,8 +67,11 @@ def run(context: RuntimeContext) -> None:
     print("=" * 40)
 
     image_root = context.paths.get("image_features") if context.paths else ""
+    sam_root = context.paths.get("sam") if context.paths else ""
     if not image_root:
         image_root = context.config["data"]["image_features_output_dir"]
+    if not sam_root:
+        sam_root = context.config["data"]["sam_output_dir"]
     lidar_dir = context.config["data"]["lidar_output_dir"]
     calib_dir = context.config["data"]["calib_output_dir"]
     calib_file = context.config["data"]["calib_file"]
@@ -97,6 +103,7 @@ def run(context: RuntimeContext) -> None:
     bev_by_frame = getattr(context, "bev_pose_by_frame", None) or {}
     sem_cfg = context.config.get("semantic_calib") or {}
     sem_enabled = bool(sem_cfg.get("enabled", False))
+    allow_legacy_fallback = bool(sem_cfg.get("allow_legacy_fallback", False))
     img_cfg = context.config.get("image_features") or {}
     sem_classes = list(img_cfg.get("semantic_classes", []) or [])
     cw = sem_cfg.get("class_weights") or {}
@@ -125,7 +132,7 @@ def run(context: RuntimeContext) -> None:
     for frame_id in context.frame_ids:
         feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
         frame_dir = os.path.join(image_root, f"{frame_id:010d}")
-        sam_base = os.path.join(frame_dir, "optimizer")
+        sam_base = os.path.join(sam_root, f"{frame_id:010d}")
         output_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
 
         if not os.path.exists(f"{feature_base}_points.txt"):
@@ -158,8 +165,23 @@ def run(context: RuntimeContext) -> None:
         if use_sem:
             ok = npy_to_edgecalib_bin(sem_npy, sem_bin)
             if not ok:
+                if not allow_legacy_fallback:
+                    raise RuntimeError(
+                        "semantic_calib.enabled=true 且 semantic_probs 导出失败；"
+                        "当前配置禁止回退 legacy。"
+                    )
                 print("[Warning] semantic_probs.npy 导出 EDGESEM1 失败，回退 legacy optimizer 调用")
                 use_sem = False
+        elif sem_enabled and not allow_legacy_fallback:
+            missing = []
+            if not os.path.isfile(sem_npy):
+                missing.append(sem_npy)
+            if not os.path.isfile(sem_pts):
+                missing.append(sem_pts)
+            raise FileNotFoundError(
+                "semantic_calib.enabled=true 但缺少语义输入，且禁止 legacy 回退。缺失文件:\n"
+                + "\n".join(missing)
+            )
 
         if use_sem:
             cmd = [

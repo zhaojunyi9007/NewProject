@@ -163,7 +163,7 @@ visualization:
 # 图像特征前端（语义优先流水线；默认关闭以保持旧行为）
 # ========================================
 image_features:
-  enabled: false
+  enabled: true
   enable_semantic_probs: true
   enable_edges: true
   enable_lines: true
@@ -180,7 +180,7 @@ image_features:
 # BEV 粗初始化（默认关闭）
 # ========================================
 bev:
-  enabled: false
+  enabled: true
   x_range: [0.0, 80.0]
   y_range: [-20.0, 20.0]
   z_range: [-2.0, 5.0]
@@ -204,7 +204,9 @@ bev:
 # 语义概率场标定（默认关闭）
 # ========================================
 semantic_calib:
-  enabled: false
+  enabled: true
+  # 语义链路启用时默认不允许静默回退 legacy，避免“看似成功但 breakdown 全 0”。
+  allow_legacy_fallback: false
   pyramid_scales: [1.0, 0.5, 0.25]
   semantic_js_weight: 3.0
   histogram_weight: 0.5
@@ -228,7 +230,7 @@ semantic_calib:
 # 多帧滑动窗口精修（默认关闭）
 # ========================================
 refine:
-  enabled: false
+  enabled: true
   window_size: 5
   min_observability_score: 0.35
   max_pose_jump_deg: 0.8

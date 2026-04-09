@@ -471,6 +471,41 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
         t_result_ = smoothed.second;
     }
 
+    // Refresh unified breakdown at the final exported pose.
+    // This avoids leaving breakdown as all-zero when semantic branch is not active.
+    {
+        const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
+        const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
+        TotalScoreBreakdown bd;
+        const Eigen::Vector3d t_eval = t_result_;
+        double r_eval_aa[3] = {r_result_.x(), r_result_.y(), r_result_.z()};
+        Eigen::Matrix3d R_eval;
+        ceres::AngleAxisToRotationMatrix(r_eval_aa, R_eval.data());
+
+        // semantic_points_/semantic_probs_ may be empty in legacy runs; semantic terms then stay 0.
+        (void)ComputeTotalCalibrationScoreSemanticDominant(
+            edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_, semantic_probs_,
+            R_rect_, P_rect_, W_, H_, R_eval, t_eval,
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_line, sem_cfg_, &bd);
+
+        double rail_sum = 0.0, vert_sum = 0.0;
+        int rail_cnt = 0, vert_cnt = 0;
+        for (const auto& l : lines3d_) {
+            const double c = std::max(0.0f, std::min(1.0f, l.confidence));
+            if (l.class_id == SEM_RAIL_LIKE || l.type == 0) {
+                rail_sum += c;
+                rail_cnt++;
+            }
+            if (l.class_id == SEM_VERTICAL_STRUCTURE || l.type == 1) {
+                vert_sum += c;
+                vert_cnt++;
+            }
+        }
+        bd.rail_confidence = (rail_cnt > 0) ? (rail_sum / static_cast<double>(rail_cnt)) : 0.0;
+        bd.vertical_structure_confidence = (vert_cnt > 0) ? (vert_sum / static_cast<double>(vert_cnt)) : 0.0;
+        last_score_breakdown_ = bd;
+    }
+
     history_.push(r_result_, t_result_, best_score_);
     if (!config_.history_file.empty()) {
         SaveCalibHistory(config_.history_file, history_);
@@ -483,17 +518,16 @@ bool EdgeCalibrator::SaveResult() const {
     if (!result_file.is_open()) return false;
 
     // Phase A3: stable key-value output for downstream parsing.
-    // Do NOT rely on optional fields existing; always write the same keys.
-    // Values not yet supported by current optimizer are written as 0.0 placeholders.
+    // Always write the same keys.
     result_file << "r: " << r_result_[0] << " " << r_result_[1] << " " << r_result_[2] << "\n";
     result_file << "t: " << t_result_[0] << " " << t_result_[1] << " " << t_result_[2] << "\n";
     result_file << "Score: " << best_score_ << "\n";
-    // Phase B5: write cached semantic/regularizer terms (0.0 if not available).
+    // Write cached semantic/regularizer terms (may be 0.0 when semantic inputs are absent).
     result_file << "semantic_js_divergence: " << last_score_breakdown_.semantic_js_divergence << "\n";
     result_file << "semantic_hist_similarity: " << last_score_breakdown_.semantic_hist_similarity << "\n";
     result_file << "edge_term_norm: " << last_score_breakdown_.edge_score_norm << "\n";
     result_file << "line_term_norm: " << last_score_breakdown_.line_score_norm << "\n";
-    // Phase C5: unified confidences (still 0.0 placeholders until computed upstream).
+    // Phase C5: unified confidences inferred from extracted line confidences.
     result_file << "rail_confidence: " << last_score_breakdown_.rail_confidence << "\n";
     result_file << "vertical_structure_confidence: " << last_score_breakdown_.vertical_structure_confidence << "\n";
     return true;
