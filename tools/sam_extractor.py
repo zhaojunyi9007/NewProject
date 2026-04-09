@@ -10,6 +10,15 @@ if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 from semantic_to_bev import semantic_probs_to_pseudo_bev
 
+# Keep 2D line class_id aligned with cpp/include/common.h: SemanticIdRailway.
+SEM_UNKNOWN = 0
+SEM_RAIL_LIKE = 1
+SEM_BALLAST_GROUND = 2
+SEM_VERTICAL_STRUCTURE = 3
+SEM_PLATFORM_OR_BUILDING = 4
+SEM_VEHICLE_LIKE = 5
+SEM_VEGETATION_LIKE = 6
+
 
 def _semantic_class_indices(semantic_classes, names):
     out = []
@@ -17,6 +26,32 @@ def _semantic_class_indices(semantic_classes, names):
         if n in semantic_classes:
             out.append(semantic_classes.index(n))
     return out
+
+
+def _line_class_to_railway_semantic_id(mean_probs, semantic_classes):
+    """Map image semantic channel space to SemanticIdRailway."""
+    if mean_probs is None or len(mean_probs) == 0:
+        return SEM_UNKNOWN, 0.0
+
+    def group_prob(names):
+        idxs = _semantic_class_indices(semantic_classes, names)
+        if not idxs:
+            return 0.0
+        return float(sum(float(mean_probs[i]) for i in idxs))
+
+    group_scores = {
+        SEM_RAIL_LIKE: group_prob(["rail"]),
+        SEM_BALLAST_GROUND: group_prob(["ballast", "road"]),
+        SEM_VERTICAL_STRUCTURE: group_prob(["pole", "signal"]),
+        SEM_PLATFORM_OR_BUILDING: group_prob(["platform", "building"]),
+        SEM_VEHICLE_LIKE: group_prob(["vehicle"]),
+        SEM_VEGETATION_LIKE: group_prob(["vegetation"]),
+    }
+    best_id = max(group_scores, key=group_scores.get)
+    best_score = float(group_scores[best_id])
+    if best_score <= 1e-6:
+        return SEM_UNKNOWN, 0.0
+    return int(best_id), best_score
 
 
 def _mask_to_class_weights(mask_dict, h, w, semantic_classes):
@@ -177,6 +212,7 @@ def extract_lines_2d(
     """
     heuristics = heuristics or {}
     ifc = image_features_cfg if isinstance(image_features_cfg, dict) else {}
+    semantic_classes = list(ifc.get("semantic_classes", config.get("semantic_classes", [])))
     bottom_crop = float(ifc.get("bottom_crop_ratio_for_edges", config.get("bottom_crop_ratio_for_edges", 0.0)))
     restrict_sem = bool(ifc.get("restrict_lsd_by_semantics", config.get("restrict_lsd_by_semantics", True)))
     keep_diag = bool(ifc.get("keep_diagonal_lines", config.get("keep_diagonal_lines", True)))
@@ -260,8 +296,7 @@ def extract_lines_2d(
                 continue
             if cls_vecs:
                 m = np.mean(np.asarray(cls_vecs, dtype=np.float32), axis=0)
-                cls_id = int(np.argmax(m))
-                cls_conf = float(np.max(m))
+                cls_id, cls_conf = _line_class_to_railway_semantic_id(m, semantic_classes)
         if require_edge_overlap and em_crop is not None and np.any(em_crop > 0):
             n = max(6, int(length / 8.0))
             xs = np.linspace(x1, x2, n)
@@ -277,7 +312,7 @@ def extract_lines_2d(
         # confidence combines semantic certainty and line geometry quality.
         geom_conf = float(np.clip(length / (0.25 * max(h, w) + 1e-6), 0.0, 1.0))
         line_conf = float(np.clip(0.6 * cls_conf + 0.4 * geom_conf, 0.0, 1.0))
-        lines_2d.append((x1, y1, x2, y2, line_type, sem_score, cls_id, line_conf))
+        lines_2d.append((x1, y1, x2, y2, line_type, sem_score, int(cls_id), line_conf))
         cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
 
     print(f"[SAM] Extracted {len(lines_2d)} 2D line features")
@@ -607,7 +642,7 @@ class FeatureExtractor:
         cv2.imwrite(output_base + "_edge_weight.png", weight_u16.astype(np.uint16))
 
         cv2.imwrite(output_base + "_mask_ids.png", mask_id_map.astype(np.uint16))
-        cv2.imwrite(output_base + "_semantic_map.png", mask_id_map.astype(np.uint16))
+        cv2.imwrite(output_base + "_semantic_map.png", argmax_vis)
 
         print(f"[Saved] {output_base}_edge_map.png")
         print(f"[Saved] {output_base}_line_map.png")

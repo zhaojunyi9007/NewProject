@@ -214,6 +214,10 @@ def run(context: RuntimeContext) -> None:
                 str(float(sem_cfg.get("semantic_js_weight", 3.0))),
                 "--histogram_weight",
                 str(float(sem_cfg.get("histogram_weight", 0.5))),
+                "--edge_weight",
+                str(float(sem_cfg.get("edge_weight", 1.0))),
+                "--line_weight",
+                str(float(sem_cfg.get("line_weight", 0.6))),
                 "--pyramid_scales",
                 pyramid_scales_s,
             ]
