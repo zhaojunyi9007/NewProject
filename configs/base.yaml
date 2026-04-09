@@ -18,12 +18,6 @@ data:
   refinement_output_dir: "result/refinement"
 
 # ========================================
-# 可视化（Phase 7：额外生成 BEV/语义/精修诊断拼图）
-# ========================================
-visualization:
-  enable_diag_panels: true
-
-# ========================================
 # 帧选择配置
 # ========================================
 frames:
@@ -157,6 +151,8 @@ calibration:
 # 可视化配置
 # ========================================
 visualization:
+  # Phase 7：额外生成 BEV/语义/精修诊断拼图
+  enable_diag_panels: true
   point_size: 2
   line_width: 2
   show_edges: true
