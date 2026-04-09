@@ -262,7 +262,15 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
         float edge_weight = 1.0f;
         if (!weight_map.empty()) {
             edge_weight = GetDistanceValue(weight_map, u, v);
-            if (edge_weight < 0.05f) edge_weight = 1.0f;
+            if (!std::isfinite(edge_weight)) {
+                edge_weight = 0.0f;
+            }
+            edge_weight = std::min(std::max(edge_weight, 0.0f), 1.0f);
+
+            // 低权重区域直接不给分，不要恢复成 1.0
+            if (edge_weight <= 1e-4f) {
+                continue;
+            }
         }
 
         dist_value = std::min(std::max(dist_value, 0.0f), 1.0f);
@@ -307,7 +315,8 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
     SemanticScoreBreakdown sem_bd;
     bd.semantic_js_divergence =
         ComputeSemanticJSDivergence(lidar_semantic_points, image_semantic_probs, R_rect, P_rect, R, t, sem_cfg, &sem_bd);
-    bd.semantic_hist_similarity = sem_bd.semantic_hist_similarity;
+    bd.semantic_hist_similarity = 
+        ComputeSemanticHistogramConsistency(lidar_semantic_points, image_semantic_probs, R_rect, P_rect, R, t, sem_cfg, &sem_bd);
 
     bd.semantic_js_score = -bd.semantic_js_divergence;
     bd.semantic_hist_score = bd.semantic_hist_similarity;

@@ -25,6 +25,8 @@ struct EdgeCalibratorConfig {
     std::string init_pose_from_bev_path;      // pose_after_bev.txt (optional)
     double semantic_js_weight = 3.0;
     double histogram_weight = 0.5;
+    double edge_weight = 1.0;
+    double line_weight = 0.6;
     std::vector<double> class_weights;        // same order as image semantic classes
     std::vector<double> pyramid_scales;       // e.g. 1.0,0.5,0.25
 

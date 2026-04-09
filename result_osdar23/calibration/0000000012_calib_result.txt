@@ -1,9 +1,9 @@
-r: 0.994066 -1.23587 1.12836
-t: -2.28975 4.50605 0.311945
-Score: -0.447972
-semantic_js_divergence: 0.195184
-semantic_hist_similarity: 0
-edge_term_norm: 0.687896
+r: 1.17955 -1.17812 1.26918
+t: -2.28335 4.50163 0.311813
+Score: -0.333353
+semantic_js_divergence: 0.212911
+semantic_hist_similarity: 0.452164
+edge_term_norm: 0.0151857
 line_term_norm: 0
-rail_confidence: 0
-vertical_structure_confidence: 0
+rail_confidence: 0.479167
+vertical_structure_confidence: 0.979375

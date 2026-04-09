@@ -125,7 +125,7 @@ calibration:
 
   ab_experiment:
     opt_translation: true
-    use_line_constraint: false
+    use_line_constraint: true
     line_match_threshold: 50
     line_soft_penalty: false
     line_soft_cap: 100

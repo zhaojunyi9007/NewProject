@@ -152,8 +152,8 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
     ceres::AngleAxisToRotationMatrix(r_curr_, R0.data());
     Eigen::Vector3d t0(t_curr_[0], t_curr_[1], t_curr_[2]);
 
-    const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
-    const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
+    const double w_edge = config_.edge_weight;
+    const double w_line = config_.line_weight;
 
     best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
                                                               semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
@@ -209,8 +209,8 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
     const double t_range = GetEnvDouble("EDGECALIB_SEM_FINE_TRANS_RANGE", 0.08);
     const double t_step = std::max(1e-6, GetEnvDouble("EDGECALIB_SEM_FINE_TRANS_STEP", 0.04));
 
-    const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
-    const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
+    const double w_edge = config_.edge_weight;
+    const double w_line = config_.line_weight;
 
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
     double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
@@ -474,8 +474,8 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
     // Refresh unified breakdown at the final exported pose.
     // This avoids leaving breakdown as all-zero when semantic branch is not active.
     {
-        const double w_edge = GetEnvDouble("EDGECALIB_W_EDGE_REG", 0.20);
-        const double w_line = GetEnvDouble("EDGECALIB_W_LINE_REG", 0.00);
+        const double w_edge = config_.edge_weight;
+        const double w_line = config_.line_weight;
         TotalScoreBreakdown bd;
         const Eigen::Vector3d t_eval = t_result_;
         double r_eval_aa[3] = {r_result_.x(), r_result_.y(), r_result_.z()};
