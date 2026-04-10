@@ -25,7 +25,7 @@
 - 可视化：`result/visualization`
 
 ### 2.3 关键中间文件命名（保持）
-- 图像侧：`<frame>_edge_map.png`, `<frame>_edge_dist.png`, `<frame>_lines_2d.txt` 等
+- 图像侧：`<frame>_edge_map.png`, `<frame>_edge_dist.png`, `<frame>_rail_region.png`, `<frame>_rail_centerline.png`, `<frame>_rail_dist.png` 等
 - 点云侧：`<frame>_points.txt`, `<frame>_edge_points.txt`, `<frame>_lines_3d.txt`
 - 标定：`<frame>_calib_result.txt`
 
@@ -34,8 +34,6 @@
 仅进行结构边界调整，不改算法：
 
 - 将实验脚本迁移到 `experiments/` 目录：
-  - `experiments/line_constraint_ab_test.py`
-  - `experiments/check_lines.py`
   - `experiments/check_features.py`
 - 已移除仓库根目录 legacy 兼容脚本入口，避免影子入口。
 

@@ -72,7 +72,9 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
                                                     const cv::Mat& edge_dist,
                                                     const cv::Mat& edge_weight,
                                                     const std::vector<Line3D>& lines3d,
-                                                    const std::vector<Line2D>& lines2d,
+                                                    const std::vector<PointFeature>& rail_points,
+                                                    const cv::Mat& rail_dist,
+                                                    const cv::Mat& rail_weight,
                                                     const std::vector<SemanticPointRecord>& lidar_semantic_points,
                                                     const SemanticProbMaps& image_semantic_probs,
                                                     const Eigen::Matrix3d& R_rect,
@@ -84,6 +86,6 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
                                                     double w_semantic_js,
                                                     double w_semantic_hist,
                                                     double w_edge,
-                                                    double w_line,
+                                                    double w_rail,
                                                     const SemanticScoringConfig& sem_cfg,
                                                     TotalScoreBreakdown* breakdown);

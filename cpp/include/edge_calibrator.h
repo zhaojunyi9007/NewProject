@@ -26,7 +26,8 @@ struct EdgeCalibratorConfig {
     double semantic_js_weight = 3.0;
     double histogram_weight = 0.5;
     double edge_weight = 1.0;
-    double line_weight = 0.6;
+    // Phase D7 (sam_2d): rail term weight (new).
+    double rail_weight = 1.2;
     std::vector<double> class_weights;        // same order as image semantic classes
     std::vector<double> pyramid_scales;       // e.g. 1.0,0.5,0.25
 
@@ -47,6 +48,9 @@ public:
     bool SaveResult() const;
 
 private:
+    // Phase E11 (sam_2d): sample rail points from 3D rail lines.
+    void BuildRailSamplePoints();
+
     // Phase B5: new high-level flow (kept private to preserve public API compatibility).
     void ApplyPoseFromBEVIfProvided();
     void PerformSemanticCoarseOptimizationIfEnabled();
@@ -65,10 +69,15 @@ private:
     cv::Mat edge_dist_;
     cv::Mat edge_weight_;
     cv::Mat semantic_map_;
+    // Phase D7 (sam_2d): rail maps (loaded from *_rail_*.png in later phases).
+    cv::Mat rail_dist_;
+    cv::Mat rail_weight_;
+    cv::Mat rail_region_;
+    cv::Mat rail_centerline_;
 
     std::vector<PointFeature> edge_points_;
     std::vector<PointFeature> points_;
-    std::vector<Line2D> lines2d_;
+    std::vector<PointFeature> rail_sample_points_;
     std::vector<Line3D> lines3d_;
 
     CalibHistory history_;

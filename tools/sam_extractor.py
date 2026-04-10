@@ -164,166 +164,200 @@ def build_semantic_edge_map(semantic_probs, config):
     return out
 
 
-def _line_semantic_support_map(semantic_probs, config):
-    """融合 rail/ballast、pole/signal、platform/building 边界用于 LSD 门控。"""
+def _build_rail_probability_maps(semantic_probs, config):
+    """
+    Build rail probability maps from semantic_probs.
+    Returns:
+      rail_prob: float32 [H,W] in [0,1]
+    """
     semantic_classes = list(config.get("semantic_classes", []))
-    h, w = semantic_probs.shape[:2]
     rail_names = list(config.get("rail_class_names", ["rail", "ballast"]))
-    vert_names = list(config.get("vertical_structure_classes", ["pole", "signal"]))
-    ri = _semantic_class_indices(semantic_classes, rail_names)
-    vi = _semantic_class_indices(semantic_classes, vert_names)
-    pi = _semantic_class_indices(semantic_classes, ["platform", "building"])
-
-    rail_p = np.zeros((h, w), dtype=np.float32)
-    for i in ri:
-        rail_p += semantic_probs[:, :, i]
-    pole_p = np.zeros((h, w), dtype=np.float32)
-    for i in vi:
-        pole_p += semantic_probs[:, :, i]
-    struct = np.zeros((h, w), dtype=np.float32)
-    for i in pi:
-        struct += semantic_probs[:, :, i]
-    gx = cv2.Sobel(struct, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(struct, cv2.CV_32F, 0, 1, ksize=3)
-    struct_edge = np.sqrt(gx * gx + gy * gy)
-    smax = float(struct_edge.max()) + 1e-8
-    struct_edge = struct_edge / smax
-
-    support = np.maximum(rail_p, pole_p) + 0.45 * struct_edge
-    support = np.clip(support, 0.0, 1.0)
-    return support.astype(np.float32)
+    idxs = _semantic_class_indices(semantic_classes, rail_names)
+    h, w = semantic_probs.shape[:2]
+    rail_prob = np.zeros((h, w), dtype=np.float32)
+    for i in idxs:
+        rail_prob += semantic_probs[:, :, i].astype(np.float32)
+    return np.clip(rail_prob, 0.0, 1.0)
 
 
-def extract_lines_2d(
-    image,
-    edge_map,
-    config,
-    semantic_probs=None,
-    heuristics=None,
-    image_features_cfg=None,
-    require_edge_overlap=None,
-):
+def _build_rail_region_from_masks(rail_prob, config):
     """
-    LSD 2D 线段；可选用语义支持图门控；保留斜线（type=2）。
-    config: 可为空 dict；image_features_cfg 覆盖 bottom_crop、门控阈值等。
-    返回 list of
-      (u1,v1,u2,v2,type,semantic_support,class_id,confidence)，
-    其中 type: 0=水平,1=垂直,2=斜向。
+    Build a binary rail region mask from rail_prob using seed/support thresholds + morphology + CC filtering.
+    Returns uint8 mask in {0,255}.
     """
-    heuristics = heuristics or {}
-    ifc = image_features_cfg if isinstance(image_features_cfg, dict) else {}
-    semantic_classes = list(ifc.get("semantic_classes", config.get("semantic_classes", [])))
-    bottom_crop = float(ifc.get("bottom_crop_ratio_for_edges", config.get("bottom_crop_ratio_for_edges", 0.0)))
-    restrict_sem = bool(ifc.get("restrict_lsd_by_semantics", config.get("restrict_lsd_by_semantics", True)))
-    keep_diag = bool(ifc.get("keep_diagonal_lines", config.get("keep_diagonal_lines", True)))
-    support_thresh = float(ifc.get("line_semantic_support_threshold", config.get("line_semantic_support_threshold", 0.12)))
-    if require_edge_overlap is None:
-        require_edge_overlap = semantic_probs is not None
+    h, w = rail_prob.shape[:2]
+    seed_th = float(config.get("rail_seed_threshold", 0.42))
+    sup_th = float(config.get("rail_support_threshold", 0.22))
+    min_area = int(config.get("rail_mask_min_area", 400))
+    k_close = int(config.get("rail_close_kernel", 9))
+    k_open = int(config.get("rail_open_kernel", 5))
+    top_ignore = float(config.get("rail_top_ignore_ratio", 0.18))
+    bottom_keep = float(config.get("rail_bottom_keep_ratio", 0.75))
+    min_h_ratio = float(config.get("rail_component_min_height_ratio", 0.05))
 
-    print("[SAM] Extracting 2D line features...")
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    h, w = image.shape[:2]
+    seed = (rail_prob >= seed_th).astype(np.uint8) * 255
+    support = (rail_prob >= sup_th).astype(np.uint8) * 255
 
-    support_map = None
-    if semantic_probs is not None and restrict_sem:
-        support_map = _line_semantic_support_map(semantic_probs, {**config, **ifc})
-        if bottom_crop > 1e-6:
-            y0 = int(h * (1.0 - bottom_crop))
-            support_map[y0:h, :] = 0.0
-        ksz = max(3, int(round(min(h, w) * 0.002)) | 1)
-        support_map = cv2.dilate(support_map, np.ones((ksz, ksz), np.uint8))
+    # Focus vertical ROI: ignore top & optionally ignore very bottom outside keep region.
+    y_top = int(h * top_ignore)
+    y_bottom_keep = int(h * bottom_keep)
+    if y_top > 0:
+        seed[0:y_top, :] = 0
+        support[0:y_top, :] = 0
+    if y_bottom_keep > 0 and y_bottom_keep < h:
+        seed[y_bottom_keep:h, :] = 0
+        support[y_bottom_keep:h, :] = 0
 
-    lsd = cv2.createLineSegmentDetector(0)
-    lines, _, _, _ = lsd.detect(gray)
-    if lines is None:
-        print("[SAM] No lines detected")
-        return []
-
-    lines_2d = []
-    line_mask = np.zeros((h, w), dtype=np.uint8)
-    max_dim = max(h, w)
-    min_length = max_dim * float(heuristics.get("global_min_line_length_ratio", 0.015))
-    min_ground_length = max_dim * float(heuristics.get("ground_min_line_length_ratio", 0.06))
-    min_sky_length = max_dim * float(heuristics.get("sky_min_line_length_ratio", 0.03))
-    ground_top = float(heuristics.get("ground_region_top_ratio", 0.5))
-
-    em_crop = edge_map
-    if bottom_crop > 1e-6 and edge_map is not None:
-        y0 = int(h * (1.0 - bottom_crop))
-        em_crop = edge_map.copy()
-        em_crop[y0:h, :] = 0
-
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        length = float(np.hypot(x2 - x1, y2 - y1))
-        if length < min_length:
+    # Region grow: keep support connected to seeds.
+    grow = np.zeros((h + 2, w + 2), np.uint8)
+    seed_ff = seed.copy()
+    sup_ff = support.copy()
+    cv2.floodFill(sup_ff, grow, (0, 0), 0)  # ensure background stable
+    # Use morphology to roughly connect seed points before CC.
+    if k_close >= 3:
+        kk = k_close | 1
+        seed_ff = cv2.morphologyEx(seed_ff, cv2.MORPH_CLOSE, np.ones((kk, kk), np.uint8))
+    # Connected components on support; keep components that intersect seed.
+    nlab, labels, stats, _ = cv2.connectedComponentsWithStats((sup_ff > 0).astype(np.uint8), connectivity=8)
+    out = np.zeros((h, w), np.uint8)
+    min_h = max(1, int(h * min_h_ratio))
+    for l in range(1, nlab):
+        area = int(stats[l, cv2.CC_STAT_AREA])
+        if area < min_area:
             continue
+        y = int(stats[l, cv2.CC_STAT_TOP])
+        hh = int(stats[l, cv2.CC_STAT_HEIGHT])
+        if hh < min_h:
+            continue
+        comp = (labels == l)
+        if np.any(comp & (seed_ff > 0)):
+            out[comp] = 255
 
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
-        if dy > dx * 2:
-            line_type = 1
-        elif dx > dy * 2:
-            line_type = 0
-        else:
-            line_type = 2
-            if not keep_diag:
-                continue
+    if k_open >= 3:
+        kk = k_open | 1
+        out = cv2.morphologyEx(out, cv2.MORPH_OPEN, np.ones((kk, kk), np.uint8))
+    if k_close >= 3:
+        kk = k_close | 1
+        out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((kk, kk), np.uint8))
+    return out
 
-        mid_y = (y1 + y2) * 0.5
-        if mid_y > h * ground_top:
-            if length < min_ground_length:
-                continue
-        else:
-            if line_type == 0 and length < min_sky_length:
-                continue
 
-        sem_score = 1.0
-        cls_id = -1
-        cls_conf = 1.0
-        if support_map is not None:
-            n = max(8, int(length / 5.0))
-            xs = np.linspace(x1, x2, n)
-            ys = np.linspace(y1, y2, n)
-            vals = []
-            cls_vecs = []
-            for xi, yi in zip(xs, ys):
-                u, v = int(np.clip(xi, 0, w - 1)), int(np.clip(yi, 0, h - 1))
-                vals.append(support_map[v, u])
-                cls_vecs.append(semantic_probs[v, u, :])
-            sem_score = float(np.mean(vals)) if vals else 0.0
-            if sem_score < support_thresh:
-                continue
-            if cls_vecs:
-                m = np.mean(np.asarray(cls_vecs, dtype=np.float32), axis=0)
-                cls_id, cls_conf = _line_class_to_railway_semantic_id(m, semantic_classes)
-        if require_edge_overlap and em_crop is not None and np.any(em_crop > 0):
-            n = max(6, int(length / 8.0))
-            xs = np.linspace(x1, x2, n)
-            ys = np.linspace(y1, y2, n)
-            on_edge = 0
-            for xi, yi in zip(xs, ys):
-                u, v = int(np.clip(xi, 0, w - 1)), int(np.clip(yi, 0, h - 1))
-                if em_crop[v, u] > 0:
-                    on_edge += 1
-            if on_edge < max(1, n // 6):
-                continue
+def _skeletonize_binary_mask(mask_u8):
+    """Zhang-Suen thinning for uint8 mask {0,255}. Returns uint8 skeleton {0,255}."""
+    img = (mask_u8 > 0).astype(np.uint8)
+    h, w = img.shape
+    if h < 3 or w < 3:
+        return (img * 255).astype(np.uint8)
 
-        # confidence combines semantic certainty and line geometry quality.
-        geom_conf = float(np.clip(length / (0.25 * max(h, w) + 1e-6), 0.0, 1.0))
-        line_conf = float(np.clip(0.6 * cls_conf + 0.4 * geom_conf, 0.0, 1.0))
-        lines_2d.append((x1, y1, x2, y2, line_type, sem_score, int(cls_id), line_conf))
-        cv2.line(line_mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
+    def neighbors(x, y):
+        p2 = img[x - 1, y]
+        p3 = img[x - 1, y + 1]
+        p4 = img[x, y + 1]
+        p5 = img[x + 1, y + 1]
+        p6 = img[x + 1, y]
+        p7 = img[x + 1, y - 1]
+        p8 = img[x, y - 1]
+        p9 = img[x - 1, y - 1]
+        return (p2, p3, p4, p5, p6, p7, p8, p9)
 
-    print(f"[SAM] Extracted {len(lines_2d)} 2D line features")
-    return lines_2d
+    def transitions(ps):
+        n = 0
+        for i in range(8):
+            if ps[i] == 0 and ps[(i + 1) % 8] == 1:
+                n += 1
+        return n
+
+    changed = True
+    while changed:
+        changed = False
+        to_del = []
+        for x in range(1, h - 1):
+            for y in range(1, w - 1):
+                if img[x, y] != 1:
+                    continue
+                ps = neighbors(x, y)
+                s = sum(ps)
+                if s < 2 or s > 6:
+                    continue
+                if transitions(ps) != 1:
+                    continue
+                if ps[0] * ps[2] * ps[4] != 0:
+                    continue
+                if ps[2] * ps[4] * ps[6] != 0:
+                    continue
+                to_del.append((x, y))
+        if to_del:
+            for x, y in to_del:
+                img[x, y] = 0
+            changed = True
+
+        to_del = []
+        for x in range(1, h - 1):
+            for y in range(1, w - 1):
+                if img[x, y] != 1:
+                    continue
+                ps = neighbors(x, y)
+                s = sum(ps)
+                if s < 2 or s > 6:
+                    continue
+                if transitions(ps) != 1:
+                    continue
+                if ps[0] * ps[2] * ps[6] != 0:
+                    continue
+                if ps[0] * ps[4] * ps[6] != 0:
+                    continue
+                to_del.append((x, y))
+        if to_del:
+            for x, y in to_del:
+                img[x, y] = 0
+            changed = True
+
+    return (img * 255).astype(np.uint8)
+
+
+def _extract_centerline_polylines(skel_u8, config):
+    """
+    Extract rough polylines from skeleton pixels by connected components.
+    Returns list of list[(u,v)].
+    """
+    min_len = int(config.get("rail_skeleton_min_length_px", 40))
+    sk = (skel_u8 > 0).astype(np.uint8)
+    nlab, labels, stats, _ = cv2.connectedComponentsWithStats(sk, connectivity=8)
+    polys = []
+    for l in range(1, nlab):
+        area = int(stats[l, cv2.CC_STAT_AREA])
+        if area < min_len:
+            continue
+        ys, xs = np.where(labels == l)
+        if xs.size < min_len:
+            continue
+        # Sort by image row then col for a stable polyline order.
+        order = np.lexsort((xs, ys))
+        pts = [(int(xs[i]), int(ys[i])) for i in order]
+        polys.append(pts)
+    return polys
+
+
+def _build_distance_map_from_centerline(centerline_u8, config):
+    """
+    Build normalized distance map to centerline.
+    Returns float32 [H,W] in [0,1].
+    """
+    h, w = centerline_u8.shape[:2]
+    max_dim = max(h, w)
+    max_ratio = float(config.get("rail_dist_max_ratio", 0.08))
+    max_dist = max(1.0, max_dim * max_ratio)
+    inv = (centerline_u8 == 0).astype(np.uint8) * 255
+    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 5).astype(np.float32)
+    dist = np.clip(dist, 0.0, float(max_dist)) / float(max_dist)
+    return dist
 
 
 def save_image_feature_bundle(output_dir, bundle, prefix=""):
     """
     保存图像特征包到 output_dir（prefix 用于扁平文件名前缀，可为空）。
     bundle: dict，含 semantic_probs, semantic_logits, edge_map, edge_weight_u16,
-      line_mask, lines_2d, rail_png, pole_png, semantic_argmax, pseudo_bev_path 等。
+      rail_region/centerline/dist/weight/centerlines_2d, rail_png, pole_png, semantic_argmax, pseudo_bev_path 等。
     """
     os.makedirs(output_dir, exist_ok=True)
     if "semantic_probs" in bundle:
@@ -340,24 +374,21 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
         cv2.imwrite(os.path.join(output_dir, "edge_map.png"), bundle["edge_map"])
     if "edge_weight_u16" in bundle:
         cv2.imwrite(os.path.join(output_dir, "edge_weight.png"), bundle["edge_weight_u16"])
-    if "line_mask" in bundle:
-        cv2.imwrite(os.path.join(output_dir, "line_map.png"), bundle["line_mask"])
-    if "lines_2d" in bundle:
-        with open(os.path.join(output_dir, "lines_2d.txt"), "w", encoding="utf-8") as f:
-            f.write("# u1 v1 u2 v2 type semantic_support class_id confidence (type: 0=H, 1=V, 2=diagonal)\n")
-            for t in bundle["lines_2d"]:
-                if len(t) >= 8:
-                    f.write(
-                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
-                        f"{t[4]} {t[5]:.4f} {int(t[6])} {float(t[7]):.4f}\n"
-                    )
-                elif len(t) >= 6:
-                    f.write(
-                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
-                        f"{t[4]} {t[5]:.4f} -1 1.0000\n"
-                    )
-                else:
-                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000 -1 1.0000\n")
+    if "rail_region_u8" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "rail_region.png"), bundle["rail_region_u8"])
+    if "rail_centerline_u8" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "rail_centerline.png"), bundle["rail_centerline_u8"])
+    if "rail_dist_u16" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "rail_dist.png"), bundle["rail_dist_u16"])
+    if "rail_weight_u16" in bundle:
+        cv2.imwrite(os.path.join(output_dir, "rail_weight.png"), bundle["rail_weight_u16"])
+    if "rail_centerlines_2d" in bundle:
+        with open(os.path.join(output_dir, "rail_centerlines_2d.txt"), "w", encoding="utf-8") as f:
+            f.write("# rail centerlines 2d polylines: poly_id u v\n")
+            for pid, poly in enumerate(bundle["rail_centerlines_2d"]):
+                for (u, v) in poly:
+                    f.write(f"{pid} {u} {v}\n")
+                f.write("\n")
     if "pseudo_bev" in bundle and bundle["pseudo_bev"] is not None:
         path = os.path.join(output_dir, "pseudo_bev.npz")
         np.savez_compressed(path, **bundle["pseudo_bev"])
@@ -413,9 +444,6 @@ class FeatureExtractor:
             "structural_aspect_ratio": 3.0,
             "contour_stddev_threshold": 10.0,
             "min_arc_length_ratio": 0.06,
-            "global_min_line_length_ratio": 0.015,
-            "ground_min_line_length_ratio": 0.06,
-            "sky_min_line_length_ratio": 0.03,
             "fused_top_black_ratio": 0.20,
             "fused_bottom_black_ratio": 0.80,
             "distance_max_ratio": 0.15,
@@ -545,43 +573,12 @@ class FeatureExtractor:
         
         return dist_map
 
-    def extract_lines_2d(self, image, edge_map=None, return_mask=False):
-        """
-        使用 LSD 提取 2D 线（兼容旧行为：仅水平/垂直，无语义门控）。
-        返回 [(u1, v1, u2, v2, type), ...]，type: 0=Horizontal, 1=Vertical
-        """
-        if edge_map is None:
-            edge_map, _, _ = self.extract_edges(image)
-        legacy_cfg = {
-            "restrict_lsd_by_semantics": False,
-            "keep_diagonal_lines": False,
-            "bottom_crop_ratio_for_edges": 0.0,
-        }
-        lines_6 = extract_lines_2d(
-            image,
-            edge_map,
-            legacy_cfg,
-            semantic_probs=None,
-            heuristics=self.heuristics,
-            image_features_cfg=legacy_cfg,
-            require_edge_overlap=False,
-        )
-        lines_2d = [(a[0], a[1], a[2], a[3], a[4]) for a in lines_6]
-        line_mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        for ln in lines_2d:
-            cv2.line(line_mask, (int(ln[0]), int(ln[1])), (int(ln[2]), int(ln[3])), 255, 1)
-        if return_mask:
-            return lines_2d, line_mask
-        return lines_2d
-
     def build_edge_attraction_field(self, image):
         """
-        融合 SAM 边缘与 LSD 直线，生成边缘吸引场与权重图
+        仅使用 SAM 边缘生成边缘吸引场与权重图（Phase 8：删除 LSD 线特征链路）。
         """
         edge_map, weight_map, mask_id_map = self.extract_edges(image)
-        lines_2d, line_mask = self.extract_lines_2d(image, edge_map, return_mask=True)
-        
-        fused_edge_map = cv2.bitwise_or(edge_map, line_mask)
+        fused_edge_map = edge_map.copy()
         h_img, w_img = fused_edge_map.shape
         # 强制抹黑顶部 20% (纯天空和树顶边缘)
         fused_edge_map[0:int(h_img * float(self.heuristics["fused_top_black_ratio"])), :] = 0
@@ -591,20 +588,17 @@ class FeatureExtractor:
         dist_map = self.get_distance_transform(fused_edge_map)
         dist_map = cv2.GaussianBlur(dist_map, (5, 5), 0)
         weight_map = cv2.GaussianBlur(weight_map, (5, 5), 0)
-        return dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d, mask_id_map
+        return dist_map, weight_map, edge_map, np.zeros_like(edge_map, dtype=np.uint8), fused_edge_map, [], mask_id_map
 
     def process_image(self, image_path, output_dir, output_prefix=None):
         """
         处理单张图像，生成所有必要的特征文件
         生成文件：
-        - xxx_lines_2d.txt: 2D线特征 (用于Fine)
         - xxx_edge_map.png: SAM边缘图
-        - xxx_line_map.png: LSD直线图
         - xxx_edge_fused.png: 融合边缘图
         - xxx_edge_dist.png: 边缘吸引场 (16-bit PNG)
         - xxx_edge_weight.png: 边缘权重图 (16-bit PNG)
         - xxx_mask_ids.png: SAM Mask ID图 (16-bit PNG)
-        - xxx_semantic_map.png: 语义ID图 (16-bit PNG)
         """
         print(f"\n[Processing] {image_path}")
 
@@ -623,11 +617,10 @@ class FeatureExtractor:
         output_base = os.path.join(output_dir, filename)
 
         # 1. 生成融合边缘与吸引场
-        dist_map, weight_map, edge_map, line_mask, fused_edge_map, lines_2d, mask_id_map = (
+        dist_map, weight_map, edge_map, _line_mask, fused_edge_map, _lines_2d, mask_id_map = (
             self.build_edge_attraction_field(image)
         )
         cv2.imwrite(output_base + "_edge_map.png", edge_map)
-        cv2.imwrite(output_base + "_line_map.png", line_mask)
         cv2.imwrite(output_base + "_edge_fused.png", fused_edge_map)
 
         dist_u16 = np.clip(dist_map, 0, 1) * 65535.0
@@ -642,23 +635,13 @@ class FeatureExtractor:
         cv2.imwrite(output_base + "_edge_weight.png", weight_u16.astype(np.uint16))
 
         cv2.imwrite(output_base + "_mask_ids.png", mask_id_map.astype(np.uint16))
-        cv2.imwrite(output_base + "_semantic_map.png", argmax_vis)
 
         print(f"[Saved] {output_base}_edge_map.png")
-        print(f"[Saved] {output_base}_line_map.png")
         print(f"[Saved] {output_base}_edge_fused.png")
         print(f"[Saved] {output_base}_edge_dist.png")
         print(f"[Saved] {output_base}_edge_weight.png")
         print(f"[Saved] {output_base}_mask_ids.png")
-        print(f"[Saved] {output_base}_semantic_map.png")
 
-        # 2. 提取2D线特征
-        with open(output_base + "_lines_2d.txt", 'w') as f:
-            f.write("# 2D Line Features: u1 v1 u2 v2 type (0=Horizontal, 1=Vertical)\n")
-            for line in lines_2d:
-                f.write(f"{line[0]:.2f} {line[1]:.2f} {line[2]:.2f} {line[3]:.2f} {line[4]}\n")      
-        print(f"[Saved] {output_base}_lines_2d.txt ({len(lines_2d)} lines)")
-        
         print(f"[Complete] {filename}")
         return True
 
@@ -709,29 +692,8 @@ class FeatureExtractor:
 
         edge_map_sam, weight_map, mask_id_map = self.extract_edges(image, masks=masks)
 
-        lines_full = extract_lines_2d(
-            image,
-            edge_sem,
-            merged,
-            semantic_probs=probs,
-            heuristics=self.heuristics,
-            image_features_cfg=merged,
-            require_edge_overlap=True,
-        )
-
         h, w = image.shape[:2]
-        line_mask = np.zeros((h, w), dtype=np.uint8)
-        for ln in lines_full:
-            cv2.line(
-                line_mask,
-                (int(ln[0]), int(ln[1])),
-                (int(ln[2]), int(ln[3])),
-                255,
-                1,
-            )
-
-        fused_edge_map = cv2.bitwise_or(edge_sem, line_mask)
-        fused_edge_map = cv2.bitwise_or(fused_edge_map, edge_map_sam)
+        fused_edge_map = cv2.bitwise_or(edge_sem, edge_map_sam)
         fused_edge_map[0 : int(h * float(self.heuristics["fused_top_black_ratio"])), :] = 0
         bottom_crop = float(merged.get("bottom_crop_ratio_for_edges", 0.0))
         if bottom_crop > 1e-6:
@@ -775,6 +737,21 @@ class FeatureExtractor:
             pole_ch += probs[:, :, si]
         pole_png = np.clip(pole_ch * 255.0, 0, 255).astype(np.uint8)
 
+        # Phase 1 (sam_2d): rail region + centerline + dist + weight
+        rail_prob = _build_rail_probability_maps(probs, merged)
+        rail_region = _build_rail_region_from_masks(rail_prob, merged)
+        rail_centerline = _skeletonize_binary_mask(rail_region)
+        rail_centerlines_2d = _extract_centerline_polylines(rail_centerline, merged)
+        rail_dist = _build_distance_map_from_centerline(rail_centerline, merged)
+        # rail_weight: dilated centerline weighted by rail_prob
+        dil_k = int(merged.get("rail_weight_dilate_kernel", 9))
+        dil_k = max(3, dil_k | 1)
+        rail_cl_dil = cv2.dilate(rail_centerline, np.ones((dil_k, dil_k), np.uint8))
+        rail_weight = np.clip((rail_cl_dil > 0).astype(np.float32) * rail_prob, 0.0, 1.0)
+
+        rail_dist_u16 = (np.clip(rail_dist, 0, 1) * 65535.0).astype(np.uint16)
+        rail_weight_u16 = (np.clip(rail_weight, 0, 1) * 65535.0).astype(np.uint16)
+
         dm = dict(dataset_meta or {})
         dm.setdefault("semantic_classes", classes)
         bev_cfg = bev_cfg if isinstance(bev_cfg, dict) else {}
@@ -789,8 +766,11 @@ class FeatureExtractor:
             "pole_prob_png": pole_png,
             "edge_map": edge_sem,
             "edge_weight_u16": weight_u16,
-            "line_mask": line_mask,
-            "lines_2d": lines_full,
+            "rail_region_u8": rail_region,
+            "rail_centerline_u8": rail_centerline,
+            "rail_dist_u16": rail_dist_u16,
+            "rail_weight_u16": rail_weight_u16,
+            "rail_centerlines_2d": rail_centerlines_2d,
             "pseudo_bev": pseudo,
         }
         os.makedirs(frame_bundle_dir, exist_ok=True)
@@ -800,28 +780,21 @@ class FeatureExtractor:
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(sam_output_base + "_edge_map.png", edge_map_sam)
-        cv2.imwrite(sam_output_base + "_line_map.png", line_mask)
         cv2.imwrite(sam_output_base + "_edge_fused.png", fused_edge_map)
         cv2.imwrite(sam_output_base + "_edge_dist.png", dist_u16)
         cv2.imwrite(sam_output_base + "_edge_weight.png", weight_u16)
         cv2.imwrite(sam_output_base + "_mask_ids.png", mask_id_map.astype(np.uint16))
-        cv2.imwrite(sam_output_base + "_semantic_map.png", mask_id_map.astype(np.uint16))
-
-        with open(sam_output_base + "_lines_2d.txt", "w", encoding="utf-8") as f:
-            f.write("# u1 v1 u2 v2 type semantic_support class_id confidence (type: 0=H, 1=V, 2=diagonal)\n")
-            for t in lines_full:
-                if len(t) >= 8:
-                    f.write(
-                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
-                        f"{t[4]} {t[5]:.4f} {int(t[6])} {float(t[7]):.4f}\n"
-                    )
-                elif len(t) >= 6:
-                    f.write(
-                        f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} "
-                        f"{t[4]} {t[5]:.4f} -1 1.0000\n"
-                    )
-                else:
-                    f.write(f"{t[0]:.2f} {t[1]:.2f} {t[2]:.2f} {t[3]:.2f} {t[4]} 1.0000 -1 1.0000\n")
+        cv2.imwrite(sam_output_base + "_semantic_map.png", argmax_vis)
+        cv2.imwrite(sam_output_base + "_rail_region.png", rail_region)
+        cv2.imwrite(sam_output_base + "_rail_centerline.png", rail_centerline)
+        cv2.imwrite(sam_output_base + "_rail_dist.png", rail_dist_u16)
+        cv2.imwrite(sam_output_base + "_rail_weight.png", rail_weight_u16)
+        with open(sam_output_base + "_rail_centerlines_2d.txt", "w", encoding="utf-8") as f:
+            f.write("# rail centerlines 2d polylines: poly_id u v\n")
+            for pid, poly in enumerate(rail_centerlines_2d):
+                for (u, v) in poly:
+                    f.write(f"{pid} {u} {v}\n")
+                f.write("\n")
 
         print(f"[Saved] bundle -> {frame_bundle_dir}")
         print(f"[Saved] optimizer inputs -> {sam_output_base}_*")

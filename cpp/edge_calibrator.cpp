@@ -74,6 +74,28 @@ bool EdgeCalibrator::LoadData() {
     edge_weight_ = cv::imread(config_.sam_base + "_edge_weight.png", cv::IMREAD_UNCHANGED);
     semantic_map_ = cv::imread(config_.sam_base + "_semantic_map.png", cv::IMREAD_UNCHANGED);
     if (semantic_map_.empty()) semantic_map_ = cv::imread(config_.sam_base + "_mask_ids.png", cv::IMREAD_UNCHANGED);
+    // Phase 4 (sam_2d): rail maps (produced by tools/sam_extractor.py Phase 1).
+    rail_dist_ = cv::imread(config_.sam_base + "_rail_dist.png", cv::IMREAD_UNCHANGED);
+    rail_weight_ = cv::imread(config_.sam_base + "_rail_weight.png", cv::IMREAD_UNCHANGED);
+    rail_region_ = cv::imread(config_.sam_base + "_rail_region.png", cv::IMREAD_UNCHANGED);
+    rail_centerline_ = cv::imread(config_.sam_base + "_rail_centerline.png", cv::IMREAD_UNCHANGED);
+
+    // Normalize rail dist/weight to float32 [0,1] when available.
+    if (!rail_dist_.empty()) {
+        if (rail_dist_.type() == CV_16UC1) {
+            rail_dist_.convertTo(rail_dist_, CV_32FC1, 1.0 / 65535.0);
+        } else if (rail_dist_.type() != CV_32FC1) {
+            rail_dist_.convertTo(rail_dist_, CV_32FC1);
+        }
+    }
+    if (!rail_weight_.empty()) {
+        if (rail_weight_.type() == CV_16UC1) {
+            rail_weight_.convertTo(rail_weight_, CV_32FC1, 1.0 / 65535.0);
+        } else if (rail_weight_.type() != CV_32FC1) {
+            rail_weight_.convertTo(rail_weight_, CV_32FC1);
+        }
+    }
+
     if (edge_dist_.empty() && semantic_map_.empty()) return false;
 
     W_ = edge_dist_.empty() ? semantic_map_.cols : edge_dist_.cols;
@@ -83,7 +105,7 @@ bool EdgeCalibrator::LoadData() {
     edge_points_ = LoadEdgePointsCustom(config_.lidar_base + "_edge_points.txt");
     if (edge_points_.empty()) edge_points_ = points_;
     IOUtils::LoadLines3D(config_.lidar_base + "_lines_3d.txt", lines3d_);
-    IOUtils::LoadLines2D(config_.sam_base + "_lines_2d.txt", lines2d_);
+    BuildRailSamplePoints();
 
     bool used_default = false;
     if (!LoadCalib(config_.calib_file, K_, R_rect_, P_rect_, &used_default)) return false;
@@ -107,9 +129,33 @@ bool EdgeCalibrator::LoadData() {
     }
     std::cout << "[Info] Feature counts: points=" << points_.size()
               << ", edge_points=" << edge_points_.size()
-              << ", lines2d=" << lines2d_.size()
-              << ", lines3d=" << lines3d_.size() << std::endl;
+              << ", lines3d=" << lines3d_.size()
+              << ", rail_sample_points=" << rail_sample_points_.size() << std::endl;
     return true;
+}
+
+void EdgeCalibrator::BuildRailSamplePoints() {
+    rail_sample_points_.clear();
+    constexpr double kStepM = 0.25;  // Phase 4 default sampling interval.
+    for (const auto& l : lines3d_) {
+        if (!(l.class_id == SEM_RAIL_LIKE || l.type == 0)) {
+            continue;
+        }
+        const Eigen::Vector3d d = l.p2 - l.p1;
+        const double len = d.norm();
+        const int n = std::max(1, static_cast<int>(std::floor(len / kStepM)) + 1);
+        const double conf = std::max(0.0f, std::min(1.0f, l.confidence));
+        for (int i = 0; i < n; ++i) {
+            const double a = (n <= 1) ? 0.0 : (static_cast<double>(i) / static_cast<double>(n - 1));
+            PointFeature pf;
+            pf.p = l.p1 + a * d;
+            pf.intensity = 0.0f;
+            pf.normal = Eigen::Vector3d(0, 0, 0);
+            pf.label = LABEL_UNKNOWN;
+            pf.weight = conf;
+            rail_sample_points_.push_back(pf);
+        }
+    }
 }
 
 void EdgeCalibrator::ApplyPoseFromBEVIfProvided() {
@@ -153,12 +199,14 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
     Eigen::Vector3d t0(t_curr_[0], t_curr_[1], t_curr_[2]);
 
     const double w_edge = config_.edge_weight;
-    const double w_line = config_.line_weight;
+    const double w_rail = config_.rail_weight;
 
-    best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
+    best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
+                                                              rail_sample_points_, rail_dist_, rail_weight_,
+                                                              semantic_points_,
                                                               semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
                                                               config_.semantic_js_weight, config_.histogram_weight,
-                                                              w_edge, w_line, sem_cfg_, &last_score_breakdown_);
+                                                              w_edge, w_rail, sem_cfg_, &last_score_breakdown_);
     PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 
     for (double tx = t_curr_[0] - tx_range; tx <= t_curr_[0] + tx_range + 1e-12; tx += tx_step) {
@@ -173,11 +221,12 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
                             Eigen::Vector3d t_try(tx, ty, tz);
                             TotalScoreBreakdown bd;
                             const double score =
-                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
+                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
+                                                                             rail_sample_points_, rail_dist_, rail_weight_,
+                                                                             semantic_points_,
                                                                              semantic_probs_, R_rect_, P_rect_, W_, H_,
                                                                              R_try, t_try, config_.semantic_js_weight,
-                                                                             config_.histogram_weight, w_edge, w_line,
-                                                                             sem_cfg_, &bd);
+                                                                             config_.histogram_weight, w_edge, w_rail, sem_cfg_, &bd);
                             if (score > best_score_) {
                                 best_score_ = score;
                                 std::copy(r_try, r_try + 3, best_r);
@@ -210,7 +259,7 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
     const double t_step = std::max(1e-6, GetEnvDouble("EDGECALIB_SEM_FINE_TRANS_STEP", 0.04));
 
     const double w_edge = config_.edge_weight;
-    const double w_line = config_.line_weight;
+    const double w_rail = config_.rail_weight;
 
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
     double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
@@ -228,11 +277,12 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
                             Eigen::Vector3d t_try(tx, ty, tz);
                             TotalScoreBreakdown bd;
                             const double score =
-                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_,
+                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
+                                                                             rail_sample_points_, rail_dist_, rail_weight_,
+                                                                             semantic_points_,
                                                                              semantic_probs_, R_rect_, P_rect_, W_, H_,
                                                                              R_try, t_try, config_.semantic_js_weight,
-                                                                             config_.histogram_weight, w_edge, w_line,
-                                                                             sem_cfg_, &bd);
+                                                                             config_.histogram_weight, w_edge, w_rail, sem_cfg_, &bd);
                             if (score > local_best) {
                                 local_best = score;
                                 std::copy(r_try, r_try + 3, best_r);
@@ -388,17 +438,22 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
                                  new ceres::HuberLoss(0.1), r_curr_, t_curr_);
     }
 
-    // 1. 【修改】：激活线特征的 AutoDiff（自动微分）
-    if (GetEnvBool("EDGECALIB_USE_LINE_CONSTRAINT", false) && !lines2d_.empty() && !lines3d_.empty()) {
-        for (const auto& l3d : lines3d_) {
-            auto* line_cost = new LineReprojectionError(l3d, lines2d_, R_rect_, P_rect_);
-            // 注意这里改成了 AutoDiffCostFunction
-            problem.AddResidualBlock(new ceres::AutoDiffCostFunction<LineReprojectionError, 1, 3, 3>(line_cost),
-                                     new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+    // Phase 6 (sam_2d): add rail residuals on rail distance/weight maps.
+    // Keep generic edge residuals above; rail term provides stronger guidance around track centerline.
+    if (!rail_sample_points_.empty() && !rail_dist_.empty()) {
+        const int rail_stride = std::max<int>(1, static_cast<int>(rail_sample_points_.size() / 5000));
+        for (size_t i = 0; i < rail_sample_points_.size(); i += rail_stride) {
+            auto* rail_cost = new SinglePointEdgeCost(rail_sample_points_[i], &rail_dist_, R_rect_, P_rect_, W_, H_);
+            problem.AddResidualBlock(new ceres::AutoDiffCostFunction<SinglePointEdgeCost, 1, 3, 3>(rail_cost),
+                                     new ceres::HuberLoss(0.05), r_curr_, t_curr_);
         }
+        std::cout << "[Debug][Fine] Added rail residuals: points=" << rail_sample_points_.size()
+                  << " stride=" << rail_stride << std::endl;
+    } else {
+        std::cout << "[Debug][Fine] Skip rail residuals (rail_sample_points or rail_dist empty)." << std::endl;
     }
 
-    // 2. 【新增】：恢复遗漏的 Translation Prior (防止由于单目深度不可观测导致平移量飞掉)
+    // Translation Prior (防止由于单目深度不可观测导致平移量飞掉)
     double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 5.0);
     const double t_prior_disable_inimage = GetEnvDouble("EDGECALIB_T_PRIOR_DISABLE_INIMAGE_THRESH", 0.03);
     const double t_prior_weaken_inimage = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_INIMAGE_THRESH", 0.08);
@@ -475,7 +530,7 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
     // This avoids leaving breakdown as all-zero when semantic branch is not active.
     {
         const double w_edge = config_.edge_weight;
-        const double w_line = config_.line_weight;
+        const double w_rail = config_.rail_weight;
         TotalScoreBreakdown bd;
         const Eigen::Vector3d t_eval = t_result_;
         double r_eval_aa[3] = {r_result_.x(), r_result_.y(), r_result_.z()};
@@ -484,9 +539,11 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
 
         // semantic_points_/semantic_probs_ may be empty in legacy runs; semantic terms then stay 0.
         (void)ComputeTotalCalibrationScoreSemanticDominant(
-            edge_points_, edge_dist_, edge_weight_, lines3d_, lines2d_, semantic_points_, semantic_probs_,
+            edge_points_, edge_dist_, edge_weight_, lines3d_,
+            rail_sample_points_, rail_dist_, rail_weight_,
+            semantic_points_, semantic_probs_,
             R_rect_, P_rect_, W_, H_, R_eval, t_eval,
-            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_line, sem_cfg_, &bd);
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail, sem_cfg_, &bd);
 
         double rail_sum = 0.0, vert_sum = 0.0;
         int rail_cnt = 0, vert_cnt = 0;
@@ -526,7 +583,8 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "semantic_js_divergence: " << last_score_breakdown_.semantic_js_divergence << "\n";
     result_file << "semantic_hist_similarity: " << last_score_breakdown_.semantic_hist_similarity << "\n";
     result_file << "edge_term_norm: " << last_score_breakdown_.edge_score_norm << "\n";
-    result_file << "line_term_norm: " << last_score_breakdown_.line_score_norm << "\n";
+    // Phase 7 (sam_2d): rail term replaces line term in exported breakdown.
+    result_file << "rail_term_norm: " << last_score_breakdown_.rail_score_norm << "\n";
     // Phase C5: unified confidences inferred from extracted line confidences.
     result_file << "rail_confidence: " << last_score_breakdown_.rail_confidence << "\n";
     result_file << "vertical_structure_confidence: " << last_score_breakdown_.vertical_structure_confidence << "\n";

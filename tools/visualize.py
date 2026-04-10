@@ -66,6 +66,58 @@ def overlay_edge_dist(img_bgr: np.ndarray, dist01: np.ndarray, alpha: float = 0.
     heat = cv2.applyColorMap(inv_u8, cv2.COLORMAP_TURBO)
     return cv2.addWeighted(img_bgr, 1.0, heat, float(alpha), 0.0)
 
+
+def load_rail_dist_map(sam_base: str):
+    """
+    Phase 7 (sam_2d): load rail distance map (<sam_base>_rail_dist.png), normalized to [0,1].
+    """
+    if not sam_base:
+        return None, None
+    cand = f"{sam_base}_rail_dist.png"
+    if not os.path.exists(cand):
+        return None, None
+    raw = cv2.imread(cand, cv2.IMREAD_UNCHANGED)
+    if raw is None or raw.size == 0:
+        return None, None
+    dist = raw.astype(np.float32)
+    dmin = float(np.nanmin(dist))
+    dmax = float(np.nanmax(dist))
+    if dmax - dmin > 1e-12:
+        dist01 = (dist - dmin) / (dmax - dmin)
+    else:
+        dist01 = np.zeros_like(dist, dtype=np.float32)
+    dist01 = np.clip(dist01, 0.0, 1.0)
+    return dist01, raw
+
+
+def overlay_rail_region_centerline(img_bgr: np.ndarray, sam_base: str, alpha_region: float = 0.28) -> np.ndarray:
+    """
+    Phase 7 (sam_2d): overlay rail_region (green) and rail_centerline (yellow) — replaces LSD line_map as track cue.
+    """
+    if not sam_base:
+        return img_bgr
+    h, w = img_bgr.shape[:2]
+    region = cv2.imread(f"{sam_base}_rail_region.png", cv2.IMREAD_GRAYSCALE)
+    cl = cv2.imread(f"{sam_base}_rail_centerline.png", cv2.IMREAD_GRAYSCALE)
+    out = img_bgr.copy()
+    if region is not None and region.size > 0:
+        rg = cv2.resize(region, (w, h), interpolation=cv2.INTER_NEAREST)
+        mask = (rg > 0).astype(np.float32)
+        green = np.zeros_like(out)
+        green[:, :, 1] = 255
+        m3 = mask[:, :, None]
+        out = (out.astype(np.float32) * (1.0 - alpha_region * m3) + green.astype(np.float32) * (alpha_region * m3)).astype(
+            np.uint8
+        )
+    if cl is not None and cl.size > 0:
+        cg = cv2.resize(cl, (w, h), interpolation=cv2.INTER_NEAREST)
+        m = cg > 0
+        yl = np.array([0, 255, 255], dtype=np.float32)
+        om = out[m].astype(np.float32)
+        out[m] = (om * 0.45 + yl * 0.55).astype(np.uint8)
+    return out
+
+
 def edge_alignment_stats(points, R_rect, P_rect, R, t, img_w, img_h, dist01: np.ndarray):
     """
     Sample edge distance map at projected point locations.
@@ -503,8 +555,19 @@ Examples:
                         help="Overlay SAM edge distance map on output image (auto-infer sam_base from feature_base).")
     parser.add_argument("--edge_dist_alpha", type=float, default=0.35,
                         help="Alpha for edge distance overlay (0..1).")
-    parser.add_argument("--diag", action="append", choices=["bev", "semantic", "refine"],
-                        help="Phase 7：额外生成诊断拼图（bev/semantic/refine，可重复指定）")
+    parser.add_argument(
+        "--overlay_rail_maps",
+        action="store_true",
+        help="Phase 7 (sam_2d): overlay rail_region + rail_centerline (replaces LSD line_map as main track cue).",
+    )
+    parser.add_argument(
+        "--overlay_rail_dist",
+        action="store_true",
+        help="Phase 7 (sam_2d): overlay rail_dist heatmap (same semantics as edge_dist: low=on track).",
+    )
+    parser.add_argument("--rail_dist_alpha", type=float, default=0.35, help="Alpha for rail_dist overlay (0..1).")
+    parser.add_argument("--diag", action="append", choices=["bev", "semantic", "refine", "rail"],
+                        help="Phase 7：额外生成诊断拼图（bev/semantic/refine/rail，可重复指定）")
     parser.add_argument("--image_features_frame", type=str, default="",
                         help="image_features 下单帧目录，如 .../image_features/0000000012（用于 BEV 拼图）")
     parser.add_argument("--sam_frame_dir", type=str, default="",
@@ -722,10 +785,14 @@ Examples:
     # 4. 绘制投影
     print("\n[Projecting Features]")
 
-    # Optional: overlay edge distance map (helps judge alignment visually).
-    # Keep it opt-in: the heatmap can mask projection quality and look like false color artifacts.
+    # Optional overlays: Phase 7 (sam_2d) rail_region / rail_centerline / rail_dist; legacy edge_dist.
     sam_base = _infer_sam_base_from_feature_base(args.feature_base)
     dist01, _ = load_edge_dist_map(sam_base)
+    rail_dist01, _ = load_rail_dist_map(sam_base)
+    if args.overlay_rail_maps:
+        img = overlay_rail_region_centerline(img, sam_base)
+    if rail_dist01 is not None and args.overlay_rail_dist:
+        img = overlay_edge_dist(img, rail_dist01, alpha=args.rail_dist_alpha)
     if dist01 is not None and args.overlay_edge_dist:
         img = overlay_edge_dist(img, dist01, alpha=args.edge_dist_alpha)
     
@@ -769,6 +836,8 @@ Examples:
             vd.render_refine_curves(args.refinement_dir.strip(), out_root + "_diag_refine.png")
         elif "refine" in args.diag:
             print("[Warning] --diag refine 需要 --refinement_dir")
+        if "rail" in args.diag:
+            vd.render_rail_panel(sam_d, out_root + "_diag_rail.png")
 
     # 5. 添加图例
     img = add_legend(img)
@@ -783,6 +852,12 @@ Examples:
             print(f"  sampled={stats['n_sampled']}/{stats['n_total']}, behind={stats['behind']}, oob={stats['oob']}")
             print(f"  mean={stats['mean']:.4f}, p50={stats['p50']:.4f}, p25/p75={stats['p25']:.4f}/{stats['p75']:.4f}")
             print(f"  ratio<=0.05={stats['ratio_le_0.05']:.3f}, <=0.10={stats['ratio_le_0.10']:.3f}, <=0.20={stats['ratio_le_0.20']:.3f}")
+    if rail_dist01 is not None and points and args.overlay_rail_dist:
+        h, w = img.shape[:2]
+        rstats = edge_alignment_stats(points, R_rect, P_rect, R, t_vec, w, h - 80, rail_dist01)
+        if rstats and rstats.get("n_sampled", 0) > 0:
+            print("\n[Rail Alignment Stats] (rail_dist at projected points; 0=near centerline, 1=far)")
+            print(f"  sampled={rstats['n_sampled']}/{rstats['n_total']}, mean={rstats['mean']:.4f}, p50={rstats['p50']:.4f}")
 
     # 6. 保存结果
     # 如果没有指定输出路径，自动生成到result/visualization目录

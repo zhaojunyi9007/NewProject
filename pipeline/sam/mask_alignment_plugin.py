@@ -37,7 +37,7 @@ class MaskAlignmentFeaturePlugin:
         base = os.path.join(context.output_dir, frame_tag)
         mask_path = base + "_mask_ids.png"
         edge_path = base + "_edge_map.png"
-        line_path = base + "_line_map.png"
+        rail_centerline_path = base + "_rail_centerline.png"
 
         if not (os.path.exists(mask_path) and os.path.exists(edge_path)):
             print(f"[MaskAlignment][Warning] 缺少输出文件，跳过评估: frame={frame_tag}")
@@ -46,20 +46,20 @@ class MaskAlignmentFeaturePlugin:
         try:
             mask_img = np.array(Image.open(mask_path))
             edge_img = np.array(Image.open(edge_path))
-            line_img = np.array(Image.open(line_path)) if os.path.exists(line_path) else None
+            rail_cl_img = np.array(Image.open(rail_centerline_path)) if os.path.exists(rail_centerline_path) else None
         except Exception:
             print(f"[MaskAlignment][Warning] 读取输出失败，跳过评估: frame={frame_tag}")
             return
 
         if edge_img.ndim == 3:
             edge_img = edge_img[..., 0]
-        if line_img is not None and line_img.ndim == 3:
-            line_img = line_img[..., 0]
+        if rail_cl_img is not None and rail_cl_img.ndim == 3:
+            rail_cl_img = rail_cl_img[..., 0]
 
         mask_bin = (mask_img > 0).astype(np.uint8)
         edge_bin = (edge_img > 0).astype(np.uint8)
-        line_bin = (line_img > 0).astype(np.uint8) if line_img is not None else np.zeros_like(edge_bin)
-        fused_edges = np.clip(edge_bin + line_bin, 0, 1)
+        rail_cl_bin = (rail_cl_img > 0).astype(np.uint8) if rail_cl_img is not None else np.zeros_like(edge_bin)
+        fused_edges = np.clip(edge_bin + rail_cl_bin, 0, 1)
 
         # 简单稳健指标：边缘位于掩码区域比例 + 覆盖率
         covered_edges = int((fused_edges * mask_bin).sum())

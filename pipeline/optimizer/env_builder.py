@@ -10,10 +10,6 @@ from typing import Any, Dict, Tuple
 
 ENV_MAP = {
     "opt_translation": "EDGECALIB_OPT_TRANSLATION",
-    "use_line_constraint": "EDGECALIB_USE_LINE_CONSTRAINT",
-    "line_match_threshold": "EDGECALIB_LINE_MATCH_THRESHOLD",
-    "line_soft_penalty": "EDGECALIB_LINE_SOFT_PENALTY",
-    "line_soft_cap": "EDGECALIB_LINE_SOFT_CAP",
     "t_prior_weight": "EDGECALIB_T_PRIOR_WEIGHT",
     "w_consistency": "EDGECALIB_W_CONSISTENCY",
     "coarse_angle_range": "EDGECALIB_COARSE_ANGLE_RANGE",
@@ -24,7 +20,6 @@ ENV_MAP = {
     "coarse_ty_step": "EDGECALIB_COARSE_TY_STEP",
     "coarse_tz_step": "EDGECALIB_COARSE_TZ_STEP",
     "coarse_tx_step": "EDGECALIB_COARSE_TX_STEP",
-    "log_line_debug": "EDGECALIB_LOG_LINE_DEBUG",
     "fine_margin_switch_inimage": "EDGECALIB_FINE_MARGIN_SWITCH_INIMAGE",
     "fine_margin_low": "EDGECALIB_FINE_MARGIN_LOW",
     "fine_margin_high": "EDGECALIB_FINE_MARGIN_HIGH",

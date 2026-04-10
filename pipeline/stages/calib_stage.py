@@ -216,8 +216,8 @@ def run(context: RuntimeContext) -> None:
                 str(float(sem_cfg.get("histogram_weight", 0.5))),
                 "--edge_weight",
                 str(float(sem_cfg.get("edge_weight", 1.0))),
-                "--line_weight",
-                str(float(sem_cfg.get("line_weight", 0.6))),
+                "--rail_weight",
+                str(float(sem_cfg.get("rail_weight", 1.2))),
                 "--pyramid_scales",
                 pyramid_scales_s,
             ]

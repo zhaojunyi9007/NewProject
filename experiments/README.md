@@ -3,7 +3,7 @@
 此目录存放实验性/一次性诊断脚本，不属于默认主流程依赖。
 
 ## 当前脚本
-- `line_constraint_ab_test.py`：line constraint 开关 A/B 对比实验。
+- （已移除）`line_constraint_ab_test.py`：line constraint 开关 A/B 对比实验（Phase 8 删除 LSD/line 分支）。
 - `check_lines.py`：单帧 3D 线投影诊断。
 - `check_features.py`：单帧点特征投影诊断。
 - `evaluate_mask_alignment.py`：汇总 `result/mask_alignment/*.json` 的对齐指标统计。

@@ -33,6 +33,49 @@ def _line_count(path: str) -> int:
     return n
 
 
+def _rail_centerlines_count(path: str) -> int:
+    """
+    Count points in rail_centerlines_2d.txt.
+    Format (Phase 2): poly_id u v, blank lines between polylines, '#' comments allowed.
+    We count valid (poly_id,u,v) rows as signal strength.
+    """
+    if not os.path.isfile(path):
+        return 0
+    n = 0
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 3:
+                continue
+            try:
+                int(parts[0])
+                int(parts[1])
+                int(parts[2])
+            except ValueError:
+                continue
+            n += 1
+    return n
+
+
+def _safe_nonzero_ratio_u8_png(path: str) -> Optional[float]:
+    """
+    Read a png as u8 and compute non-zero pixel ratio.
+    Returns None on failure.
+    """
+    try:
+        import cv2  # local import: optional dependency at runtime
+    except Exception:
+        return None
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None or img.size == 0:
+        return None
+    nz = float(np.count_nonzero(img))
+    return max(0.0, min(1.0, nz / float(img.size)))
+
+
 def _file_nonempty(path: str) -> bool:
     try:
         return os.path.isfile(path) and os.path.getsize(path) > 32
@@ -75,10 +118,23 @@ def compute_frame_observability(
         except OSError:
             pass
 
-    # Phase A2: 统一从 image_features/<frame_id>/lines_2d.txt 读取
-    n_lines = _line_count(os.path.join(base_i, "lines_2d.txt"))
-    dbg["lines_2d_count"] = float(n_lines)
-    score += 0.12 * min(1.0, n_lines / 80.0)
+    # Phase 2 (sam_2d): observability no longer depends on lines_2d.txt.
+    # Prefer rail_centerlines_2d.txt; fallback to rail_centerline.png non-zero ratio.
+    rail_txt = os.path.join(base_i, "rail_centerlines_2d.txt")
+    rail_png = os.path.join(base_i, "rail_centerline.png")
+    n_rail_pts = _rail_centerlines_count(rail_txt)
+    dbg["rail_centerline_points"] = float(n_rail_pts)
+    if n_rail_pts > 0:
+        score += 0.12 * min(1.0, n_rail_pts / 600.0)
+        dbg["rail_centerline_source"] = 1.0  # txt
+    else:
+        rr = _safe_nonzero_ratio_u8_png(rail_png)
+        if rr is not None:
+            dbg["rail_centerline_nonzero_ratio"] = rr
+            score += 0.12 * min(1.0, rr / 0.08)
+            dbg["rail_centerline_source"] = 2.0  # png
+        else:
+            dbg["rail_centerline_source"] = 0.0  # missing
 
     if _file_nonempty(os.path.join(base_i, "edge_map.png")):
         score += 0.08
