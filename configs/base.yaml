@@ -45,8 +45,6 @@ sam:
     structural_aspect_ratio: 3.0
     contour_stddev_threshold: 10.0
     min_arc_length_ratio: 0.06
-    global_min_line_length_ratio: 0.015
-    ground_min_line_length_ratio: 0.06
     sky_min_line_length_ratio: 0.03
     fused_top_black_ratio: 0.20
     fused_bottom_black_ratio: 0.80
@@ -122,10 +120,6 @@ calibration:
     history_file: "calib_history.txt"
   ab_experiment:
     opt_translation: true
-    use_line_constraint: true
-    line_match_threshold: 50
-    line_soft_penalty: false
-    line_soft_cap: 100
     t_prior_weight: 20
     w_consistency: 0.0
     coarse_angle_range: 0.15
@@ -166,15 +160,25 @@ image_features:
   enabled: true
   enable_semantic_probs: true
   enable_edges: true
-  enable_lines: true
+  enable_lines: false
+  enable_rail_region: true
   semantic_classes: [rail, ballast, pole, signal, platform, building, road, vehicle, vegetation, sky]
   save_logits: true
   rail_class_names: [rail, ballast]
   vertical_structure_classes: [pole, signal]
   bottom_crop_ratio_for_edges: 0.0
-  keep_diagonal_lines: true
-  restrict_lsd_by_semantics: true
-  line_semantic_support_threshold: 0.12
+  # Phase 0 (sam_2d): rail region / centerline params (LSD removed as main rail feature)
+  rail_seed_threshold: 0.42
+  rail_support_threshold: 0.22
+  rail_mask_min_area: 400
+  rail_close_kernel: 9
+  rail_open_kernel: 5
+  rail_top_ignore_ratio: 0.18
+  rail_bottom_keep_ratio: 0.75
+  rail_component_min_height_ratio: 0.05
+  rail_skeleton_min_length_px: 40
+  rail_dist_max_ratio: 0.08
+  rail_weight_dilate_kernel: 9
 
 # ========================================
 # BEV 粗初始化（默认关闭）
@@ -211,7 +215,7 @@ semantic_calib:
   semantic_js_weight: 3.0
   histogram_weight: 0.5
   edge_weight: 1.0
-  line_weight: 0.6
+  rail_weight: 1.2
   anchor_fixed_sampling: true
   direction_aware_yaw_weighting: true
   class_weights:

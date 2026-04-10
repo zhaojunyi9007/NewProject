@@ -249,3 +249,45 @@ def render_refine_curves(refinement_dir: str, out_path: str) -> bool:
     plt.close(fig)
     print(f"[diag_refine] wrote {out_path}")
     return True
+
+
+def render_rail_panel(sam_prefix: str, out_path: str) -> bool:
+    """Phase 7 (sam_2d): rail_region、rail_centerline、rail_dist 三联图。"""
+    paths = [
+        (sam_prefix + "_rail_region.png", "region", False),
+        (sam_prefix + "_rail_centerline.png", "centerline", False),
+        (sam_prefix + "_rail_dist.png", "dist", True),
+    ]
+    for p, _label, _ in paths:
+        if not os.path.isfile(p):
+            print(f"[diag_rail] missing {p}")
+            return False
+    imgs: List[np.ndarray] = []
+    for p, _label, is_dist in paths:
+        im = cv2.imread(p, cv2.IMREAD_UNCHANGED)
+        if im is None or im.size == 0:
+            print(f"[diag_rail] cannot read {p}")
+            return False
+        if im.ndim == 2:
+            g = im.astype(np.float32)
+        elif im.ndim == 3 and im.shape[2] >= 3:
+            g = cv2.cvtColor(im[:, :, :3], cv2.COLOR_BGR2GRAY).astype(np.float32)
+        else:
+            g = im[:, :, 0].astype(np.float32)
+        if is_dist:
+            g = _norm01(g) * 255.0
+        else:
+            g = np.clip(g, 0.0, 255.0)
+        g_u8 = g.astype(np.uint8)
+        imgs.append(cv2.cvtColor(g_u8, cv2.COLOR_GRAY2BGR))
+    h = min(x.shape[0] for x in imgs)
+    w = min(x.shape[1] for x in imgs)
+    resized = [cv2.resize(x, (w, h), interpolation=cv2.INTER_NEAREST) for x in imgs]
+    panel = np.hstack(resized)
+    cv2.putText(panel, "rail_region", (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
+    cv2.putText(panel, "rail_centerline", (w + 10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
+    cv2.putText(panel, "rail_dist", (2 * w + 10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    cv2.imwrite(out_path, panel)
+    print(f"[diag_rail] wrote {out_path}")
+    return True

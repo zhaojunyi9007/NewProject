@@ -17,7 +17,7 @@ int main(int argc, char** argv) {
                "--init_rx X --init_ry X --init_rz X --init_tx X --init_ty X --init_tz X "
                "[--output_file P] [--history_file P]\n"
             << "            [--semantic_probs P] [--lidar_semantic_points P] [--init_pose_from_bev P]\n"
-            << "            [--semantic_js_weight X] [--histogram_weight X] [--edge_weight X] [--line_weight X]\n"
+            << "            [--semantic_js_weight X] [--histogram_weight X] [--edge_weight X] [--rail_weight X]\n"
             << "            [--class_weights \"w0,w1,...\"] [--pyramid_scales \"1.0,0.5,0.25\"]\n"
             << "            [--mode full_calib|refine_only] [--max_delta_deg X] [--max_delta_m X]\n";
     };
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
             else if (a == "--semantic_js_weight" && need(i)) config.semantic_js_weight = std::atof(argv[++i]);
             else if (a == "--histogram_weight" && need(i)) config.histogram_weight = std::atof(argv[++i]);
             else if (a == "--edge_weight" && need(i)) config.edge_weight = std::atof(argv[++i]);
-            else if (a == "--line_weight" && need(i)) config.line_weight = std::atof(argv[++i]);
+            else if (a == "--rail_weight" && need(i)) config.rail_weight = std::atof(argv[++i]);
             else if (a == "--class_weights" && need(i)) split_csv_doubles(argv[++i], &config.class_weights);
             else if (a == "--pyramid_scales" && need(i)) split_csv_doubles(argv[++i], &config.pyramid_scales);
 

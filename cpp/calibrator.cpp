@@ -133,9 +133,7 @@ int main(int argc, char** argv) {
     IOUtils::LoadLines3D(lidar_base + "_lines_3d.txt", lines3d);
     std::cout << "  Loaded " << lines3d.size() << " 3D line features" << std::endl;
     
-    std::vector<Line2D> lines2d;
-    IOUtils::LoadLines2D(sam_base + "_lines_2d.txt", lines2d);
-    std::cout << "  Loaded " << lines2d.size() << " 2D line features" << std::endl;
+    // Phase 8 (sam_2d): LSD 2D line features removed (no lines2d).
 
     // 加载内参
     Eigen::Matrix3d K; 
@@ -432,14 +430,7 @@ int main(int argc, char** argv) {
         std::cout << "\n[Stage 3] Fine Calibration (Ceres LM Optimization)..." << std::endl;
         ceres::Problem problem;
         const bool optimize_translation = GetEnvBool("EDGECALIB_OPT_TRANSLATION", true);
-        const bool use_line_constraints = GetEnvBool("EDGECALIB_USE_LINE_CONSTRAINT", true);
-        const bool log_line_debug = GetEnvBool("EDGECALIB_LOG_LINE_DEBUG", false);
-        const double line_match_threshold = GetEnvDouble("EDGECALIB_LINE_MATCH_THRESHOLD", 50.0);
-        const bool line_soft_penalty = GetEnvBool("EDGECALIB_LINE_SOFT_PENALTY", false);
-        const double line_soft_cap = GetEnvDouble("EDGECALIB_LINE_SOFT_CAP", 100.0);
-        const double line_behind_penalty = GetEnvDouble("EDGECALIB_LINE_BEHIND_PENALTY", 0.0);
-        const double line_unmatched_penalty = GetEnvDouble("EDGECALIB_LINE_UNMATCHED_PENALTY", 0.0);
-        const double line_threshold_fail_penalty = GetEnvDouble("EDGECALIB_LINE_THRESHOLD_FAIL_PENALTY", 0.0);
+        // Phase 8 (sam_2d): line constraints removed.
         const double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 20.0);
         const double w_consistency_env = GetEnvDouble("EDGECALIB_W_CONSISTENCY", 0.0);
         const Eigen::Vector3d t_init_prior(t_curr[0], t_curr[1], t_curr[2]);
@@ -488,56 +479,7 @@ int main(int argc, char** argv) {
         std::cout << "  Added " << valid_points_added << " individual residual blocks to Ceres." << std::endl;
         
 
-        //if (!lines3d.empty() && !lines2d.empty()) {
-        if (use_line_constraints && !lines3d.empty() && !lines2d.empty()) {
-            std::cout << "  Adding line reprojection constraints: " << lines3d.size() << " lines" << std::endl;
-            int line_blocks_added = 0;
-            const LineConstraintSummary init_line_summary = SummarizeLineConstraints(
-                lines3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
-            for (const auto& l3d : lines3d) {
-                auto* line_cost = new LineReprojectionError(
-                    l3d,
-                    lines2d,
-                    R_rect,
-                    P_rect,
-                    line_match_threshold,
-                    line_soft_penalty,
-                    line_soft_cap,
-                    line_behind_penalty,
-                    line_unmatched_penalty,
-                    line_threshold_fail_penalty);                    
-                problem.AddResidualBlock(
-                    new ceres::NumericDiffCostFunction<LineReprojectionError, ceres::CENTRAL, 1, 3, 3>(line_cost),
-                    new ceres::HuberLoss(1.0),
-                    r_curr,
-                    t_curr);
-                line_blocks_added++;
-                if (log_line_debug) {
-                    LineMatchStats stats = EvaluateLineMatchStats(l3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
-                    const char* reason = GetLineStatusReason(stats, line_match_threshold);
-                    std::cout << "    [LineDebug] type=" << l3d.type
-                              << ", in_front=" << (stats.in_front ? "Y" : "N")
-                              << ", found_type_match=" << (stats.found_type_match ? "Y" : "N")
-                              << ", min_dist=" << stats.min_dist
-                              << ", active=" << (stats.active ? "Y" : "N")
-                              << ", reason=" << reason
-                              << std::endl;
-                }
-            }
-
-            std::cout << "  Line constraints added: " << line_blocks_added
-                      << ", active at init: " << init_line_summary.active << std::endl;
-            PrintLineConstraintSummary("init", init_line_summary, line_match_threshold);
-                      
-            std::cout << "  Line match threshold: " << line_match_threshold << " px" << std::endl;
-            std::cout << "  Line soft penalty: " << (line_soft_penalty ? "enabled" : "disabled")
-                      << " (cap=" << line_soft_cap << ")" << std::endl;
-            std::cout << "  Line hard penalties (when soft disabled): behind=" << line_behind_penalty
-                      << ", unmatched=" << line_unmatched_penalty
-                      << ", threshold_fail=" << line_threshold_fail_penalty << std::endl;         
-        } else if (!use_line_constraints) {
-            std::cout << "  Line constraints: disabled by EDGECALIB_USE_LINE_CONSTRAINT" << std::endl;
-        }
+        // Phase 8 (sam_2d): no line reprojection constraints.
 
         if (t_prior_weight > 0.0) {
             problem.AddResidualBlock(
@@ -572,11 +514,7 @@ int main(int argc, char** argv) {
         std::cout << "  " << summary.BriefReport() << std::endl;
         std::cout << "  Final R: [" << r_curr[0] << ", " << r_curr[1] << ", " << r_curr[2] << "]" << std::endl;
         std::cout << "  Final T: [" << t_curr[0] << ", " << t_curr[1] << ", " << t_curr[2] << "]" << std::endl;
-        if (use_line_constraints && !lines3d.empty() && !lines2d.empty()) {
-            const LineConstraintSummary final_line_summary = SummarizeLineConstraints(
-                lines3d, lines2d, R_rect, P_rect, r_curr, t_curr, line_match_threshold);
-            PrintLineConstraintSummary("final", final_line_summary, line_match_threshold);
-        }
+        // Phase 8 (sam_2d): no line constraint summary.
     } else {
         std::cout << "\n[Stage 3] Skipped (no edge field or semantic map for fine optimization)" << std::endl;
     }

@@ -115,13 +115,14 @@ struct ScoreBreakdown {
     double semantic_js_divergence = 0.0;     // lower is better
     double semantic_hist_similarity = 0.0;   // higher is better (0..1)
     double edge_score_norm = 0.0;            // normalized edge attraction (higher is better)
-    double line_score_norm = 0.0;            // placeholder (higher is better)
+    // Phase D6 (sam_2d): rail term replaces line term as main track feature.
+    double rail_score_norm = 0.0;            // normalized rail attraction (higher is better)
 
     // weighted components used in total
     double semantic_js_score = 0.0;          // typically = -semantic_js_divergence
     double semantic_hist_score = 0.0;        // typically = semantic_hist_similarity
     double edge_score = 0.0;
-    double line_score = 0.0;
+    double rail_score = 0.0;
 
     // Phase A3 keys (observability-related)
     double rail_confidence = 0.0;
@@ -140,9 +141,6 @@ namespace IOUtils {
     
     // 加载 3D 线特征文件 (x1 y1 z1 x2 y2 z2 type)
     bool LoadLines3D(const std::string& filepath, std::vector<Line3D>& lines);
-    
-    // 加载 2D 线特征文件 (u1 v1 u2 v2 type)
-    bool LoadLines2D(const std::string& filepath, std::vector<Line2D>& lines);
     
     // 加载 KITTI 标定文件
     bool LoadKittiCalib(const std::string& calib_file,

@@ -39,4 +39,3 @@ calibration:
     enabled: true
     max_iterations: 100
     huber_loss_threshold: 5.0  # Huber核函数阈值
-    line_match_threshold: 50.0  # 线匹配阈值 (pixels)

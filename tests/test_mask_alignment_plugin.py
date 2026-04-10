@@ -24,7 +24,7 @@ class _DummyBasePlugin:
         edge[3:5, :] = 255
         Image.fromarray(mask).save(base + "_mask_ids.png")
         Image.fromarray(edge).save(base + "_edge_map.png")
-        Image.fromarray(edge).save(base + "_line_map.png")
+        Image.fromarray(edge).save(base + "_rail_centerline.png")
 
 
 class MaskAlignmentPluginTest(unittest.TestCase):
