@@ -178,7 +178,7 @@ def edge_alignment_stats(points, R_rect, P_rect, R, t, img_w, img_h, dist01: np.
 
 def _infer_dataset_format_from_calib_file(calib_file: str) -> str:
     if not calib_file or not os.path.exists(calib_file):
-        return "kitti"
+        return "osdar23"
     try:
         with open(calib_file, "r", encoding="utf-8", errors="ignore") as f:
             head = f.read(256 * 1024).lower()
@@ -187,7 +187,7 @@ def _infer_dataset_format_from_calib_file(calib_file: str) -> str:
             return "osdar23"
     except Exception:
         pass
-    return "kitti"
+    return "osdar23"
 
 
 def _infer_osdar_camera_from_img_path(img_path: str) -> str:
@@ -530,9 +530,9 @@ Examples:
     parser.add_argument("--feature_base", type=str, required=True, 
                         help="Path to features (e.g., result/0000000000)")
     parser.add_argument("--calib_file", type=str, default="", 
-                        help="KITTI calibration file (optional, e.g., calib_cam_to_cam.txt)")
+                        help="Calibration file (optional, e.g., calibration.txt)")
     parser.add_argument("--dataset_format", type=str, default="",
-                        help="可选：强制指定数据集格式（kitti / osdar23 / osdar）。不填则根据 calib_file 自动推断。")
+                        help="可选：强制指定数据集格式（osdar23 / osdar）。不填则根据 calib_file 自动推断。")
     parser.add_argument("--image_sensor", type=str, default="",
                         help="可选：OSDaR23 相机 data_folder（如 rgb_center）。不填则尝试从 --img 路径推断。")
     parser.add_argument("--r_vec", type=float, nargs=3, default=None, 

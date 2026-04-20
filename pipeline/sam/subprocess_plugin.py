@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
 from pipeline.sam.interfaces import FeatureFrameContext
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class SamSubprocessFeaturePlugin:
@@ -46,4 +49,4 @@ class SamSubprocessFeaturePlugin:
             "--fused_bottom_black_ratio", str(heuristics_cfg.get("fused_bottom_black_ratio", 0.80)),
             "--distance_max_ratio", str(heuristics_cfg.get("distance_max_ratio", 0.15)),
         ]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, cwd=_REPO_ROOT)

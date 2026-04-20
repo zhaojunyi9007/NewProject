@@ -18,7 +18,7 @@ from pipeline.runner import PipelineRunner
 
 def main():
     parser = argparse.ArgumentParser(description="EdgeCalib v2.0 完整标定流程")
-    parser.add_argument("--config", default="configs/kitti.yaml", help="配置文件路径")
+    parser.add_argument("--config", default="configs/osdar23.yaml", help="配置文件路径")
     parser.add_argument("--stage", choices=["sam", "lidar", "calib", "visual", "all"], default="all", help="执行阶段")
     parser.add_argument("--skip-sam", action="store_true", help="跳过SAM提取")
     parser.add_argument("--skip-lidar", action="store_true", help="跳过LiDAR提取")

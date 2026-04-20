@@ -182,7 +182,7 @@ class OSDaR23Adapter(DatasetAdapter):
 
     def apply_derived_paths(self, config: Dict[str, Any]) -> None:
         data = config.setdefault("data", {})
-        fmt = str(data.get("dataset_format", "kitti") or "kitti").lower()
+        fmt = str(data.get("dataset_format", "osdar23") or "osdar23").lower()
         root = str(data.get("osdar_sequence_root", "") or "").strip()
         if fmt in {"osdar23", "osdar"} and root:
             sensor = str(data.get("image_sensor", "rgb_center") or "rgb_center").strip() or "rgb_center"

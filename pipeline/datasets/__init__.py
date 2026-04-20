@@ -6,15 +6,14 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from pipeline.datasets.base import DatasetAdapter
-from pipeline.datasets.kitti import KittiAdapter
 from pipeline.datasets.osdar23 import OSDaR23Adapter
 
 
 def get_adapter(config: Dict[str, Any]) -> DatasetAdapter:
-    fmt = str(config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
+    fmt = str(config.get("data", {}).get("dataset_format", "osdar23") or "osdar23").lower()
     if fmt in {"osdar23", "osdar"}:
         return OSDaR23Adapter(config)
-    return KittiAdapter(config)
+    raise ValueError(f"仅支持 OsDaR23 数据集（data.dataset_format=osdar23/osdar），当前: {fmt}")
 
 
-__all__ = ["DatasetAdapter", "KittiAdapter", "OSDaR23Adapter", "get_adapter"]
+__all__ = ["DatasetAdapter", "OSDaR23Adapter", "get_adapter"]

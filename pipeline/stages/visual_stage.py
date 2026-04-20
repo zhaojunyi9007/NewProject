@@ -20,7 +20,7 @@ def run(context: RuntimeContext) -> None:
     calib_dir = context.config["data"]["calib_output_dir"]
     visual_dir = context.config["data"]["visual_output_dir"]
     calib_file = context.config["data"].get("calib_file", "")
-    ds_fmt = str(context.config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
+    ds_fmt = str(context.config.get("data", {}).get("dataset_format", "osdar23") or "osdar23").lower()
     img_sensor = str(context.config.get("data", {}).get("image_sensor", "") or "")
     adapter = get_adapter(context.config)
 

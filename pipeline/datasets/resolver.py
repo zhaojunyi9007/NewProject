@@ -33,40 +33,6 @@ class DatasetResolver(ABC):
     def list_available_frames(self) -> List[int]:
         ...
 
-
-class KittiResolver(DatasetResolver):
-    """KITTI: ``{frame_id:010d}.png`` under image_dir, ``.bin`` under velodyne_dir."""
-
-    def __init__(self, config: Dict[str, Any]) -> None:
-        data = config.get("data", {})
-        self._image_dir = str(data.get("image_dir", "") or "").strip()
-        self._velo_dir = str(data.get("velodyne_dir", "") or "").strip()
-
-    def resolve_image(self, frame_id: int) -> PathOrNone:
-        if not self._image_dir:
-            return None
-        path = os.path.join(self._image_dir, f"{frame_id:010d}.png")
-        return path if os.path.isfile(path) else None
-
-    def resolve_lidar(self, frame_id: int) -> PathsOrNone:
-        if not self._velo_dir:
-            return None
-        path = os.path.join(self._velo_dir, f"{frame_id:010d}.bin")
-        return path if os.path.isfile(path) else None
-
-    def list_available_frames(self) -> List[int]:
-        if not self._image_dir or not os.path.isdir(self._image_dir):
-            return []
-        frame_ids: List[int] = []
-        for name in os.listdir(self._image_dir):
-            stem, ext = os.path.splitext(name)
-            if ext.lower() != ".png" or not stem.isdigit():
-                continue
-            frame_ids.append(int(stem))
-        frame_ids.sort()
-        return frame_ids
-
-
 class OSDaRResolver(DatasetResolver):
     """
     OSDaR23: ``{counter}_{timestamp}.png`` / ``{counter}_{timestamp}.pcd``.

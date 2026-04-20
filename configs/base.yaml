@@ -78,6 +78,7 @@ lidar:
   temporal_filter:
     enabled: true
     position_threshold: 0.5
+    projection_threshold: 0.5
     static_weight: 1.0
     dynamic_weight: 0.1
   # Phase 3：LiDAR-BEV、语义点、BEV 轨/聚类立柱（由 lidar_extractor 新路径生成）
@@ -108,7 +109,7 @@ lidar:
 calibration:
   constraint_adapter: "legacy_env_constraints"
   extrinsic_init:
-    target_camera: "cam2"
+    target_camera: "rgb_center"
   initial_extrinsic:
     rotation: [0.0, 0.0, 0.0]
     translation: [0.0, -0.3, 1.8]
