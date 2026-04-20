@@ -35,12 +35,13 @@ def run(context: RuntimeContext) -> None:
     temporal_filter_cfg = (
         lidar_cfg.get("temporal_filter", {}) if isinstance(lidar_cfg.get("temporal_filter", {}), dict) else {}
     )
+    temporal_enabled = bool(temporal_filter_cfg.get("enabled", True))
     phase3_cfg = lidar_cfg.get("phase3", {}) if isinstance(lidar_cfg.get("phase3", {}), dict) else {}
     dataset_meta = context.config.get("dataset") or {}
     adapter = get_adapter(context.config)
 
     extractor_env = os.environ.copy()
-    ds_fmt = str(context.config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
+    ds_fmt = str(context.config.get("data", {}).get("dataset_format", "osdar23") or "osdar23").lower()
     extractor_env["EDGECALIB_DATASET_FORMAT"] = ds_fmt
 
     env_map = {
@@ -51,10 +52,6 @@ def run(context: RuntimeContext) -> None:
         "EDGECALIB_LIDAR_NDT_STEP_SIZE": ndt_cfg.get("step_size"),
         "EDGECALIB_LIDAR_NDT_RESOLUTION": ndt_cfg.get("resolution"),
         "EDGECALIB_LIDAR_NDT_MAX_ITERS": ndt_cfg.get("max_iterations"),
-        "EDGECALIB_LIDAR_TEMPORAL_POS_THRESH": temporal_filter_cfg.get("position_threshold"),
-        "EDGECALIB_LIDAR_TEMPORAL_PROJ_THRESH": temporal_filter_cfg.get("position_threshold"),
-        "EDGECALIB_LIDAR_TEMPORAL_STATIC_WEIGHT": temporal_filter_cfg.get("static_weight"),
-        "EDGECALIB_LIDAR_TEMPORAL_DYNAMIC_WEIGHT": temporal_filter_cfg.get("dynamic_weight"),
         "EDGECALIB_LIDAR_GROUND_Z_MIN": lidar_cfg.get("ground_z_min"),
         "EDGECALIB_LIDAR_GROUND_Z_MAX": lidar_cfg.get("ground_z_max"),
         "EDGECALIB_LIDAR_RAIL_RANSAC_THRESHOLD": lidar_cfg.get("rail_ransac_threshold"),
@@ -65,6 +62,17 @@ def run(context: RuntimeContext) -> None:
         "EDGECALIB_LIDAR_POLE_VERTICAL_TOLERANCE": lidar_cfg.get("pole_vertical_tolerance"),
         "EDGECALIB_LIDAR_POLE_MAX_LINES": lidar_cfg.get("pole_max_lines"),
     }
+    if temporal_enabled:
+        env_map.update(
+            {
+                "EDGECALIB_LIDAR_TEMPORAL_POS_THRESH": temporal_filter_cfg.get("position_threshold"),
+                "EDGECALIB_LIDAR_TEMPORAL_PROJ_THRESH": temporal_filter_cfg.get(
+                    "projection_threshold", temporal_filter_cfg.get("position_threshold")
+                ),
+                "EDGECALIB_LIDAR_TEMPORAL_STATIC_WEIGHT": temporal_filter_cfg.get("static_weight"),
+                "EDGECALIB_LIDAR_TEMPORAL_DYNAMIC_WEIGHT": temporal_filter_cfg.get("dynamic_weight"),
+            }
+        )
     for key, value in env_map.items():
         if value is not None:
             extractor_env[key] = str(value)

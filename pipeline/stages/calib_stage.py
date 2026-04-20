@@ -92,12 +92,8 @@ def run(context: RuntimeContext) -> None:
     ext = ds.load_initial_extrinsic()
     if ext:
         init_r, init_t = ext
-        ds_fmt = str(context.config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
-        if ds_fmt in {"osdar23", "osdar"}:
-            cam_folder = str(context.config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
-            print(f"[Info] 使用OSDaR23 calibration.txt 读取初始外参, camera={cam_folder}")
-        else:
-            print("[Info] 使用calib_velo_to_cam.txt中的R/T作为初始外参")
+        cam_folder = str(context.config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
+        print(f"[Info] 使用OSDaR23 calibration.txt 读取初始外参, camera={cam_folder}")
 
     bev_cfg = context.config.get("bev") or {}
     bev_by_frame = getattr(context, "bev_pose_by_frame", None) or {}

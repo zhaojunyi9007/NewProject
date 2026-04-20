@@ -52,8 +52,8 @@ def _rail_centerlines_count(path: str) -> int:
                 continue
             try:
                 int(parts[0])
-                int(parts[1])
-                int(parts[2])
+                float(parts[1])
+                float(parts[2])
             except ValueError:
                 continue
             n += 1

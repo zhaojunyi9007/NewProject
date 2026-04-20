@@ -131,9 +131,9 @@ def validate_config(config: Dict[str, Any]) -> None:
     if mode not in {"select", "all"}:
         raise ValueError(f"frames.mode 仅支持 select/all，当前: {mode}")
 
-    ds_fmt = str(config.get("data", {}).get("dataset_format", "kitti") or "kitti").lower()
-    if ds_fmt not in {"kitti", "osdar23", "osdar"}:
-        raise ValueError(f"data.dataset_format 仅支持 kitti / osdar23，当前: {ds_fmt}")
+    ds_fmt = str(config.get("data", {}).get("dataset_format", "osdar23") or "osdar23").lower()
+    if ds_fmt not in {"osdar23", "osdar"}:
+        raise ValueError(f"data.dataset_format 仅支持 osdar23/osdar，当前: {ds_fmt}")
 
     if mode == "select":
         frame_ids = config["frames"].get("frame_ids")
