@@ -104,19 +104,20 @@ def compute_frame_observability(
 
     npy_sem = os.path.join(base_i, "semantic_probs.npy")
     if os.path.isfile(npy_sem):
-        mm = _safe_mean_max_prob(npy_sem)
-        if mm is not None:
-            dbg["mean_max_semantic_prob"] = mm
-            score += 0.22 * mm
         try:
             z = np.load(npy_sem)
-            if z.ndim == 3:
-                C = z.shape[2]
-                visible = int(np.sum(np.mean(z.reshape(-1, C), axis=0) > 0.05))
-                dbg["visible_class_bins"] = float(visible)
-                score += 0.08 * min(1.0, visible / 10.0)
         except OSError:
-            pass
+            z = None
+        if isinstance(z, np.ndarray) and z.ndim == 3:
+            pmax = float(np.mean(np.max(z, axis=2)))
+            pmax = max(0.0, min(1.0, pmax))
+            dbg["mean_max_semantic_prob"] = pmax
+            score += 0.22 * pmax
+
+            C = z.shape[2]
+            visible = int(np.sum(np.mean(z.reshape(-1, C), axis=0) > 0.05))
+            dbg["visible_class_bins"] = float(visible)
+            score += 0.08 * min(1.0, visible / 10.0)
 
     # Phase 2 (sam_2d): observability no longer depends on lines_2d.txt.
     # Prefer rail_centerlines_2d.txt; fallback to rail_centerline.png non-zero ratio.

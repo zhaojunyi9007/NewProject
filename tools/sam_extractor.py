@@ -742,6 +742,30 @@ class FeatureExtractor:
         rail_region = _build_rail_region_from_masks(rail_prob, merged)
         rail_centerline = _skeletonize_binary_mask(rail_region)
         rail_centerlines_2d = _extract_centerline_polylines(rail_centerline, merged)
+        # Filter out spurious short centerline polylines far on the right side of the image.
+        # This helps switch/urban scenes where non-rail edges may be misclassified as rail.
+        try:
+            max_center_u_ratio = float(merged.get("rail_polyline_max_center_u_ratio", 0.85))
+        except Exception:
+            max_center_u_ratio = 0.85
+        min_len_px = int(merged.get("rail_skeleton_min_length_px", 50) or 50)
+        min_span_px = int(merged.get("rail_polyline_min_span_px", 20) or 20)
+        filtered_polys = []
+        for poly in rail_centerlines_2d or []:
+            if not poly:
+                continue
+            us = [p[0] for p in poly]
+            vs = [p[1] for p in poly]
+            u_center = 0.5 * (min(us) + max(us))
+            u_span = max(us) - min(us)
+            v_span = max(vs) - min(vs)
+            too_far_right = u_center > (max_center_u_ratio * w)
+            too_short = len(poly) < min_len_px
+            too_compact = (u_span < min_span_px) and (v_span < min_span_px)
+            if too_far_right and (too_short or too_compact):
+                continue
+            filtered_polys.append(poly)
+        rail_centerlines_2d = filtered_polys
         rail_dist = _build_distance_map_from_centerline(rail_centerline, merged)
         # rail_weight: dilated centerline weighted by rail_prob
         dil_k = int(merged.get("rail_weight_dilate_kernel", 9))

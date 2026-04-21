@@ -152,7 +152,9 @@ def run(context: RuntimeContext) -> None:
         sem_bin = os.path.join(frame_dir, "semantic_probs.edgecalib.bin")
         sem_pts = f"{feature_base}_semantic_points.txt"
         bev_pose = ""
-        if bool(bev_cfg.get("enabled", False)) and context.paths and context.paths.get("bev_init"):
+        # Only pass BEV pose to optimizer when this frame's BEV delta was accepted by the Python BEV stage.
+        # This avoids silently applying pose_after_bev.txt even when rail_score was below threshold.
+        if bool(bev_cfg.get("enabled", False)) and frame_id in bev_by_frame and context.paths and context.paths.get("bev_init"):
             cand = os.path.join(context.paths["bev_init"], f"{frame_id:010d}", "pose_after_bev.txt")
             if os.path.isfile(cand):
                 bev_pose = cand
@@ -180,6 +182,25 @@ def run(context: RuntimeContext) -> None:
             )
 
         if use_sem:
+            # Phase C6: adapt rail weight based on LiDAR rail meta (switch detection / low confidence).
+            effective_rail_weight = float(sem_cfg.get("rail_weight", 1.2))
+            rail_meta_path = f"{feature_base}_rail_meta.json"
+            if os.path.isfile(rail_meta_path):
+                try:
+                    with open(rail_meta_path, "r", encoding="utf-8") as f:
+                        rm = json.load(f)
+                    branch = bool(rm.get("branch_detected", False))
+                    rc = float(rm.get("rail_confidence", 1.0))
+                    min_rc = float(sem_cfg.get("min_rail_confidence_for_weight", 0.5))
+                    if branch or rc < min_rc:
+                        effective_rail_weight = float(sem_cfg.get("branch_rail_weight", 0.0))
+                        print(
+                            f"[Info] 道岔/低置信度轨道（branch={branch}, rail_confidence={rc:.3f} < {min_rc}），"
+                            f"rail_weight 降为 {effective_rail_weight}"
+                        )
+                except (OSError, ValueError, json.JSONDecodeError):
+                    print(f"[Warning] 读取 rail_meta 失败，忽略: {rail_meta_path}")
+
             cmd = [
                 os.path.join(_REPO_ROOT, "build", "optimizer"),
                 "--lidar_feature_base",
@@ -213,7 +234,7 @@ def run(context: RuntimeContext) -> None:
                 "--edge_weight",
                 str(float(sem_cfg.get("edge_weight", 1.0))),
                 "--rail_weight",
-                str(float(sem_cfg.get("rail_weight", 1.2))),
+                str(effective_rail_weight),
                 "--pyramid_scales",
                 pyramid_scales_s,
             ]
