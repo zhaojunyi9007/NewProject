@@ -138,9 +138,18 @@ def run(context: RuntimeContext) -> None:
                 pass
         if os.path.isfile(after_path):
             parsed = _parse_pose_after_bev(after_path)
-            if parsed:
+            min_rail_score = float(bev_cfg.get("min_rail_score_to_apply", 0.01))
+            actual_rail_score = float(breakdown.get("rail_score", 0.0)) if breakdown else 0.0
+            if parsed and actual_rail_score >= min_rail_score:
                 last_pose = parsed
                 context.bev_pose_by_frame[frame_id] = parsed
+                print(f"  [BEV] 帧 {fid} BEV delta 已应用：rail_score={actual_rail_score:.4f} >= {min_rail_score}")
+            else:
+                print(
+                    f"  [BEV] 帧 {fid} BEV delta 被拒绝：rail_score={actual_rail_score:.6f} < "
+                    f"min_rail_score_to_apply={min_rail_score}，保留原始 init_pose"
+                )
+                parsed = None
             write_unified_debug_json(
                 os.path.join(frame_dir, "debug_score_breakdown.json"),
                 stage="bev",
@@ -149,7 +158,12 @@ def run(context: RuntimeContext) -> None:
                 output_pose=parsed,
                 breakdown=breakdown if breakdown else None,
                 elapsed_sec=elapsed,
-                meta={"bev_initializer": os.path.basename(exe)},
+                meta={
+                    "bev_initializer": os.path.basename(exe),
+                    "rail_score": actual_rail_score,
+                    "min_rail_score_to_apply": min_rail_score,
+                    "bev_delta_applied": parsed is not None,
+                },
             )
 
     if last_pose:

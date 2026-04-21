@@ -18,7 +18,6 @@ data:
   image_dir: ""
   velodyne_dir: ""
   calib_file: ""
-  velo_to_cam_file: ""
 
   # 输出目录（独立于 KITTI 的 result/，避免混淆）
   result_dir: "result_osdar23"
@@ -59,8 +58,8 @@ image_features:
   rail_mask_min_area: 500
   rail_close_kernel: 9
   rail_open_kernel: 5
-  rail_top_ignore_ratio: 0.18
-  rail_bottom_keep_ratio: 0.78
+  rail_top_ignore_ratio: 0.05
+  rail_bottom_keep_ratio: 0.95
   rail_component_min_height_ratio: 0.05
   rail_skeleton_min_length_px: 50
   rail_dist_max_ratio: 0.08
@@ -76,6 +75,11 @@ bev:
 
 semantic_calib:
   rail_weight: 1.2
+  # Phase C6: suppress rail term on switch/low-confidence rail extraction frames.
+  # - When LiDAR Phase3 reports branch_detected=true OR rail_confidence < min_rail_confidence_for_weight,
+  #   the optimizer will use branch_rail_weight instead of rail_weight.
+  min_rail_confidence_for_weight: 0.5
+  branch_rail_weight: 0.0
   class_weights:
     rail: 4.0
     ballast: 2.0
@@ -139,14 +143,14 @@ calibration:
     opt_translation: true
     t_prior_weight: 20
     w_consistency: 0.0
-    coarse_angle_range: 0.08
-    coarse_angle_step: 0.04
-    coarse_tx_range: 0.15
-    coarse_tx_step: 0.05
-    coarse_ty_range: 0.20
-    coarse_ty_step: 0.10
-    coarse_tz_range: 0.20
-    coarse_tz_step: 0.10
+    coarse_angle_range: 0.12
+    coarse_angle_step: 0.06
+    coarse_tx_range: 0.30
+    coarse_tx_step: 0.10
+    coarse_ty_range: 0.40
+    coarse_ty_step: 0.20
+    coarse_tz_range: 0.30
+    coarse_tz_step: 0.15
     fine_margin_switch_inimage: 0.15
     fine_margin_low: 4
     fine_margin_high: 12

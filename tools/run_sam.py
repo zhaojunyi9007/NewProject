@@ -61,6 +61,26 @@ def main():
         default="rgb_center",
         help="与 calibration.txt 中 data_folder 一致（默认 rgb_center）",
     )
+    parser.add_argument(
+        "--bev_x_min", type=float, default=0.0,
+        help="BEV 范围 x 最小值 (m)，默认 0.0",
+    )
+    parser.add_argument(
+        "--bev_x_max", type=float, default=100.0,
+        help="BEV 范围 x 最大值 (m)，默认 100.0",
+    )
+    parser.add_argument(
+        "--bev_y_min", type=float, default=-25.0,
+        help="BEV 范围 y 最小值 (m)，默认 -25.0",
+    )
+    parser.add_argument(
+        "--bev_y_max", type=float, default=25.0,
+        help="BEV 范围 y 最大值 (m)，默认 25.0",
+    )
+    parser.add_argument(
+        "--bev_resolution", type=float, default=0.05,
+        help="BEV 分辨率 (m/格)，默认 0.05",
+    )
 
     args = parser.parse_args()
 
@@ -169,9 +189,9 @@ def main():
                 "restrict_lsd_by_semantics": True,
             }
             bev_cfg = {
-                "x_range": [0.0, 80.0],
-                "y_range": [-20.0, 20.0],
-                "resolution": 0.1,
+                "x_range": [args.bev_x_min, args.bev_x_max],
+                "y_range": [args.bev_y_min, args.bev_y_max],
+                "resolution": args.bev_resolution,
             }
             dataset_meta = {"reference_z": 0.0, "semantic_classes": image_features_cfg["semantic_classes"]}
             extractor.process_image_feature_bundle(

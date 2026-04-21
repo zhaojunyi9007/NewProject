@@ -21,7 +21,7 @@ def run(context: RuntimeContext) -> None:
     visual_dir = context.config["data"]["visual_output_dir"]
     calib_file = context.config["data"].get("calib_file", "")
     ds_fmt = str(context.config.get("data", {}).get("dataset_format", "osdar23") or "osdar23").lower()
-    img_sensor = str(context.config.get("data", {}).get("image_sensor", "") or "")
+    img_sensor = str(context.config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
     adapter = get_adapter(context.config)
 
     for frame_id in context.frame_ids:

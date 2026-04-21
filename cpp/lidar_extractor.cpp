@@ -1105,6 +1105,17 @@ int main(int argc, char** argv) {
         std::cout << "  Phase3 lines: rail segments=" << rail_lines.size()
                   << " (confidence=" << rail_confidence << ", branch=" << (rail_branch_detected ? 1 : 0) << ")"
                   << ", poles=" << pole_lines.size() << std::endl;
+
+        // Export rail meta for downstream calibration logic (e.g., suppress rail term on switch/low-confidence frames).
+        // The file name is aligned with other lidar outputs: <output_base>_rail_meta.json
+        {
+            std::ofstream jf(out_base + "_rail_meta.json");
+            if (jf.is_open()) {
+                jf << "{\"rail_confidence\":" << rail_confidence
+                   << ",\"branch_detected\":" << (rail_branch_detected ? "true" : "false")
+                   << ",\"rail_segments\":" << rail_lines.size() << "}";
+            }
+        }
     }
 
     if (!phase3) {

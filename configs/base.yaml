@@ -77,7 +77,10 @@ lidar:
     max_iterations: 30
   temporal_filter:
     enabled: true
+    # 3D 空间位置一致性阈值（单位：m）。越小越严格，会更容易剔除跨帧不一致的点/线。
     position_threshold: 0.5
+    # 投影一致性阈值（单位：m，使用到“投影距离/球面投影”度量的那一路过滤）。
+    # 经验上可与 position_threshold 保持同量级；若轨道/边缘在图像中抖动较大，可适当调大。
     projection_threshold: 0.5
     static_weight: 1.0
     dynamic_weight: 0.1
@@ -204,6 +207,8 @@ bev:
   ty_max_m: 2.0
   trans_step_m: 0.5
   initializer_binary: ""
+  # 低于此 rail_score 时拒绝应用 BEV delta，保留原始 init_pose
+  min_rail_score_to_apply: 0.01
 
 # ========================================
 # 语义概率场标定（默认关闭）
