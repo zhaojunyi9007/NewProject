@@ -183,6 +183,28 @@ image_features:
   rail_skeleton_min_length_px: 40
   rail_dist_max_ratio: 0.08
   rail_weight_dilate_kernel: 9
+  rail_refinement:
+    enabled: true
+    method: "sam_steger_vp"
+    weak_roi_threshold: 0.08
+    steger_sigma: 1.4
+    min_response: 0.03
+    max_subpixel_offset: 0.6
+    clahe_clip_limit: 2.0
+    clahe_tile_grid: 8
+    candidate_connect_kernel: 3
+    min_curve_length_px: 120
+    max_curve_samples: 900
+    min_mean_rail_prob: 0.08
+    vp_angle_thresh_deg: 10.0
+    min_line_count: 2
+    prefer_main_pair: true
+    max_output_lines: 2
+    min_total_length_px: 1200
+    min_quality_score: 0.45
+    fit_poly_degree: 2
+    polyline_sample_step_px: 2.0
+    polyline_clip_pad_px: 4
 
 # ========================================
 # BEV 粗初始化（默认关闭）
@@ -222,6 +244,8 @@ semantic_calib:
   histogram_weight: 0.5
   edge_weight: 1.0
   rail_weight: 1.2
+  min_image_rail_quality: 0.45
+  low_image_rail_quality_weight: 0.0
   anchor_fixed_sampling: true
   direction_aware_yaw_weighting: true
   class_weights:

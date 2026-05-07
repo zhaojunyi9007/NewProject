@@ -60,6 +60,17 @@ def _parse_calib_pose(path: str):
         return None
     return {"rvec": r, "tvec": t}
 
+def _load_json_dict(path: str) -> dict:
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
 
 def run(context: RuntimeContext) -> None:
     print("\n" + "=" * 40)
@@ -184,6 +195,22 @@ def run(context: RuntimeContext) -> None:
         if use_sem:
             # Phase C6: adapt rail weight based on LiDAR rail meta (switch detection / low confidence).
             effective_rail_weight = float(sem_cfg.get("rail_weight", 1.2))
+            min_img_q = float(sem_cfg.get("min_image_rail_quality", 0.45))
+            low_img_weight = float(sem_cfg.get("low_image_rail_quality_weight", sem_cfg.get("branch_rail_weight", 0.0)))
+            rail_quality_path = os.path.join(frame_dir, "rail_quality.json")
+            rail_quality = _load_json_dict(rail_quality_path)
+            if not rail_quality:
+                rail_quality = _load_json_dict(f"{sam_base}_rail_quality.json")
+            if rail_quality:
+                rq_enabled = bool(rail_quality.get("enabled", False))
+                rq_score = float(rail_quality.get("quality_score", 0.0) or 0.0)
+                if (not rq_enabled) or rq_score < min_img_q:
+                    effective_rail_weight = low_img_weight
+                    print(
+                        f"[Info] image rail quality low "
+                        f"(enabled={rq_enabled}, score={rq_score:.3f} < {min_img_q}); "
+                        f"rail_weight={effective_rail_weight}"
+                    )
             rail_meta_path = f"{feature_base}_rail_meta.json"
             if os.path.isfile(rail_meta_path):
                 try:

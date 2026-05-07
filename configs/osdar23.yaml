@@ -64,8 +64,25 @@ image_features:
   rail_skeleton_min_length_px: 50
   rail_dist_max_ratio: 0.08
   rail_weight_dilate_kernel: 11
+  rail_refinement:
+    enabled: true
+    method: "sam_steger_vp"
+    weak_roi_threshold: 0.06
+    steger_sigma: 1.2
+    min_response: 0.025
+    max_subpixel_offset: 0.65
+    clahe_clip_limit: 2.5
+    min_curve_length_px: 160
+    min_mean_rail_prob: 0.06
+    vp_angle_thresh_deg: 12.0
+    min_line_count: 2
+    prefer_main_pair: true
+    max_output_lines: 4
+    min_total_length_px: 1400
+    min_quality_score: 0.42
 
 bev:
+
   x_range: [0.0, 100.0]
   y_range: [-25.0, 25.0]
   z_range: [-1.5, 6.0]
@@ -75,6 +92,8 @@ bev:
 
 semantic_calib:
   rail_weight: 1.2
+  min_image_rail_quality: 0.42
+  low_image_rail_quality_weight: 0.0
   # Phase C6: suppress rail term on switch/low-confidence rail extraction frames.
   # - When LiDAR Phase3 reports branch_detected=true OR rail_confidence < min_rail_confidence_for_weight,
   #   the optimizer will use branch_rail_weight instead of rail_weight.

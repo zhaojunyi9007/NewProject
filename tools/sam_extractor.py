@@ -3,12 +3,14 @@ import cv2
 import torch
 import os
 import sys
+import json
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 
-_tools_dir = os.path.dirname(os.path.abspath(__file__))
+_tools_dir = os.path.dirname(os.path.abspath(__file__))def save_image_feature_bundle
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 from semantic_to_bev import semantic_probs_to_pseudo_bev
+from rail_steger_refiner import refine_rail_lines
 
 # Keep 2D line class_id aligned with cpp/include/common.h: SemanticIdRailway.
 SEM_UNKNOWN = 0
@@ -352,6 +354,16 @@ def _build_distance_map_from_centerline(centerline_u8, config):
     dist = np.clip(dist, 0.0, float(max_dist)) / float(max_dist)
     return dist
 
+def _rasterize_centerline_polylines(polylines, shape):
+    """Rasterize filtered rail polylines back into the centerline mask."""
+    h, w = shape[:2]
+    out = np.zeros((h, w), dtype=np.uint8)
+    for poly in polylines or []:
+        pts = np.array([(int(u), int(v)) for (u, v) in poly if 0 <= int(u) < w and 0 <= int(v) < h], dtype=np.int32)
+        if pts.shape[0] >= 2:
+            cv2.polylines(out, [pts.reshape(-1, 1, 2)], False, 255, 1, cv2.LINE_AA)
+    return out
+
 
 def save_image_feature_bundle(output_dir, bundle, prefix=""):
     """
@@ -389,6 +401,9 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
                 for (u, v) in poly:
                     f.write(f"{pid} {u} {v}\n")
                 f.write("\n")
+    if "rail_quality" in bundle:
+        with open(os.path.join(output_dir, "rail_quality.json"), "w", encoding="utf-8") as f:
+            json.dump(bundle["rail_quality"], f, ensure_ascii=False, indent=2)
     if "pseudo_bev" in bundle and bundle["pseudo_bev"] is not None:
         path = os.path.join(output_dir, "pseudo_bev.npz")
         np.savez_compressed(path, **bundle["pseudo_bev"])
@@ -766,12 +781,46 @@ class FeatureExtractor:
                 continue
             filtered_polys.append(poly)
         rail_centerlines_2d = filtered_polys
+        rail_centerline = _rasterize_centerline_polylines(rail_centerlines_2d, rail_centerline.shape)
         rail_dist = _build_distance_map_from_centerline(rail_centerline, merged)
         # rail_weight: dilated centerline weighted by rail_prob
         dil_k = int(merged.get("rail_weight_dilate_kernel", 9))
         dil_k = max(3, dil_k | 1)
         rail_cl_dil = cv2.dilate(rail_centerline, np.ones((dil_k, dil_k), np.uint8))
         rail_weight = np.clip((rail_cl_dil > 0).astype(np.float32) * rail_prob, 0.0, 1.0)
+
+        rail_quality = {
+            "enabled": True,
+            "method": "legacy_skeleton",
+            "line_count": int(len(rail_centerlines_2d or [])),
+            "total_length_px": float(sum(len(p) for p in (rail_centerlines_2d or []))),
+            "quality_score": 0.5 if rail_centerlines_2d else 0.0,
+            "disable_reason": "" if rail_centerlines_2d else "no_legacy_centerline",
+        }
+
+        ref_cfg = merged.get("rail_refinement", {}) if isinstance(merged.get("rail_refinement", {}), dict) else {}
+        if bool(ref_cfg.get("enabled", False)):
+            try:
+                refined = refine_rail_lines(image, rail_prob, merged)
+                refined_centerline = refined.get("rail_centerline_u8")
+                refined_polys = refined.get("rail_centerlines_2d") or []
+                if refined_centerline is not None and len(refined_polys) > 0:
+                    rail_centerline = refined_centerline.astype(np.uint8)
+                    rail_centerlines_2d = refined_polys
+                    rail_dist = refined.get("rail_dist", rail_dist)
+                    rail_weight = refined.get("rail_weight", rail_weight)
+                rail_quality = refined.get("quality", rail_quality)
+            except Exception as exc:
+                rail_quality = {
+                    "enabled": False,
+                    "method": "steger_sam_roi",
+                    "line_count": int(len(rail_centerlines_2d or [])),
+                    "total_length_px": float(sum(len(p) for p in (rail_centerlines_2d or []))),
+                    "quality_score": 0.0,
+                    "disable_reason": f"rail_refinement_error:{type(exc).__name__}",
+                }
+                print(f"[Warning] rail_refinement failed, fallback to legacy skeleton: {exc}")
+
 
         rail_dist_u16 = (np.clip(rail_dist, 0, 1) * 65535.0).astype(np.uint16)
         rail_weight_u16 = (np.clip(rail_weight, 0, 1) * 65535.0).astype(np.uint16)
@@ -795,6 +844,7 @@ class FeatureExtractor:
             "rail_dist_u16": rail_dist_u16,
             "rail_weight_u16": rail_weight_u16,
             "rail_centerlines_2d": rail_centerlines_2d,
+            "rail_quality": rail_quality,
             "pseudo_bev": pseudo,
         }
         os.makedirs(frame_bundle_dir, exist_ok=True)
@@ -819,6 +869,9 @@ class FeatureExtractor:
                 for (u, v) in poly:
                     f.write(f"{pid} {u} {v}\n")
                 f.write("\n")
+
+        with open(sam_output_base + "_rail_quality.json", "w", encoding="utf-8") as f:
+            json.dump(rail_quality, f, ensure_ascii=False, indent=2)
 
         print(f"[Saved] bundle -> {frame_bundle_dir}")
         print(f"[Saved] optimizer inputs -> {sam_output_base}_*")
