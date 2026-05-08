@@ -92,6 +92,98 @@ def test_lidar_prior_recovers_rails_when_sam_prior_is_weak():
     assert out["rail_weight"].mean() > 0.0
 
 
+def test_label_track_prior_dominates_weak_sam_and_lidar_priors():
+    h, w = 360, 640
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    sam_prior = np.zeros((h, w), dtype=np.float32) + 0.01
+    lidar_prior = np.zeros((h, w), dtype=np.float32)
+    label_prior = np.zeros((h, w), dtype=np.float32)
+
+    left = np.array([[230, 335], [280, 250], [314, 170], [330, 90]], dtype=np.int32)
+    right = np.array([[410, 335], [365, 250], [338, 170], [330, 90]], dtype=np.int32)
+    cv2.polylines(image, [left.reshape(-1, 1, 2), right.reshape(-1, 1, 2)], False, (235, 235, 235), 3)
+    cv2.polylines(label_prior, [left.reshape(-1, 1, 2), right.reshape(-1, 1, 2)], False, 1.0, 31)
+
+    cfg = {
+        "rail_dist_max_ratio": 0.08,
+        "rail_weight_dilate_kernel": 7,
+        "rail_refinement": {
+            "enabled": True,
+            "use_label_track_prior": True,
+            "label_track_prior_weight": 0.80,
+            "use_lidar_bev_prior": True,
+            "lidar_prior_weight": 0.12,
+            "sam_prior_weight": 0.04,
+            "steger_response_weight": 0.04,
+            "candidate_roi_dilate_px": 25,
+            "steger_sigma": 1.0,
+            "min_response": 0.01,
+            "min_curve_length_px": 60,
+            "min_mean_rail_prob": 0.02,
+            "vp_angle_thresh_deg": 20.0,
+            "min_total_length_px": 100,
+            "min_quality_score": 0.2,
+            "max_output_lines": 4,
+        },
+    }
+
+    out = refine_rail_lines(image, sam_prior, cfg, lidar_prior=lidar_prior, label_track_prior=label_prior)
+
+    assert out["quality"]["label_track_prior_used"] is True
+    assert out["quality"]["line_count"] >= 2
+    assert len(out["rail_centerlines_2d"]) >= 2
+    assert out["rail_likelihood"][label_prior > 0].mean() > out["rail_likelihood"][label_prior == 0].mean()
+
+
+def test_label_track_all_lines_are_output_and_locally_refined_by_steger():
+    h, w = 360, 640
+    image = np.zeros((h, w, 3), dtype=np.uint8)
+    sam_prior = np.zeros((h, w), dtype=np.float32) + 0.01
+    label_prior = np.zeros((h, w), dtype=np.float32)
+
+    label_lines = [
+        [(228, 335), (278, 250), (312, 170), (328, 90)],
+        [(412, 335), (367, 250), (340, 170), (332, 90)],
+        [(120, 350), (170, 260), (215, 170), (250, 90)],
+    ]
+    image_lines = [
+        np.array([(x + 6, y) for x, y in line], dtype=np.int32) for line in label_lines
+    ]
+    for pts in image_lines:
+        cv2.polylines(image, [pts.reshape(-1, 1, 2)], False, (235, 235, 235), 3)
+    for line in label_lines:
+        cv2.polylines(label_prior, [np.array(line, dtype=np.int32).reshape(-1, 1, 2)], False, 1.0, 31)
+
+    cfg = {
+        "rail_dist_max_ratio": 0.08,
+        "rail_weight_dilate_kernel": 7,
+        "rail_refinement": {
+            "enabled": True,
+            "use_label_track_prior": True,
+            "label_track_output_lines": "all",
+            "label_track_prior_weight": 0.80,
+            "sam_prior_weight": 0.04,
+            "steger_response_weight": 0.04,
+            "label_track_steger_search_radius_px": 10,
+            "label_track_polyline_sample_step_px": 4,
+            "steger_sigma": 1.0,
+            "min_response": 0.01,
+            "min_mean_rail_prob": 0.02,
+            "vp_angle_thresh_deg": 35.0,
+            "min_total_length_px": 100,
+            "min_quality_score": 0.1,
+        },
+    }
+
+    out = refine_rail_lines(image, sam_prior, cfg, label_track_prior=label_prior, label_track_polylines=label_lines)
+
+    assert out["quality"]["method"] == "label_track_steger_local_all"
+    assert out["quality"]["line_count"] == 3
+    assert out["quality"]["all_line_count"] == 3
+    assert len(out["rail_centerlines_2d"]) == 3
+    assert any(abs(out["rail_centerlines_2d"][0][0][0] - label_lines[0][0][0]) > 0 for _ in [0])
+
+
 def test_missing_lidar_prior_falls_back_to_sam_only():
     h, w = 240, 420
     image = np.zeros((h, w, 3), dtype=np.uint8)

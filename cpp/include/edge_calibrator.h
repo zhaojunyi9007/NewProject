@@ -28,6 +28,7 @@ struct EdgeCalibratorConfig {
     double edge_weight = 1.0;
     // Phase D7 (sam_2d): rail term weight (new).
     double rail_weight = 1.2;
+    int lidar_semantic_max_points = 0;        // 0 means keep all points.
     std::vector<double> class_weights;        // same order as image semantic classes
     std::vector<double> pyramid_scales;       // e.g. 1.0,0.5,0.25
 
@@ -79,6 +80,7 @@ private:
     std::vector<PointFeature> points_;
     std::vector<PointFeature> rail_sample_points_;
     std::vector<Line3D> lines3d_;
+    std::string rail_sample_source_ = "none";
 
     CalibHistory history_;
 

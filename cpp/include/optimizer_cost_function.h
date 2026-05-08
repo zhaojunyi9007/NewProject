@@ -225,3 +225,78 @@ struct SinglePointEdgeCost {
     int W_;
     int H_;
 };
+
+struct WeightedRailEdgeCost {
+    WeightedRailEdgeCost(const PointFeature& pt,
+                         const cv::Mat* dist_map,
+                         const cv::Mat* weight_map,
+                         const Eigen::Matrix3d& R_rect,
+                         const Eigen::Matrix<double, 3, 4>& P_rect,
+                         int W, int H)
+        : pt_(pt), dist_map_(dist_map), weight_map_(weight_map),
+          R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H) {}
+
+    template <typename T>
+    bool operator()(const T* const r, const T* const t, T* residual) const {
+        T p_raw[3] = { T(pt_.p.x()), T(pt_.p.y()), T(pt_.p.z()) };
+        T p_rotated[3];
+        ceres::AngleAxisRotatePoint(r, p_raw, p_rotated);
+
+        Eigen::Matrix<T, 3, 1> p_cam;
+        p_cam.x() = p_rotated[0] + t[0];
+        p_cam.y() = p_rotated[1] + t[1];
+        p_cam.z() = p_rotated[2] + t[2];
+
+        Eigen::Matrix<T, 3, 1> p_rect = R_rect_.cast<T>() * p_cam;
+        if (ScalarValue(p_rect.z()) < 0.1) {
+            residual[0] = T(0.0);
+            return true;
+        }
+
+        Eigen::Matrix<T, 4, 1> p_rect_h;
+        p_rect_h[0] = p_rect.x();
+        p_rect_h[1] = p_rect.y();
+        p_rect_h[2] = p_rect.z();
+        p_rect_h[3] = T(1.0);
+        Eigen::Matrix<T, 3, 1> uv = P_rect_.cast<T>() * p_rect_h;
+
+        T u_f = uv.x() / uv.z();
+        T v_f = uv.y() / uv.z();
+        const double u_scalar = ScalarValue(u_f);
+        const double v_scalar = ScalarValue(v_f);
+        if (u_scalar < 0 || u_scalar >= W_ - 1 || v_scalar < 0 || v_scalar >= H_ - 1) {
+            residual[0] = T(0.0);
+            return true;
+        }
+
+        T dist = T(0.0);
+        if (dist_map_ && !dist_map_->empty()) {
+            dist = BilinearInterpolateT(*dist_map_, u_f, v_f);
+            const double d = ScalarValue(dist);
+            if (d < 0.0) dist = T(0.0);
+            if (d > 1.0) dist = T(1.0);
+        }
+
+        T image_weight = T(1.0);
+        if (weight_map_ && !weight_map_->empty()) {
+            image_weight = BilinearInterpolateT(*weight_map_, u_f, v_f);
+            const double iw = ScalarValue(image_weight);
+            if (iw <= 1e-4 || !std::isfinite(iw)) {
+                residual[0] = T(0.0);
+                return true;
+            }
+            if (iw > 1.0) image_weight = T(1.0);
+        }
+
+        residual[0] = dist * ceres::sqrt(T(std::max(0.0, pt_.weight)) * image_weight);
+        return true;
+    }
+
+    PointFeature pt_;
+    const cv::Mat* dist_map_;
+    const cv::Mat* weight_map_;
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
+    int W_;
+    int H_;
+};

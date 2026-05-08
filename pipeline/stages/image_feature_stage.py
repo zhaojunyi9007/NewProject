@@ -81,6 +81,9 @@ def run(context: RuntimeContext) -> None:
     dataset_meta = {
         "reference_z": reference_z,
         "semantic_classes": list(img_cfg.get("semantic_classes", [])),
+        "dataset_format": str(cfg.get("data", {}).get("dataset_format", "")),
+        "osdar_sequence_root": str(cfg.get("data", {}).get("osdar_sequence_root", "") or ""),
+        "image_sensor": str(cfg.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center"),
     }
 
     for frame_id in context.frame_ids:
@@ -113,6 +116,7 @@ def run(context: RuntimeContext) -> None:
             tvec,
             dataset_meta,
             lidar_bev_path=lidar_bev_path,
+            frame_id=frame_id,
         )
         if not ok:
             print(f"[Warning] 帧 {frame_id:010d} 特征提取失败")

@@ -185,7 +185,10 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
                            const Eigen::Matrix<double, 3, 4>& P_rect,
                            int W, int H,
                            const Eigen::Matrix3d& R,
-                           const Eigen::Vector3d& t) {
+                           const Eigen::Vector3d& t,
+                           bool low_visible_zero,
+                           int* visible_count_out,
+                           bool* low_visible_out) {
     if (dist_map.empty()) return -1e6;
     double total_score = 0.0;
     int visible_count = 0;
@@ -225,7 +228,10 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
     // that get more points into the image, so the coarse search still drives
     // toward better alignment rather than returning an identical sentinel for
     // every candidate.
-    if (visible_count < 50) return -1e5 + visible_count;
+    if (visible_count_out) *visible_count_out = visible_count;
+    const bool low_visible = visible_count < 50;
+    if (low_visible_out) *low_visible_out = low_visible;
+    if (low_visible) return low_visible_zero ? 0.0 : (-1e5 + visible_count);
     return total_score;
 }
 
@@ -273,9 +279,16 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
     // Phase F (sam_2d): rail term (reuses edge attraction score on rail distance/weight maps).
     bd.rail_score_norm = 0.0;
     if (!rail_dist.empty() && !rail_points.empty()) {
-        const double raw = EdgeAttractionScore(rail_points, rail_dist, rail_weight, R_rect, P_rect, W, H, R, t);
+        int rail_visible = 0;
+        bool rail_low_visible = false;
+        const double raw = EdgeAttractionScore(
+            rail_points, rail_dist, rail_weight, R_rect, P_rect, W, H, R, t,
+            true, &rail_visible, &rail_low_visible);
         const double n = static_cast<double>(std::max<size_t>(1, rail_points.size()));
         bd.rail_score_norm = raw / n;
+        bd.rail_sample_count = static_cast<double>(rail_points.size());
+        bd.rail_visible_count = static_cast<double>(rail_visible);
+        bd.rail_low_visible_fallback = rail_low_visible ? 1.0 : 0.0;
     }
 
     bd.edge_score = w_edge * bd.edge_score_norm;

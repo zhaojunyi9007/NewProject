@@ -116,6 +116,22 @@ bool EdgeCalibrator::LoadData() {
         if (LoadSemanticProbabilityMaps(config_.semantic_probs_path, semantic_probs_) &&
             LoadSemanticPoints(config_.lidar_semantic_points_path, semantic_points_) &&
             !semantic_probs_.empty() && !semantic_points_.empty()) {
+            const int max_semantic_points = config_.lidar_semantic_max_points;
+            if (max_semantic_points > 0 &&
+                semantic_points_.size() > static_cast<size_t>(max_semantic_points)) {
+                const size_t step =
+                    (semantic_points_.size() + static_cast<size_t>(max_semantic_points) - 1) /
+                    static_cast<size_t>(max_semantic_points);
+                std::vector<SemanticPointRecord> sampled;
+                sampled.reserve(static_cast<size_t>(max_semantic_points));
+                for (size_t i = 0; i < semantic_points_.size(); i += step) {
+                    sampled.push_back(semantic_points_[i]);
+                }
+                std::cout << "[Info] Downsample LiDAR semantic points for optimizer scoring: "
+                          << semantic_points_.size() << " -> " << sampled.size()
+                          << " (max=" << max_semantic_points << ")" << std::endl;
+                semantic_points_.swap(sampled);
+            }
             semantic_inputs_ready_ = true;
             std::cout << "[Info] Semantic inputs ready: probs=" << semantic_probs_.W << "x" << semantic_probs_.H
                       << "x" << semantic_probs_.C << ", points=" << semantic_points_.size() << std::endl;
@@ -136,6 +152,40 @@ bool EdgeCalibrator::LoadData() {
 
 void EdgeCalibrator::BuildRailSamplePoints() {
     rail_sample_points_.clear();
+    rail_sample_source_ = "lines3d";
+    {
+        std::ifstream f(config_.lidar_base + "_rail_bev_points.txt");
+        if (f.is_open()) {
+            double x = 0.0, y = 0.0, z = 0.0, conf = 0.0;
+            std::string first;
+            while (f >> first) {
+                if (!first.empty() && first[0] == '#') {
+                    std::string rest;
+                    std::getline(f, rest);
+                    continue;
+                }
+                try {
+                    x = std::stod(first);
+                } catch (...) {
+                    std::string rest;
+                    std::getline(f, rest);
+                    continue;
+                }
+                if (!(f >> y >> z >> conf)) break;
+                PointFeature pf;
+                pf.p = Eigen::Vector3d(x, y, z);
+                pf.intensity = 0.0f;
+                pf.normal = Eigen::Vector3d(0, 0, 0);
+                pf.label = LABEL_UNKNOWN;
+                pf.weight = std::max(0.0, std::min(1.0, conf));
+                rail_sample_points_.push_back(pf);
+            }
+            if (!rail_sample_points_.empty()) {
+                rail_sample_source_ = "bev_points";
+                return;
+            }
+        }
+    }
     constexpr double kStepM = 0.25;  // Phase 4 default sampling interval.
     for (const auto& l : lines3d_) {
         if (!(l.class_id == SEM_RAIL_LIKE || l.type == 0)) {
@@ -443,12 +493,17 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     if (!rail_sample_points_.empty() && !rail_dist_.empty()) {
         const int rail_stride = std::max<int>(1, static_cast<int>(rail_sample_points_.size() / 5000));
         for (size_t i = 0; i < rail_sample_points_.size(); i += rail_stride) {
-            auto* rail_cost = new SinglePointEdgeCost(rail_sample_points_[i], &rail_dist_, R_rect_, P_rect_, W_, H_);
-            problem.AddResidualBlock(new ceres::AutoDiffCostFunction<SinglePointEdgeCost, 1, 3, 3>(rail_cost),
+            auto* rail_cost = new WeightedRailEdgeCost(
+                rail_sample_points_[i],
+                &rail_dist_,
+                rail_weight_.empty() ? nullptr : &rail_weight_,
+                R_rect_, P_rect_, W_, H_);
+            problem.AddResidualBlock(new ceres::AutoDiffCostFunction<WeightedRailEdgeCost, 1, 3, 3>(rail_cost),
                                      new ceres::HuberLoss(0.05), r_curr_, t_curr_);
         }
         std::cout << "[Debug][Fine] Added rail residuals: points=" << rail_sample_points_.size()
-                  << " stride=" << rail_stride << std::endl;
+                  << " stride=" << rail_stride
+                  << " source=" << rail_sample_source_ << std::endl;
     } else {
         std::cout << "[Debug][Fine] Skip rail residuals (rail_sample_points or rail_dist empty)." << std::endl;
     }
@@ -585,6 +640,10 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "edge_term_norm: " << last_score_breakdown_.edge_score_norm << "\n";
     // Phase 7 (sam_2d): rail term replaces line term in exported breakdown.
     result_file << "rail_term_norm: " << last_score_breakdown_.rail_score_norm << "\n";
+    result_file << "rail_sample_source: " << rail_sample_source_ << "\n";
+    result_file << "rail_sample_count: " << last_score_breakdown_.rail_sample_count << "\n";
+    result_file << "rail_visible_count: " << last_score_breakdown_.rail_visible_count << "\n";
+    result_file << "rail_low_visible_fallback: " << last_score_breakdown_.rail_low_visible_fallback << "\n";
     // Phase C5: unified confidences inferred from extracted line confidences.
     result_file << "rail_confidence: " << last_score_breakdown_.rail_confidence << "\n";
     result_file << "vertical_structure_confidence: " << last_score_breakdown_.vertical_structure_confidence << "\n";

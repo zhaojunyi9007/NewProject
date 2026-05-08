@@ -127,6 +127,9 @@ struct ScoreBreakdown {
     // Phase A3 keys (observability-related)
     double rail_confidence = 0.0;
     double vertical_structure_confidence = 0.0;
+    double rail_sample_count = 0.0;
+    double rail_visible_count = 0.0;
+    double rail_low_visible_fallback = 0.0;
 
     double total_score = 0.0;
 };

@@ -60,6 +60,7 @@ def _parse_calib_pose(path: str):
         return None
     return {"rvec": r, "tvec": t}
 
+
 def _load_json_dict(path: str) -> dict:
     if not path or not os.path.isfile(path):
         return {}
@@ -69,7 +70,6 @@ def _load_json_dict(path: str) -> dict:
         return obj if isinstance(obj, dict) else {}
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
-
 
 
 def run(context: RuntimeContext) -> None:
@@ -135,6 +135,7 @@ def run(context: RuntimeContext) -> None:
     sys.path.insert(0, os.path.join(_REPO_ROOT, "tools"))
     from score_breakdown_io import write_unified_debug_json  # noqa: E402
     from export_semantic_probs_bin import npy_to_edgecalib_bin  # noqa: E402
+    from lidar_bev_rail_points import export_lidar_bev_rail_points  # noqa: E402
 
     for frame_id in context.frame_ids:
         feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
@@ -193,6 +194,24 @@ def run(context: RuntimeContext) -> None:
             )
 
         if use_sem:
+            bev_rail_points = f"{feature_base}_rail_bev_points.txt"
+            bev_rail_count = 0
+            if bool(sem_cfg.get("use_lidar_bev_rail_samples", False)):
+                bev_npz = f"{feature_base}_bev_maps.npz"
+                if os.path.isfile(bev_npz):
+                    try:
+                        bev_rail_count = export_lidar_bev_rail_points(
+                            bev_npz,
+                            bev_rail_points,
+                            min_prob=float(sem_cfg.get("lidar_bev_rail_sample_min_prob", 0.15)),
+                            stride_cells=int(sem_cfg.get("lidar_bev_rail_sample_stride_cells", 2)),
+                            max_points=int(sem_cfg.get("lidar_bev_rail_sample_max_points", 8000)),
+                            reference_z=float((context.config.get("dataset") or {}).get("reference_z", 0.0)),
+                        )
+                        print(f"[Info] Exported LiDAR BEV rail samples: {bev_rail_count} -> {bev_rail_points}")
+                    except Exception as exc:
+                        print(f"[Warning] Export LiDAR BEV rail samples failed: {type(exc).__name__}: {exc}")
+
             # Phase C6: adapt rail weight based on LiDAR rail meta (switch detection / low confidence).
             effective_rail_weight = float(sem_cfg.get("rail_weight", 1.2))
             min_img_q = float(sem_cfg.get("min_image_rail_quality", 0.45))
@@ -204,6 +223,7 @@ def run(context: RuntimeContext) -> None:
             if rail_quality:
                 rq_enabled = bool(rail_quality.get("enabled", False))
                 rq_score = float(rail_quality.get("quality_score", 0.0) or 0.0)
+                oracle_rail = bool(rail_quality.get("label_track_prior_used", False)) and rq_enabled and rq_score >= min_img_q
                 if (not rq_enabled) or rq_score < min_img_q:
                     effective_rail_weight = low_img_weight
                     print(
@@ -211,6 +231,21 @@ def run(context: RuntimeContext) -> None:
                         f"(enabled={rq_enabled}, score={rq_score:.3f} < {min_img_q}); "
                         f"rail_weight={effective_rail_weight}"
                     )
+                elif oracle_rail:
+                    min_samples = int(sem_cfg.get("min_lidar_bev_rail_samples", 200))
+                    if bev_rail_count >= min_samples:
+                        effective_rail_weight = float(sem_cfg.get("oracle_rail_weight", effective_rail_weight))
+                    else:
+                        effective_rail_weight = float(sem_cfg.get("oracle_rail_weight_fallback", 0.2))
+                    print(
+                        f"[Info] JSON oracle rail enabled "
+                        f"(score={rq_score:.3f}, bev_samples={bev_rail_count}); "
+                        f"rail_weight={effective_rail_weight}"
+                    )
+                else:
+                    oracle_rail = False
+            else:
+                oracle_rail = False
             rail_meta_path = f"{feature_base}_rail_meta.json"
             if os.path.isfile(rail_meta_path):
                 try:
@@ -219,7 +254,7 @@ def run(context: RuntimeContext) -> None:
                     branch = bool(rm.get("branch_detected", False))
                     rc = float(rm.get("rail_confidence", 1.0))
                     min_rc = float(sem_cfg.get("min_rail_confidence_for_weight", 0.5))
-                    if branch or rc < min_rc:
+                    if (not oracle_rail) and (branch or rc < min_rc):
                         effective_rail_weight = float(sem_cfg.get("branch_rail_weight", 0.0))
                         print(
                             f"[Info] 道岔/低置信度轨道（branch={branch}, rail_confidence={rc:.3f} < {min_rc}），"
@@ -262,6 +297,8 @@ def run(context: RuntimeContext) -> None:
                 str(float(sem_cfg.get("edge_weight", 1.0))),
                 "--rail_weight",
                 str(effective_rail_weight),
+                "--lidar_semantic_max_points",
+                str(int(sem_cfg.get("lidar_semantic_max_points", 12000))),
                 "--pyramid_scales",
                 pyramid_scales_s,
             ]

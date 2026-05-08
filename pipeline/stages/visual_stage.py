@@ -11,6 +11,35 @@ from pipeline.datasets import get_adapter
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+def _read_calib_pose(path: str):
+    kv: dict[str, str] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s:
+                continue
+            if ":" in s:
+                k, v = s.split(":", 1)
+                kv[k.strip()] = v.strip()
+    if "r" not in kv or "t" not in kv:
+        return None
+    r_vec = kv["r"].split()
+    t_vec = kv["t"].split()
+    return (r_vec, t_vec) if len(r_vec) == 3 and len(t_vec) == 3 else None
+
+
+def _read_window_pose(path: str):
+    nums = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            for part in s.split():
+                nums.append(part)
+    return (nums[:3], nums[3:6]) if len(nums) >= 6 else None
+
+
 def run(context: RuntimeContext) -> None:
     print("\n" + "=" * 40)
     print("[阶段4] 结果可视化")
@@ -38,25 +67,25 @@ def run(context: RuntimeContext) -> None:
             print(f"[Warning] 标定结果不存在，跳过帧 {frame_id:010d}")
             continue
 
-        kv: dict[str, str] = {}
-        with open(calib_result_file, "r", encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if not s:
-                    continue
-                if ":" in s:
-                    k, v = s.split(":", 1)
-                    kv[k.strip()] = v.strip()
-        if "r" not in kv or "t" not in kv:
+        pose_source = str((context.config.get("visualization") or {}).get("pose_source", "refined") or "refined")
+        pose = None
+        used_pose_source = "calibration"
+        if pose_source == "refined":
+            ref_root = (context.paths or {}).get("refinement") or context.config["data"].get("refinement_output_dir", "")
+            refined_pose = os.path.join(ref_root, f"{frame_id:010d}_window_pose.txt")
+            if os.path.isfile(refined_pose):
+                pose = _read_window_pose(refined_pose)
+                used_pose_source = "refined"
+        if pose is None:
+            pose = _read_calib_pose(calib_result_file)
+            used_pose_source = "calibration"
+        if pose is None:
             print(f"[Warning] 标定结果格式异常(缺少 r/t)，跳过帧 {frame_id:010d}: {calib_result_file}")
             continue
-        r_vec = kv["r"].split()
-        t_vec = kv["t"].split()
-        if len(r_vec) != 3 or len(t_vec) != 3:
-            print(f"[Warning] 标定结果格式异常(R/T维度错误)，跳过帧 {frame_id:010d}: {calib_result_file}")
-            continue
+        r_vec, t_vec = pose
 
         print(f"可视化帧 {frame_id:010d}...")
+        print(f"  visualization_pose_source={used_pose_source}")
         print(f"  logical_frame_id={frame_id:010d}")
         print(f"  source_image={img_path}")
         print(f"  feature_base={feature_base}")

@@ -47,6 +47,7 @@ def _steger_candidate_map(
     rail_prob: np.ndarray,
     config: Dict[str, Any],
     lidar_prior: np.ndarray | None = None,
+    label_track_prior: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Approximate Steger line response from Hessian eigen structure.
 
@@ -94,6 +95,12 @@ def _steger_candidate_map(
         lidar_prior01 = np.clip(lidar_prior.astype(np.float32), 0.0, 1.0)
         if lidar_prior01.shape[:2] != (h, w):
             lidar_prior01 = cv2.resize(lidar_prior01, (w, h), interpolation=cv2.INTER_LINEAR)
+    use_label_prior = label_track_prior is not None and bool(_cfg(config, "use_label_track_prior", False))
+    label_prior01 = None
+    if use_label_prior:
+        label_prior01 = np.clip(label_track_prior.astype(np.float32), 0.0, 1.0)
+        if label_prior01.shape[:2] != (h, w):
+            label_prior01 = cv2.resize(label_prior01, (w, h), interpolation=cv2.INTER_LINEAR)
 
     weak_roi_th = float(_cfg(config, "weak_roi_threshold", 0.08))
     top_ignore = float(_cfg(config, "rail_top_ignore_ratio", 0.05))
@@ -105,21 +112,32 @@ def _steger_candidate_map(
         roi[int(h * bottom_keep) :, :] = False
 
     response = _normalize01(np.abs(lam))
+    label_w = float(_cfg(config, "label_track_prior_weight", 0.0)) if label_prior01 is not None else 0.0
     lidar_w = float(_cfg(config, "lidar_prior_weight", 0.0)) if lidar_prior01 is not None else 0.0
     sam_w = float(_cfg(config, "sam_prior_weight", 1.0))
     resp_w = float(_cfg(config, "steger_response_weight", 0.0))
-    wsum = max(1e-6, lidar_w + sam_w + resp_w)
+    wsum = max(1e-6, label_w + lidar_w + sam_w + resp_w)
     rail_likelihood = (sam_w * sam_prior + resp_w * response) / wsum
-    if lidar_prior01 is not None:
-        rail_likelihood = rail_likelihood + (lidar_w * lidar_prior01) / wsum
-        prior_th = float(_cfg(config, "lidar_prior_roi_threshold", 1e-4))
-        support = lidar_prior01 > prior_th
-        dilate_px = int(_cfg(config, "candidate_roi_dilate_px", 45))
+    if label_prior01 is not None:
+        rail_likelihood = rail_likelihood + (label_w * label_prior01) / wsum
+        prior_th = float(_cfg(config, "label_track_prior_roi_threshold", 1e-4))
+        support = label_prior01 > prior_th
+        dilate_px = int(_cfg(config, "label_track_roi_dilate_px", _cfg(config, "candidate_roi_dilate_px", 45)))
         if dilate_px > 1:
             k = max(3, dilate_px | 1)
             support = cv2.dilate(support.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
         roi &= support
-    else:
+    if lidar_prior01 is not None:
+        rail_likelihood = rail_likelihood + (lidar_w * lidar_prior01) / wsum
+        if label_prior01 is None:
+            prior_th = float(_cfg(config, "lidar_prior_roi_threshold", 1e-4))
+            support = lidar_prior01 > prior_th
+            dilate_px = int(_cfg(config, "candidate_roi_dilate_px", 45))
+            if dilate_px > 1:
+                k = max(3, dilate_px | 1)
+                support = cv2.dilate(support.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+            roi &= support
+    if label_prior01 is None and lidar_prior01 is None:
         roi &= sam_prior >= weak_roi_th
 
     rail_likelihood = np.clip(rail_likelihood, 0.0, 1.0)
@@ -134,7 +152,10 @@ def _steger_candidate_map(
     x2 = np.clip(np.rint(xx - nx).astype(np.int32), 0, w - 1)
     y2 = np.clip(np.rint(yy - ny).astype(np.int32), 0, h - 1)
     nms = (weighted_response >= weighted_response[y1, x1]) & (weighted_response >= weighted_response[y2, x2])
-    if lidar_prior01 is not None:
+    if label_prior01 is not None:
+        strong_prior = label_prior01 >= float(_cfg(config, "label_track_keep_threshold", 0.10))
+        mask = candidate_core & (nms | strong_prior)
+    elif lidar_prior01 is not None:
         # A projected BEV prior is already spatially selective; keep strong
         # candidates inside it even when pixel-grid NMS breaks long rails into
         # isolated samples.
@@ -302,6 +323,96 @@ def _rasterize_polylines(polylines: Sequence[Sequence[Point]], shape: Tuple[int,
     return out
 
 
+def _densify_polyline(poly: Sequence[Point], step_px: float) -> List[Point]:
+    pts = np.asarray(poly, dtype=np.float32)
+    if pts.shape[0] < 2:
+        return [(int(round(x)), int(round(y))) for x, y in pts]
+    step = max(1.0, float(step_px))
+    out: List[Point] = []
+    for a, b in zip(pts[:-1], pts[1:]):
+        dist = float(np.linalg.norm(b - a))
+        n = max(2, int(math.ceil(dist / step)) + 1)
+        for t in np.linspace(0.0, 1.0, n, dtype=np.float32)[:-1]:
+            p = a * (1.0 - t) + b * t
+            out.append((int(round(float(p[0]))), int(round(float(p[1])))))
+    out.append((int(round(float(pts[-1, 0]))), int(round(float(pts[-1, 1])))))
+    dedup: List[Point] = []
+    for p in out:
+        if not dedup or p != dedup[-1]:
+            dedup.append(p)
+    return dedup
+
+
+def _refine_label_polylines_with_steger(
+    label_polylines: Sequence[Sequence[Point]],
+    response: np.ndarray,
+    rail_likelihood: np.ndarray,
+    config: Dict[str, Any],
+) -> List[List[Point]]:
+    h, w = response.shape[:2]
+    radius = max(0, int(_cfg(config, "label_track_steger_search_radius_px", 10)))
+    step = float(_cfg(config, "label_track_polyline_sample_step_px", 3.0))
+    min_score = float(_cfg(config, "label_track_steger_min_score", 0.0))
+    score_map = response.astype(np.float32) * (0.2 + 0.8 * np.clip(rail_likelihood.astype(np.float32), 0.0, 1.0))
+    out: List[List[Point]] = []
+    for poly in label_polylines or []:
+        dense = _densify_polyline(poly, step)
+        refined: List[Point] = []
+        for x0, y0 in dense:
+            if not (0 <= x0 < w and 0 <= y0 < h):
+                refined.append((int(x0), int(y0)))
+                continue
+            if radius <= 0:
+                refined.append((int(x0), int(y0)))
+                continue
+            x1, x2 = max(0, x0 - radius), min(w, x0 + radius + 1)
+            y1, y2 = max(0, y0 - radius), min(h, y0 + radius + 1)
+            patch = score_map[y1:y2, x1:x2]
+            if patch.size == 0 or float(np.max(patch)) < min_score:
+                refined.append((int(x0), int(y0)))
+                continue
+            yy, xx = np.unravel_index(int(np.argmax(patch)), patch.shape)
+            refined.append((int(x1 + xx), int(y1 + yy)))
+        clean: List[Point] = []
+        for p in refined:
+            if -2 <= p[0] < w + 2 and -2 <= p[1] < h + 2 and (not clean or p != clean[-1]):
+                clean.append(p)
+        if len(clean) >= 2:
+            out.append(clean)
+    return out
+
+
+def _curves_from_polylines(
+    polylines: Sequence[Sequence[Point]],
+    response: np.ndarray,
+    rail_likelihood: np.ndarray,
+) -> List[Dict[str, Any]]:
+    h, w = response.shape[:2]
+    curves: List[Dict[str, Any]] = []
+    for poly in polylines or []:
+        pts = np.asarray(poly, dtype=np.float32)
+        if pts.shape[0] < 2:
+            continue
+        xi = np.clip(np.rint(pts[:, 0]).astype(np.int32), 0, w - 1)
+        yi = np.clip(np.rint(pts[:, 1]).astype(np.int32), 0, h - 1)
+        curves.append(
+            {
+                "points": pts,
+                "length": float(_polyline_path_length(poly)),
+                "mean_response": float(np.mean(response[yi, xi])) if xi.size else 0.0,
+                "mean_rail_prob": float(np.mean(rail_likelihood[yi, xi])) if xi.size else 0.0,
+            }
+        )
+    return curves
+
+
+def _polyline_path_length(poly: Sequence[Point]) -> float:
+    pts = np.asarray(poly, dtype=np.float32)
+    if pts.shape[0] < 2:
+        return 0.0
+    return float(np.sum(np.linalg.norm(pts[1:] - pts[:-1], axis=1)))
+
+
 def _distance_map(centerline_u8: np.ndarray, max_ratio: float) -> np.ndarray:
     h, w = centerline_u8.shape[:2]
     max_dist = max(1.0, max(h, w) * float(max_ratio))
@@ -459,15 +570,23 @@ def refine_rail_lines(
     rail_prob: np.ndarray,
     config: Dict[str, Any],
     lidar_prior: np.ndarray | None = None,
+    label_track_prior: np.ndarray | None = None,
+    label_track_polylines: Sequence[Sequence[Point]] | None = None,
 ) -> Dict[str, Any]:
     h, w = rail_prob.shape[:2]
     lidar_prior_used = lidar_prior is not None and bool(_cfg(config, "use_lidar_bev_prior", False))
-    method = "lidar_bev_sam_steger_vp_gauge" if lidar_prior_used else "steger_sam_roi"
+    label_track_prior_used = label_track_prior is not None and bool(_cfg(config, "use_label_track_prior", False))
+    if label_track_prior_used:
+        method = "label_track_lidar_bev_sam_steger_vp_gauge"
+    else:
+        method = "lidar_bev_sam_steger_vp_gauge" if lidar_prior_used else "steger_sam_roi"
     enabled = bool(_cfg(config, "enabled", True))
     if not enabled:
         quality = {
             "enabled": False,
             "method": method,
+            "lidar_prior_used": bool(lidar_prior_used),
+            "label_track_prior_used": bool(label_track_prior_used),
             "line_count": 0,
             "total_length_px": 0.0,
             "quality_score": 0.0,
@@ -482,9 +601,91 @@ def refine_rail_lines(
         }
 
     gray = _enhance_gray(image_bgr, config)
-    candidate_mask, response, rail_likelihood = _steger_candidate_map(gray, rail_prob, config, lidar_prior=lidar_prior)
+    candidate_mask, response, rail_likelihood = _steger_candidate_map(
+        gray,
+        rail_prob,
+        config,
+        lidar_prior=lidar_prior,
+        label_track_prior=label_track_prior,
+    )
     curves = _component_curves(candidate_mask, response, rail_likelihood, config)
     vp, vp_ratio = _estimate_vanishing_point(curves, (h, w), config)
+
+    if label_track_prior_used and label_track_polylines and str(_cfg(config, "label_track_output_lines", "all")).lower() == "all":
+        polylines = _refine_label_polylines_with_steger(label_track_polylines, response, rail_likelihood, config)
+        label_curves = _curves_from_polylines(polylines, response, rail_likelihood)
+        vp, vp_ratio = _estimate_vanishing_point(label_curves, (h, w), config)
+        pair_info = {"pair_score": 0.0, "gauge_median_m": None, "gauge_error_m": None}
+        if bool(_cfg(config, "label_track_main_pair_for_quality", True)) and len(label_curves) >= 2:
+            _, pair_info = _select_main_pair(label_curves, vp, config)
+        centerline = _rasterize_polylines(polylines, (h, w))
+        dist = _distance_map(centerline, float(config.get("rail_dist_max_ratio", 0.08)))
+
+        dil_k = int(config.get("rail_weight_dilate_kernel", _cfg(config, "rail_weight_dilate_kernel", 9)))
+        dil_k = max(3, dil_k | 1)
+        dil = cv2.dilate(centerline, np.ones((dil_k, dil_k), np.uint8))
+        resp_blur = cv2.GaussianBlur(response, (0, 0), sigmaX=1.0)
+        weight = (dil > 0).astype(np.float32) * resp_blur * (0.3 + 0.7 * np.clip(rail_likelihood, 0.0, 1.0))
+        weight = np.clip(weight, 0.0, 1.0)
+
+        total_length = float(sum(_polyline_path_length(poly) for poly in polylines if len(poly) >= 2))
+        mean_resp = float(np.mean([c["mean_response"] for c in label_curves])) if label_curves else 0.0
+        mean_prob = float(np.mean([c["mean_rail_prob"] for c in label_curves])) if label_curves else 0.0
+        rail_dist_valid_ratio = float(np.mean(dist < 0.1)) if dist.size else 0.0
+        rail_weight_valid_ratio = float(np.mean(weight > 1e-4)) if weight.size else 0.0
+
+        min_lines = int(_cfg(config, "min_line_count", 2))
+        min_length = float(_cfg(config, "min_total_length_px", 1200.0))
+        min_quality = float(_cfg(config, "min_quality_score", 0.45))
+        score = 0.0
+        score += min(1.0, len(polylines) / max(1, min_lines)) * 0.25
+        score += min(1.0, total_length / max(1.0, min_length)) * 0.25
+        score += min(1.0, vp_ratio / 0.4) * 0.20
+        score += min(1.0, mean_resp / 0.20) * 0.15
+        score += min(1.0, mean_prob / max(0.02, float(_cfg(config, "min_mean_rail_prob", 0.08)))) * 0.15
+        score = float(np.clip(score, 0.0, 1.0))
+
+        reasons = []
+        if len(polylines) < min_lines:
+            reasons.append("line_count_low")
+        if total_length < min_length:
+            reasons.append("total_length_low")
+        gauge_err = pair_info.get("gauge_error_m")
+        if gauge_err is not None and gauge_err > float(_cfg(config, "track_gauge_tolerance_m", 0.45)):
+            reasons.append("gauge_error_high")
+        if score < min_quality:
+            reasons.append("quality_score_low")
+
+        quality = {
+            "enabled": not reasons,
+            "method": "label_track_steger_local_all",
+            "lidar_prior_used": bool(lidar_prior_used),
+            "label_track_prior_used": True,
+            "line_count": int(len(polylines)),
+            "all_line_count": int(len(polylines)),
+            "total_length_px": float(total_length),
+            "mean_response": float(mean_resp),
+            "mean_rail_prob_on_lines": float(mean_prob),
+            "vanishing_point": None if vp is None else [float(vp[0]), float(vp[1])],
+            "vp_inlier_ratio": float(vp_ratio),
+            "pair_score": float(pair_info.get("pair_score", 0.0) or 0.0),
+            "gauge_median_m": pair_info.get("gauge_median_m"),
+            "gauge_error_m": pair_info.get("gauge_error_m"),
+            "rail_dist_valid_ratio": float(rail_dist_valid_ratio),
+            "rail_weight_valid_ratio": float(rail_weight_valid_ratio),
+            "quality_score": float(score),
+            "disable_reason": ",".join(reasons),
+        }
+        return {
+            "rail_centerline_u8": centerline,
+            "rail_centerlines_2d": polylines,
+            "rail_dist": dist.astype(np.float32),
+            "rail_weight": weight.astype(np.float32),
+            "quality": quality,
+            "candidate_mask": (candidate_mask * 255).astype(np.uint8),
+            "response": response.astype(np.float32),
+            "rail_likelihood": rail_likelihood.astype(np.float32),
+        }
 
     angle_th = float(_cfg(config, "vp_angle_thresh_deg", 10.0))
     min_prob = float(_cfg(config, "min_mean_rail_prob", 0.08))
@@ -545,6 +746,7 @@ def refine_rail_lines(
         "enabled": bool(enabled_out),
         "method": method,
         "lidar_prior_used": bool(lidar_prior_used),
+        "label_track_prior_used": bool(label_track_prior_used),
         "line_count": int(len(polylines)),
         "total_length_px": float(total_length),
         "mean_response": float(mean_resp),

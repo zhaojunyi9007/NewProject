@@ -262,6 +262,83 @@ def _project_lidar_bev_rail_prior(lidar_bev_path, image_shape, intrinsics, rvec,
     return np.clip(prior, 0.0, 1.0)
 
 
+def _find_osdar_openlabel_json(sequence_root):
+    if not sequence_root:
+        return None
+    expected = os.path.join(sequence_root, f"{os.path.basename(sequence_root)}_labels.json")
+    if os.path.isfile(expected):
+        return expected
+    try:
+        for name in sorted(os.listdir(sequence_root)):
+            if name.endswith("_labels.json") or name.endswith("labels.json"):
+                path = os.path.join(sequence_root, name)
+                if os.path.isfile(path):
+                    return path
+    except OSError:
+        return None
+    return None
+
+
+def build_osdar_label_track_prior(image_shape, label_path, frame_id, image_sensor, config):
+    """Rasterize OSDaR23 OpenLABEL track poly2d annotations into a soft prior."""
+    ref_cfg = config.get("rail_refinement", {}) if isinstance(config.get("rail_refinement", {}), dict) else {}
+    if not bool(ref_cfg.get("use_label_track_prior", False)):
+        return None, {"label_track_prior_used": False, "label_track_valid_ratio": 0.0, "label_track_polyline_count": 0}, []
+    if not label_path or frame_id is None or not os.path.isfile(label_path):
+        return None, {"label_track_prior_used": False, "label_track_valid_ratio": 0.0, "label_track_polyline_count": 0}, []
+
+    h, w = image_shape[:2]
+    image_sensor = str(image_sensor or "rgb_center")
+    try:
+        root = json.load(open(label_path, "r", encoding="utf-8")).get("openlabel", {})
+        objects = root.get("objects", {})
+        frame = root.get("frames", {}).get(str(int(frame_id)), {})
+    except (OSError, ValueError, TypeError):
+        return None, {"label_track_prior_used": False, "label_track_valid_ratio": 0.0, "label_track_polyline_count": 0}, []
+
+    frame_objects = frame.get("objects", {}) if isinstance(frame, dict) else {}
+    mask = np.zeros((h, w), dtype=np.uint8)
+    thickness = max(1, int(ref_cfg.get("label_track_dilate_px", 31)))
+    poly_count = 0
+    polylines = []
+    for oid, frame_obj in frame_objects.items():
+        if objects.get(oid, {}).get("type") != "track":
+            continue
+        for poly in frame_obj.get("object_data", {}).get("poly2d", []) or []:
+            name = str(poly.get("name", ""))
+            coord = str(poly.get("coordinate_system", ""))
+            if coord != image_sensor and not name.startswith(f"{image_sensor}__poly2d__track"):
+                continue
+            vals = poly.get("val", [])
+            if len(vals) < 4 or len(vals) % 2 != 0:
+                continue
+            pts = np.asarray(vals, dtype=np.float32).reshape(-1, 2)
+            pts_i = np.rint(pts).astype(np.int32)
+            if pts_i.shape[0] < 2:
+                continue
+            cv2.polylines(mask, [pts_i.reshape(-1, 1, 2)], False, 255, thickness, cv2.LINE_AA)
+            polylines.append([(int(x), int(y)) for x, y in pts_i.tolist()])
+            poly_count += 1
+
+    valid_ratio = float(np.mean(mask > 0)) if mask.size else 0.0
+    stats = {
+        "label_track_prior_used": False,
+        "label_track_valid_ratio": float(valid_ratio),
+        "label_track_polyline_count": int(poly_count),
+    }
+    min_ratio = float(ref_cfg.get("label_track_min_valid_ratio", 0.0001))
+    if poly_count <= 0 or valid_ratio < min_ratio:
+        return None, stats, []
+
+    prior = mask.astype(np.float32) / 255.0
+    sigma = float(ref_cfg.get("label_track_blur_sigma_px", 7.0))
+    if sigma > 0:
+        prior = cv2.GaussianBlur(prior, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    prior = np.clip(prior, 0.0, 1.0)
+    stats["label_track_prior_used"] = True
+    return prior.astype(np.float32), stats, polylines
+
+
 def _build_rail_region_from_masks(rail_prob, config):
     """
     Build a binary rail region mask from rail_prob using seed/support thresholds + morphology + CC filtering.
@@ -463,6 +540,8 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
         cv2.imwrite(os.path.join(output_dir, "rail_prob.png"), bundle["rail_prob_png"])
     if "lidar_rail_prior_png" in bundle and bundle["lidar_rail_prior_png"] is not None:
         cv2.imwrite(os.path.join(output_dir, "lidar_rail_prior.png"), bundle["lidar_rail_prior_png"])
+    if "label_track_prior_png" in bundle and bundle["label_track_prior_png"] is not None:
+        cv2.imwrite(os.path.join(output_dir, "label_track_prior.png"), bundle["label_track_prior_png"])
     if "rail_likelihood_png" in bundle and bundle["rail_likelihood_png"] is not None:
         cv2.imwrite(os.path.join(output_dir, "rail_likelihood.png"), bundle["rail_likelihood_png"])
     if "pole_prob_png" in bundle:
@@ -483,6 +562,13 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
         with open(os.path.join(output_dir, "rail_centerlines_2d.txt"), "w", encoding="utf-8") as f:
             f.write("# rail centerlines 2d polylines: poly_id u v\n")
             for pid, poly in enumerate(bundle["rail_centerlines_2d"]):
+                for (u, v) in poly:
+                    f.write(f"{pid} {u} {v}\n")
+                f.write("\n")
+    if "label_track_centerlines_2d" in bundle:
+        with open(os.path.join(output_dir, "label_track_centerlines_2d.txt"), "w", encoding="utf-8") as f:
+            f.write("# label track centerlines 2d polylines: poly_id u v\n")
+            for pid, poly in enumerate(bundle["label_track_centerlines_2d"] or []):
                 for (u, v) in poly:
                     f.write(f"{pid} {u} {v}\n")
                 f.write("\n")
@@ -757,6 +843,7 @@ class FeatureExtractor:
         tvec,
         dataset_meta,
         lidar_bev_path=None,
+        frame_id=None,
     ):
         """
         语义优先：在 frame_bundle_dir 写入 Phase 2 全量产物，
@@ -849,6 +936,14 @@ class FeatureExtractor:
             dataset_meta,
             merged,
         )
+        label_path = _find_osdar_openlabel_json((dataset_meta or {}).get("osdar_sequence_root", ""))
+        label_track_prior, label_track_stats, label_track_polylines = build_osdar_label_track_prior(
+            image.shape,
+            label_path,
+            frame_id,
+            (dataset_meta or {}).get("image_sensor", "rgb_center"),
+            merged,
+        )
         rail_region = _build_rail_region_from_masks(rail_prob, merged)
         rail_centerline = _skeletonize_binary_mask(rail_region)
         rail_centerlines_2d = _extract_centerline_polylines(rail_centerline, merged)
@@ -901,7 +996,14 @@ class FeatureExtractor:
                 merged_for_refine["_rvec"] = np.asarray(rvec, dtype=np.float64).reshape(3)
                 merged_for_refine["_tvec"] = np.asarray(tvec, dtype=np.float64).reshape(3)
                 merged_for_refine["_reference_z"] = float((dataset_meta or {}).get("reference_z", 0.0))
-                refined = refine_rail_lines(image, rail_prob, merged_for_refine, lidar_prior=lidar_rail_prior)
+                refined = refine_rail_lines(
+                    image,
+                    rail_prob,
+                    merged_for_refine,
+                    lidar_prior=lidar_rail_prior,
+                    label_track_prior=label_track_prior,
+                    label_track_polylines=label_track_polylines,
+                )
                 refined_centerline = refined.get("rail_centerline_u8")
                 refined_polys = refined.get("rail_centerlines_2d") or []
                 if refined_centerline is not None and len(refined_polys) > 0:
@@ -910,6 +1012,7 @@ class FeatureExtractor:
                     rail_dist = refined.get("rail_dist", rail_dist)
                     rail_weight = refined.get("rail_weight", rail_weight)
                 rail_quality = refined.get("quality", rail_quality)
+                rail_quality.update(label_track_stats)
                 rail_likelihood = refined.get("rail_likelihood")
             except Exception as exc:
                 rail_quality = {
@@ -924,12 +1027,16 @@ class FeatureExtractor:
                 rail_likelihood = None
         else:
             rail_likelihood = None
+        rail_quality.update(label_track_stats)
 
         rail_dist_u16 = (np.clip(rail_dist, 0, 1) * 65535.0).astype(np.uint16)
         rail_weight_u16 = (np.clip(rail_weight, 0, 1) * 65535.0).astype(np.uint16)
         lidar_prior_png = None
         if lidar_rail_prior is not None:
             lidar_prior_png = (np.clip(lidar_rail_prior, 0, 1) * 255.0).astype(np.uint8)
+        label_track_prior_png = None
+        if label_track_prior is not None:
+            label_track_prior_png = (np.clip(label_track_prior, 0, 1) * 255.0).astype(np.uint8)
         likelihood_png = None
         if rail_likelihood is not None:
             likelihood_png = (np.clip(rail_likelihood, 0, 1) * 255.0).astype(np.uint8)
@@ -937,7 +1044,19 @@ class FeatureExtractor:
         dm = dict(dataset_meta or {})
         dm.setdefault("semantic_classes", classes)
         bev_cfg = bev_cfg if isinstance(bev_cfg, dict) else {}
-        pseudo = semantic_probs_to_pseudo_bev(probs, intrinsics, (rvec, tvec), bev_cfg, dm)
+        extra_rail_priors = {}
+        if label_track_prior is not None:
+            extra_rail_priors["label_track"] = label_track_prior
+        if rail_likelihood is not None:
+            extra_rail_priors["likelihood"] = rail_likelihood
+        pseudo = semantic_probs_to_pseudo_bev(
+            probs,
+            intrinsics,
+            (rvec, tvec),
+            bev_cfg,
+            dm,
+            extra_rail_priors=extra_rail_priors,
+        )
 
         bundle = {
             "semantic_probs": probs,
@@ -946,6 +1065,7 @@ class FeatureExtractor:
             "semantic_argmax": argmax_vis,
             "rail_prob_png": rail_png,
             "lidar_rail_prior_png": lidar_prior_png,
+            "label_track_prior_png": label_track_prior_png,
             "rail_likelihood_png": likelihood_png,
             "pole_prob_png": pole_png,
             "edge_map": edge_sem,
@@ -955,6 +1075,7 @@ class FeatureExtractor:
             "rail_dist_u16": rail_dist_u16,
             "rail_weight_u16": rail_weight_u16,
             "rail_centerlines_2d": rail_centerlines_2d,
+            "label_track_centerlines_2d": label_track_polylines,
             "rail_quality": rail_quality,
             "pseudo_bev": pseudo,
         }
@@ -972,6 +1093,8 @@ class FeatureExtractor:
         cv2.imwrite(sam_output_base + "_semantic_map.png", argmax_vis)
         if lidar_prior_png is not None:
             cv2.imwrite(sam_output_base + "_lidar_rail_prior.png", lidar_prior_png)
+        if label_track_prior_png is not None:
+            cv2.imwrite(sam_output_base + "_label_track_prior.png", label_track_prior_png)
         if likelihood_png is not None:
             cv2.imwrite(sam_output_base + "_rail_likelihood.png", likelihood_png)
         cv2.imwrite(sam_output_base + "_rail_region.png", rail_region)
@@ -984,6 +1107,13 @@ class FeatureExtractor:
                 for (u, v) in poly:
                     f.write(f"{pid} {u} {v}\n")
                 f.write("\n")
+        if label_track_polylines:
+            with open(sam_output_base + "_label_track_centerlines_2d.txt", "w", encoding="utf-8") as f:
+                f.write("# label track centerlines 2d polylines: poly_id u v\n")
+                for pid, poly in enumerate(label_track_polylines):
+                    for (u, v) in poly:
+                        f.write(f"{pid} {u} {v}\n")
+                    f.write("\n")
         with open(sam_output_base + "_rail_quality.json", "w", encoding="utf-8") as f:
             json.dump(rail_quality, f, ensure_ascii=False, indent=2)
 

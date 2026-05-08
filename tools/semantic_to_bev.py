@@ -31,6 +31,7 @@ def semantic_probs_to_pseudo_bev(
     extrinsics: Tuple[np.ndarray, np.ndarray],
     bev_config: Dict[str, Any],
     dataset_meta: Dict[str, Any],
+    extra_rail_priors: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     将语义概率反投影到轨顶/地面参考平面 Z=reference_z（LiDAR 坐标系）上的 BEV 栅格。
@@ -105,10 +106,22 @@ def semantic_probs_to_pseudo_bev(
         warped = np.where(valid, warped, 0.0)
         return warped.astype(np.float32)
 
-    out["rail"] = sample_channel("rail", combine=["rail", "ballast"])
+    rail_semantic = sample_channel("rail", combine=["rail", "ballast"])
+    out["rail_from_semantic"] = rail_semantic.astype(np.float32)
+    rail_layers = [rail_semantic]
+    for name, prior in (extra_rail_priors or {}).items():
+        if prior is None:
+            continue
+        prior_arr = np.asarray(prior, dtype=np.float32)
+        if prior_arr.shape[:2] != (Hi, Wi):
+            prior_arr = cv2.resize(prior_arr, (Wi, Hi), interpolation=cv2.INTER_LINEAR)
+        warped = _bilinear_remap_image(np.clip(prior_arr, 0.0, 1.0), map_x, map_y)
+        warped = np.where(valid, warped, 0.0).astype(np.float32)
+        out[f"rail_from_{name}"] = warped
+        rail_layers.append(warped)
+    out["rail"] = np.maximum.reduce(rail_layers).astype(np.float32)
     out["pole_signal"] = sample_channel("", combine=["pole", "signal"])
     out["platform_building"] = sample_channel("", combine=["platform", "building"])
     out["road"] = sample_channel("road")
 
     return out
-

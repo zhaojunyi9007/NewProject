@@ -63,7 +63,10 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
                            const Eigen::Matrix<double, 3, 4>& P_rect,
                            int W, int H,
                            const Eigen::Matrix3d& R,
-                           const Eigen::Vector3d& t);
+                           const Eigen::Vector3d& t,
+                           bool low_visible_zero = false,
+                           int* visible_count_out = nullptr,
+                           bool* low_visible_out = nullptr);
 
 // Phase C5: unify breakdown structure in common.h
 using TotalScoreBreakdown = ScoreBreakdown;

@@ -67,10 +67,20 @@ image_features:
   rail_refinement:
     enabled: true
     method: "sam_steger_vp"
+    use_label_track_prior: true
+    label_track_prior_weight: 0.80
+    label_track_dilate_px: 31
+    label_track_blur_sigma_px: 7
+    label_track_min_valid_ratio: 0.0001
+    label_track_output_lines: "all"
+    label_track_main_pair_for_quality: true
+    label_track_steger_search_radius_px: 10
+    label_track_polyline_sample_step_px: 3
+    label_track_steger_min_score: 0.0
     use_lidar_bev_prior: true
-    lidar_prior_weight: 0.65
-    sam_prior_weight: 0.25
-    steger_response_weight: 0.10
+    lidar_prior_weight: 0.12
+    sam_prior_weight: 0.04
+    steger_response_weight: 0.04
     track_gauge_m: 1.435
     track_gauge_tolerance_m: 0.45
     lidar_prior_project_sigma_px: 7
@@ -99,6 +109,14 @@ bev:
 
 semantic_calib:
   rail_weight: 1.2
+  oracle_rail_weight: 1.0
+  oracle_rail_weight_fallback: 0.2
+  use_lidar_bev_rail_samples: true
+  lidar_bev_rail_sample_min_prob: 0.15
+  lidar_bev_rail_sample_stride_cells: 2
+  lidar_bev_rail_sample_max_points: 8000
+  min_lidar_bev_rail_samples: 200
+  lidar_semantic_max_points: 12000
   min_image_rail_quality: 0.42
   low_image_rail_quality_weight: 0.0
   # Phase C6: suppress rail term on switch/low-confidence rail extraction frames.
@@ -117,6 +135,9 @@ semantic_calib:
     vehicle: 1.0
     vegetation: 0.2
     sky: 0.0
+
+visualization:
+  pose_source: "refined"
 
 # ========================================
 # LiDAR 特征提取配置（针对 OSDaR23 点云密度微调）
