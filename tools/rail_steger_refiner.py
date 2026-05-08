@@ -1,3 +1,203 @@
+"""Rail line refinement using SAM rail probability as a weak prior.
+
+The extractor is intentionally self-contained: it does not depend on trained
+rail-specific models and keeps the old optimizer outputs compatible.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Dict, List, Sequence, Tuple
+
+import cv2
+import numpy as np
+
+
+Point = Tuple[int, int]
+
+
+def _cfg(config: Dict[str, Any], key: str, default: Any) -> Any:
+    ref_cfg = config.get("rail_refinement", {}) if isinstance(config, dict) else {}
+    if isinstance(ref_cfg, dict) and key in ref_cfg:
+        return ref_cfg[key]
+    return config.get(key, default) if isinstance(config, dict) else default
+
+
+def _enhance_gray(image_bgr: np.ndarray, config: Dict[str, Any]) -> np.ndarray:
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    clip = float(_cfg(config, "clahe_clip_limit", 2.0))
+    tile = int(_cfg(config, "clahe_tile_grid", 8))
+    tile = max(2, tile)
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(tile, tile))
+    enhanced = clahe.apply(gray)
+    return enhanced.astype(np.float32) / 255.0
+
+
+def _normalize01(arr: np.ndarray) -> np.ndarray:
+    arr = arr.astype(np.float32)
+    lo = float(np.nanmin(arr)) if arr.size else 0.0
+    hi = float(np.nanmax(arr)) if arr.size else 0.0
+    if hi <= lo + 1e-8:
+        return np.zeros_like(arr, dtype=np.float32)
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _steger_candidate_map(
+    gray01: np.ndarray,
+    rail_prob: np.ndarray,
+    config: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Approximate Steger line response from Hessian eigen structure.
+
+    We keep the response continuous for weighting, then create a sparse mask
+    from subpixel-valid candidates. Both bright and dark ridges are represented
+    by the absolute strongest Hessian eigenvalue.
+    """
+    h, w = gray01.shape[:2]
+    sigma = float(_cfg(config, "steger_sigma", 1.4))
+    sigma = max(0.5, sigma)
+    blurred = cv2.GaussianBlur(gray01, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+    gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
+    gxx = cv2.Sobel(blurred, cv2.CV_32F, 2, 0, ksize=3)
+    gxy = cv2.Sobel(blurred, cv2.CV_32F, 1, 1, ksize=3)
+    gyy = cv2.Sobel(blurred, cv2.CV_32F, 0, 2, ksize=3)
+
+    trace = gxx + gyy
+    diff = gxx - gyy
+    root = np.sqrt(np.maximum(diff * diff + 4.0 * gxy * gxy, 0.0))
+    l1 = 0.5 * (trace + root)
+    l2 = 0.5 * (trace - root)
+    use_l1 = np.abs(l1) >= np.abs(l2)
+    lam = np.where(use_l1, l1, l2)
+
+    # Eigenvector for strongest eigenvalue. For [a b; b c], vector can be
+    # [b, lambda-a]; fall back to x-axis for near-zero vectors.
+    nx = gxy
+    ny = lam - gxx
+    n_norm = np.sqrt(nx * nx + ny * ny)
+    fallback = n_norm < 1e-6
+    nx = np.where(fallback, 1.0, nx / np.maximum(n_norm, 1e-6))
+    ny = np.where(fallback, 0.0, ny / np.maximum(n_norm, 1e-6))
+
+    denom = gxx * nx * nx + 2.0 * gxy * nx * ny + gyy * ny * ny
+    numer = gx * nx + gy * ny
+    offset = -numer / (denom + 1e-6)
+    subpixel_ok = np.abs(offset) <= float(_cfg(config, "max_subpixel_offset", 0.6))
+
+    weak_roi_th = float(_cfg(config, "weak_roi_threshold", 0.08))
+    top_ignore = float(_cfg(config, "rail_top_ignore_ratio", 0.05))
+    bottom_keep = float(_cfg(config, "rail_bottom_keep_ratio", 0.98))
+    roi = rail_prob >= weak_roi_th
+    if top_ignore > 0:
+        roi[: int(h * top_ignore), :] = False
+    if 0 < bottom_keep < 1:
+        roi[int(h * bottom_keep) :, :] = False
+
+    response = _normalize01(np.abs(lam))
+    weighted_response = response * (0.25 + 0.75 * np.clip(rail_prob, 0.0, 1.0))
+    min_response = float(_cfg(config, "min_response", 0.03))
+    mask = (weighted_response >= min_response) & subpixel_ok & roi
+
+    # Thin the response by non-maximum suppression along the normal direction.
+    yy, xx = np.indices((h, w), dtype=np.float32)
+    x1 = np.clip(np.rint(xx + nx).astype(np.int32), 0, w - 1)
+    y1 = np.clip(np.rint(yy + ny).astype(np.int32), 0, h - 1)
+    x2 = np.clip(np.rint(xx - nx).astype(np.int32), 0, w - 1)
+    y2 = np.clip(np.rint(yy - ny).astype(np.int32), 0, h - 1)
+    nms = (weighted_response >= weighted_response[y1, x1]) & (weighted_response >= weighted_response[y2, x2])
+    mask &= nms
+
+    return mask.astype(np.uint8), weighted_response.astype(np.float32)
+
+
+def _component_curves(
+    candidate_mask: np.ndarray,
+    response: np.ndarray,
+    rail_prob: np.ndarray,
+    config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    dilate_k = int(_cfg(config, "candidate_connect_kernel", 3))
+    dilate_k = max(1, dilate_k | 1)
+    connected = candidate_mask
+    if dilate_k >= 3:
+        connected = cv2.dilate(connected, np.ones((dilate_k, dilate_k), np.uint8))
+
+    nlab, labels, stats, _ = cv2.connectedComponentsWithStats(connected, connectivity=8)
+    min_len = int(_cfg(config, "min_curve_length_px", 120))
+    max_samples = int(_cfg(config, "max_curve_samples", 900))
+    curves: List[Dict[str, Any]] = []
+    for lab in range(1, nlab):
+        area = int(stats[lab, cv2.CC_STAT_AREA])
+        if area < max(8, min_len // 4):
+            continue
+        comp = labels == lab
+        ys, xs = np.where(comp & (candidate_mask > 0))
+        if xs.size < max(8, min_len // 5):
+            continue
+        pts = np.stack([xs, ys], axis=1).astype(np.float32)
+        length = _polyline_span(pts)
+        if length < min_len:
+            continue
+        if pts.shape[0] > max_samples:
+            take = np.linspace(0, pts.shape[0] - 1, max_samples).astype(np.int32)
+            pts = pts[take]
+        rr = response[ys, xs]
+        rp = rail_prob[ys, xs]
+        curves.append(
+            {
+                "points": pts,
+                "length": float(length),
+                "mean_response": float(np.mean(rr)) if rr.size else 0.0,
+                "mean_rail_prob": float(np.mean(rp)) if rp.size else 0.0,
+            }
+        )
+    return curves
+
+
+def _polyline_span(points_xy: np.ndarray) -> float:
+    if points_xy.shape[0] < 2:
+        return 0.0
+    x_span = float(np.max(points_xy[:, 0]) - np.min(points_xy[:, 0]))
+    y_span = float(np.max(points_xy[:, 1]) - np.min(points_xy[:, 1]))
+    return math.hypot(x_span, y_span)
+
+
+def _fit_line(curve: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+    pts = curve["points"].astype(np.float32)
+    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).reshape(-1)
+    v = np.array([float(vx), float(vy)], dtype=np.float32)
+    v /= max(float(np.linalg.norm(v)), 1e-6)
+    p0 = np.array([float(x0), float(y0)], dtype=np.float32)
+    return p0, v
+
+
+def _line_intersection(p1: np.ndarray, v1: np.ndarray, p2: np.ndarray, v2: np.ndarray) -> Tuple[bool, np.ndarray]:
+    a = np.array([[v1[0], -v2[0]], [v1[1], -v2[1]]], dtype=np.float32)
+    b = p2 - p1
+    det = float(np.linalg.det(a))
+    if abs(det) < 1e-4:
+        return False, np.zeros(2, dtype=np.float32)
+    t = np.linalg.solve(a, b)[0]
+    return True, p1 + t * v1
+
+
+def _angle_to_vp(curve: Dict[str, Any], vp: np.ndarray) -> float:
+    p0, v = _fit_line(curve)
+    to_vp = vp - p0
+    n = float(np.linalg.norm(to_vp))
+    if n < 1e-6:
+        return 180.0
+    to_vp /= n
+    c = abs(float(np.dot(v, to_vp)))
+    c = min(1.0, max(-1.0, c))
+    return math.degrees(math.acos(c))
+
+
+def _estimate_vanishing_point(curves: List[Dict[str, Any]], shape: Tuple[int, int], config: Dict[str, Any]) -> Tuple[np.ndarray | None, float]:
+    if len(curves) < 2:
+        return None, 0.0
     h, w = shape
     fitted = [_fit_line(c) for c in curves]
     intersections: List[np.ndarray] = []

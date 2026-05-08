@@ -6,7 +6,7 @@ import sys
 import json
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
 
-_tools_dir = os.path.dirname(os.path.abspath(__file__))def save_image_feature_bundle
+_tools_dir = os.path.dirname(os.path.abspath(__file__))
 if _tools_dir not in sys.path:
     sys.path.insert(0, _tools_dir)
 from semantic_to_bev import semantic_probs_to_pseudo_bev
