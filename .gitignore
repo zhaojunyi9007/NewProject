@@ -47,10 +47,6 @@ checkpoints/
 
 # --- 标定结果输出 ---
 # 忽略结果图片和生成的文本，除非你想把它们作为示例上传
-visual_result.png
-result/
-result_osdar23/
-Calib_Result/
 *.log
 
 # --- IDE 与 系统文件 ---
