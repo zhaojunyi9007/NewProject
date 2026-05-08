@@ -92,11 +92,15 @@ def run(context: RuntimeContext) -> None:
         frame_dir = os.path.join(out_root, f"{frame_id:010d}")
         # 统一 optimizer 图像输入前缀：sam_output_dir/<frame_id>
         sam_base = os.path.join(sam_root, f"{frame_id:010d}")
+        lidar_root = paths.get("lidar") or cfg.get("data", {}).get("lidar_output_dir", "")
+        lidar_bev_path = os.path.join(lidar_root, f"{frame_id:010d}_bev_maps.npz") if lidar_root else ""
 
         print(f"\n处理帧 {frame_id:010d}...")
         print(f"  image={img_path}")
         print(f"  bundle_dir={frame_dir}")
         print(f"  optimizer_base={sam_base}")
+        if lidar_bev_path:
+            print(f"  lidar_bev={lidar_bev_path}")
 
         ok = extractor.process_image_feature_bundle(
             img_path,
@@ -108,6 +112,7 @@ def run(context: RuntimeContext) -> None:
             rvec,
             tvec,
             dataset_meta,
+            lidar_bev_path=lidar_bev_path,
         )
         if not ok:
             print(f"[Warning] 帧 {frame_id:010d} 特征提取失败")

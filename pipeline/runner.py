@@ -50,6 +50,16 @@ class PipelineRunner:
         try:
             img_cfg = self.context.config.get("image_features") or {}
             use_image_feature = bool(img_cfg.get("enabled", False))
+            ref_cfg = img_cfg.get("rail_refinement", {}) if isinstance(img_cfg.get("rail_refinement", {}), dict) else {}
+            image_needs_lidar = use_image_feature and bool(ref_cfg.get("use_lidar_bev_prior", False))
+
+            lidar_ran = False
+            if image_needs_lidar and not skip_lidar:
+                print("\n" + "=" * 40)
+                print("[Info] LiDAR BEV rail prior enabled; running lidar_stage before image_feature_stage")
+                print("=" * 40)
+                self.run_lidar_extraction()
+                lidar_ran = True
 
             if use_image_feature:
                 print("\n" + "=" * 40)
@@ -59,7 +69,7 @@ class PipelineRunner:
             elif not skip_sam:
                 self.run_sam_extraction()
 
-            if not skip_lidar:
+            if not skip_lidar and not lidar_ran:
                 self.run_lidar_extraction()
 
             bev_cfg = self.context.config.get("bev") or {}

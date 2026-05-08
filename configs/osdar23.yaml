@@ -67,6 +67,14 @@ image_features:
   rail_refinement:
     enabled: true
     method: "sam_steger_vp"
+    use_lidar_bev_prior: true
+    lidar_prior_weight: 0.65
+    sam_prior_weight: 0.25
+    steger_response_weight: 0.10
+    track_gauge_m: 1.435
+    track_gauge_tolerance_m: 0.45
+    lidar_prior_project_sigma_px: 7
+    candidate_roi_dilate_px: 45
     weak_roi_threshold: 0.06
     steger_sigma: 1.2
     min_response: 0.025
@@ -78,11 +86,10 @@ image_features:
     min_line_count: 2
     prefer_main_pair: true
     max_output_lines: 4
-    min_total_length_px: 1400
+    min_total_length_px: 400
     min_quality_score: 0.42
 
 bev:
-
   x_range: [0.0, 100.0]
   y_range: [-25.0, 25.0]
   z_range: [-1.5, 6.0]

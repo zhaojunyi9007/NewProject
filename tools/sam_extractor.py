@@ -182,6 +182,86 @@ def _build_rail_probability_maps(semantic_probs, config):
     return np.clip(rail_prob, 0.0, 1.0)
 
 
+def _normalize01(arr):
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.size == 0:
+        return arr
+    lo = float(np.nanmin(arr))
+    hi = float(np.nanmax(arr))
+    if hi <= lo + 1e-8:
+        return np.zeros_like(arr, dtype=np.float32)
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _project_lidar_bev_rail_prior(lidar_bev_path, image_shape, intrinsics, rvec, tvec, dataset_meta, config):
+    """Project LiDAR BEV rail_probability cells onto the image as a soft rail prior."""
+    ref_cfg = config.get("rail_refinement", {}) if isinstance(config.get("rail_refinement", {}), dict) else {}
+    use_prior = bool(ref_cfg.get("use_lidar_bev_prior", False))
+    if not use_prior or not lidar_bev_path or not os.path.isfile(lidar_bev_path):
+        return None
+    try:
+        z = np.load(lidar_bev_path)
+        if "rail_probability" not in z.files:
+            return None
+        rail_bev = np.asarray(z["rail_probability"], dtype=np.float32)
+        if rail_bev.ndim != 2 or rail_bev.size == 0:
+            return None
+        x0 = float(np.asarray(z["bev_xmin"]).reshape(-1)[0]) if "bev_xmin" in z.files else float(config.get("x_range", [0, 0])[0])
+        y0 = float(np.asarray(z["bev_ymin"]).reshape(-1)[0]) if "bev_ymin" in z.files else float(config.get("y_range", [0, 0])[0])
+        res = float(np.asarray(z["bev_resolution"]).reshape(-1)[0]) if "bev_resolution" in z.files else float(config.get("resolution", 0.2))
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+    h, w = image_shape[:2]
+    K = np.asarray(intrinsics, dtype=np.float64)
+    R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+    t = np.asarray(tvec, dtype=np.float64).reshape(3)
+    reference_z = float((dataset_meta or {}).get("reference_z", 0.0))
+
+    min_prob = float(ref_cfg.get("lidar_prior_min_prob", 0.02))
+    ys, xs = np.where(rail_bev > min_prob)
+    if xs.size == 0:
+        ys, xs = np.where(rail_bev > 0.0)
+    if xs.size == 0:
+        return np.zeros((h, w), dtype=np.float32)
+
+    vals = rail_bev[ys, xs].astype(np.float32)
+    pts = np.stack(
+        [
+            x0 + (xs.astype(np.float64) + 0.5) * res,
+            y0 + (ys.astype(np.float64) + 0.5) * res,
+            np.full(xs.shape, reference_z, dtype=np.float64),
+        ],
+        axis=1,
+    )
+    pc = (R @ pts.T).T + t.reshape(1, 3)
+    front = pc[:, 2] > 0.05
+    if not np.any(front):
+        return np.zeros((h, w), dtype=np.float32)
+    pc = pc[front]
+    vals = vals[front]
+    u = np.rint(K[0, 0] * pc[:, 0] / pc[:, 2] + K[0, 2]).astype(np.int32)
+    v = np.rint(K[1, 1] * pc[:, 1] / pc[:, 2] + K[1, 2]).astype(np.int32)
+    in_img = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+    if not np.any(in_img):
+        return np.zeros((h, w), dtype=np.float32)
+
+    prior = np.zeros((h, w), dtype=np.float32)
+    for uu, vv, val in zip(u[in_img], v[in_img], vals[in_img]):
+        if val > prior[vv, uu]:
+            prior[vv, uu] = float(val)
+    sigma = float(ref_cfg.get("lidar_prior_project_sigma_px", 7.0))
+    if sigma > 0:
+        prior = cv2.GaussianBlur(prior, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    prior = _normalize01(prior)
+    dil_px = int(ref_cfg.get("candidate_roi_dilate_px", 45))
+    if dil_px > 1:
+        k = max(3, dil_px | 1)
+        support = cv2.dilate((prior > 1e-4).astype(np.uint8), np.ones((k, k), np.uint8))
+        prior = np.where(support > 0, np.maximum(prior, 0.05), 0.0).astype(np.float32)
+    return np.clip(prior, 0.0, 1.0)
+
+
 def _build_rail_region_from_masks(rail_prob, config):
     """
     Build a binary rail region mask from rail_prob using seed/support thresholds + morphology + CC filtering.
@@ -354,6 +434,7 @@ def _build_distance_map_from_centerline(centerline_u8, config):
     dist = np.clip(dist, 0.0, float(max_dist)) / float(max_dist)
     return dist
 
+
 def _rasterize_centerline_polylines(polylines, shape):
     """Rasterize filtered rail polylines back into the centerline mask."""
     h, w = shape[:2]
@@ -380,6 +461,10 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
         cv2.imwrite(os.path.join(output_dir, "semantic_argmax.png"), bundle["semantic_argmax"])
     if "rail_prob_png" in bundle:
         cv2.imwrite(os.path.join(output_dir, "rail_prob.png"), bundle["rail_prob_png"])
+    if "lidar_rail_prior_png" in bundle and bundle["lidar_rail_prior_png"] is not None:
+        cv2.imwrite(os.path.join(output_dir, "lidar_rail_prior.png"), bundle["lidar_rail_prior_png"])
+    if "rail_likelihood_png" in bundle and bundle["rail_likelihood_png"] is not None:
+        cv2.imwrite(os.path.join(output_dir, "rail_likelihood.png"), bundle["rail_likelihood_png"])
     if "pole_prob_png" in bundle:
         cv2.imwrite(os.path.join(output_dir, "pole_prob.png"), bundle["pole_prob_png"])
     if "edge_map" in bundle:
@@ -671,6 +756,7 @@ class FeatureExtractor:
         rvec,
         tvec,
         dataset_meta,
+        lidar_bev_path=None,
     ):
         """
         语义优先：在 frame_bundle_dir 写入 Phase 2 全量产物，
@@ -754,6 +840,15 @@ class FeatureExtractor:
 
         # Phase 1 (sam_2d): rail region + centerline + dist + weight
         rail_prob = _build_rail_probability_maps(probs, merged)
+        lidar_rail_prior = _project_lidar_bev_rail_prior(
+            lidar_bev_path,
+            image.shape,
+            intrinsics,
+            rvec,
+            tvec,
+            dataset_meta,
+            merged,
+        )
         rail_region = _build_rail_region_from_masks(rail_prob, merged)
         rail_centerline = _skeletonize_binary_mask(rail_region)
         rail_centerlines_2d = _extract_centerline_polylines(rail_centerline, merged)
@@ -801,7 +896,12 @@ class FeatureExtractor:
         ref_cfg = merged.get("rail_refinement", {}) if isinstance(merged.get("rail_refinement", {}), dict) else {}
         if bool(ref_cfg.get("enabled", False)):
             try:
-                refined = refine_rail_lines(image, rail_prob, merged)
+                merged_for_refine = dict(merged)
+                merged_for_refine["_intrinsics"] = np.asarray(intrinsics, dtype=np.float64)
+                merged_for_refine["_rvec"] = np.asarray(rvec, dtype=np.float64).reshape(3)
+                merged_for_refine["_tvec"] = np.asarray(tvec, dtype=np.float64).reshape(3)
+                merged_for_refine["_reference_z"] = float((dataset_meta or {}).get("reference_z", 0.0))
+                refined = refine_rail_lines(image, rail_prob, merged_for_refine, lidar_prior=lidar_rail_prior)
                 refined_centerline = refined.get("rail_centerline_u8")
                 refined_polys = refined.get("rail_centerlines_2d") or []
                 if refined_centerline is not None and len(refined_polys) > 0:
@@ -810,6 +910,7 @@ class FeatureExtractor:
                     rail_dist = refined.get("rail_dist", rail_dist)
                     rail_weight = refined.get("rail_weight", rail_weight)
                 rail_quality = refined.get("quality", rail_quality)
+                rail_likelihood = refined.get("rail_likelihood")
             except Exception as exc:
                 rail_quality = {
                     "enabled": False,
@@ -820,10 +921,18 @@ class FeatureExtractor:
                     "disable_reason": f"rail_refinement_error:{type(exc).__name__}",
                 }
                 print(f"[Warning] rail_refinement failed, fallback to legacy skeleton: {exc}")
-
+                rail_likelihood = None
+        else:
+            rail_likelihood = None
 
         rail_dist_u16 = (np.clip(rail_dist, 0, 1) * 65535.0).astype(np.uint16)
         rail_weight_u16 = (np.clip(rail_weight, 0, 1) * 65535.0).astype(np.uint16)
+        lidar_prior_png = None
+        if lidar_rail_prior is not None:
+            lidar_prior_png = (np.clip(lidar_rail_prior, 0, 1) * 255.0).astype(np.uint8)
+        likelihood_png = None
+        if rail_likelihood is not None:
+            likelihood_png = (np.clip(rail_likelihood, 0, 1) * 255.0).astype(np.uint8)
 
         dm = dict(dataset_meta or {})
         dm.setdefault("semantic_classes", classes)
@@ -836,6 +945,8 @@ class FeatureExtractor:
             "save_logits": merged.get("save_logits", True),
             "semantic_argmax": argmax_vis,
             "rail_prob_png": rail_png,
+            "lidar_rail_prior_png": lidar_prior_png,
+            "rail_likelihood_png": likelihood_png,
             "pole_prob_png": pole_png,
             "edge_map": edge_sem,
             "edge_weight_u16": weight_u16,
@@ -859,6 +970,10 @@ class FeatureExtractor:
         cv2.imwrite(sam_output_base + "_edge_weight.png", weight_u16)
         cv2.imwrite(sam_output_base + "_mask_ids.png", mask_id_map.astype(np.uint16))
         cv2.imwrite(sam_output_base + "_semantic_map.png", argmax_vis)
+        if lidar_prior_png is not None:
+            cv2.imwrite(sam_output_base + "_lidar_rail_prior.png", lidar_prior_png)
+        if likelihood_png is not None:
+            cv2.imwrite(sam_output_base + "_rail_likelihood.png", likelihood_png)
         cv2.imwrite(sam_output_base + "_rail_region.png", rail_region)
         cv2.imwrite(sam_output_base + "_rail_centerline.png", rail_centerline)
         cv2.imwrite(sam_output_base + "_rail_dist.png", rail_dist_u16)
@@ -869,7 +984,6 @@ class FeatureExtractor:
                 for (u, v) in poly:
                     f.write(f"{pid} {u} {v}\n")
                 f.write("\n")
-
         with open(sam_output_base + "_rail_quality.json", "w", encoding="utf-8") as f:
             json.dump(rail_quality, f, ensure_ascii=False, indent=2)
 

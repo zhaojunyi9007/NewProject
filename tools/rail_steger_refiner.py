@@ -46,7 +46,8 @@ def _steger_candidate_map(
     gray01: np.ndarray,
     rail_prob: np.ndarray,
     config: Dict[str, Any],
-) -> Tuple[np.ndarray, np.ndarray]:
+    lidar_prior: np.ndarray | None = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Approximate Steger line response from Hessian eigen structure.
 
     We keep the response continuous for weighting, then create a sparse mask
@@ -86,19 +87,45 @@ def _steger_candidate_map(
     offset = -numer / (denom + 1e-6)
     subpixel_ok = np.abs(offset) <= float(_cfg(config, "max_subpixel_offset", 0.6))
 
+    sam_prior = np.clip(rail_prob.astype(np.float32), 0.0, 1.0)
+    use_lidar_prior = lidar_prior is not None and bool(_cfg(config, "use_lidar_bev_prior", False))
+    lidar_prior01 = None
+    if use_lidar_prior:
+        lidar_prior01 = np.clip(lidar_prior.astype(np.float32), 0.0, 1.0)
+        if lidar_prior01.shape[:2] != (h, w):
+            lidar_prior01 = cv2.resize(lidar_prior01, (w, h), interpolation=cv2.INTER_LINEAR)
+
     weak_roi_th = float(_cfg(config, "weak_roi_threshold", 0.08))
     top_ignore = float(_cfg(config, "rail_top_ignore_ratio", 0.05))
     bottom_keep = float(_cfg(config, "rail_bottom_keep_ratio", 0.98))
-    roi = rail_prob >= weak_roi_th
+    roi = np.ones((h, w), dtype=bool)
     if top_ignore > 0:
         roi[: int(h * top_ignore), :] = False
     if 0 < bottom_keep < 1:
         roi[int(h * bottom_keep) :, :] = False
 
     response = _normalize01(np.abs(lam))
-    weighted_response = response * (0.25 + 0.75 * np.clip(rail_prob, 0.0, 1.0))
+    lidar_w = float(_cfg(config, "lidar_prior_weight", 0.0)) if lidar_prior01 is not None else 0.0
+    sam_w = float(_cfg(config, "sam_prior_weight", 1.0))
+    resp_w = float(_cfg(config, "steger_response_weight", 0.0))
+    wsum = max(1e-6, lidar_w + sam_w + resp_w)
+    rail_likelihood = (sam_w * sam_prior + resp_w * response) / wsum
+    if lidar_prior01 is not None:
+        rail_likelihood = rail_likelihood + (lidar_w * lidar_prior01) / wsum
+        prior_th = float(_cfg(config, "lidar_prior_roi_threshold", 1e-4))
+        support = lidar_prior01 > prior_th
+        dilate_px = int(_cfg(config, "candidate_roi_dilate_px", 45))
+        if dilate_px > 1:
+            k = max(3, dilate_px | 1)
+            support = cv2.dilate(support.astype(np.uint8), np.ones((k, k), np.uint8)) > 0
+        roi &= support
+    else:
+        roi &= sam_prior >= weak_roi_th
+
+    rail_likelihood = np.clip(rail_likelihood, 0.0, 1.0)
+    weighted_response = response * (0.25 + 0.75 * rail_likelihood)
     min_response = float(_cfg(config, "min_response", 0.03))
-    mask = (weighted_response >= min_response) & subpixel_ok & roi
+    candidate_core = (weighted_response >= min_response) & subpixel_ok & roi
 
     # Thin the response by non-maximum suppression along the normal direction.
     yy, xx = np.indices((h, w), dtype=np.float32)
@@ -107,9 +134,17 @@ def _steger_candidate_map(
     x2 = np.clip(np.rint(xx - nx).astype(np.int32), 0, w - 1)
     y2 = np.clip(np.rint(yy - ny).astype(np.int32), 0, h - 1)
     nms = (weighted_response >= weighted_response[y1, x1]) & (weighted_response >= weighted_response[y2, x2])
-    mask &= nms
+    if lidar_prior01 is not None:
+        # A projected BEV prior is already spatially selective; keep strong
+        # candidates inside it even when pixel-grid NMS breaks long rails into
+        # isolated samples.
+        strong_prior = rail_likelihood >= float(_cfg(config, "lidar_prior_keep_threshold", 0.20))
+        mask = candidate_core & (nms | strong_prior)
+    else:
+        strong_prior = sam_prior >= weak_roi_th
+        mask = candidate_core & (nms | strong_prior)
 
-    return mask.astype(np.uint8), weighted_response.astype(np.float32)
+    return mask.astype(np.uint8), weighted_response.astype(np.float32), rail_likelihood.astype(np.float32)
 
 
 def _component_curves(
@@ -275,9 +310,159 @@ def _distance_map(centerline_u8: np.ndarray, max_ratio: float) -> np.ndarray:
     return np.clip(dist, 0.0, max_dist) / max_dist
 
 
-def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict[str, Any]) -> Dict[str, Any]:
+def _config_array(config: Dict[str, Any], key: str, shape: Tuple[int, ...]) -> np.ndarray | None:
+    if key not in config:
+        return None
+    try:
+        arr = np.asarray(config[key], dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if arr.size != int(np.prod(shape)):
+        return None
+    return arr.reshape(shape)
+
+
+def _interp_polyline_at_y(poly: Sequence[Point], ys: np.ndarray) -> np.ndarray | None:
+    pts = np.array(poly, dtype=np.float32)
+    if pts.shape[0] < 2:
+        return None
+    order = np.argsort(pts[:, 1])
+    pts = pts[order]
+    unique_y, unique_idx = np.unique(pts[:, 1], return_index=True)
+    if unique_y.size < 2:
+        return None
+    xs = pts[unique_idx, 0]
+    if ys[0] < unique_y[0] or ys[-1] > unique_y[-1]:
+        return None
+    out_x = np.interp(ys, unique_y, xs).astype(np.float32)
+    return np.stack([out_x, ys.astype(np.float32)], axis=1)
+
+
+def _backproject_to_lidar_plane(
+    uv: np.ndarray,
+    K: np.ndarray,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    reference_z: float,
+) -> np.ndarray | None:
+    if uv.size == 0:
+        return None
+    R, _ = cv2.Rodrigues(rvec.reshape(3, 1).astype(np.float64))
+    Rt = R.T
+    Kinv = np.linalg.inv(K.astype(np.float64))
+    rays = (Kinv @ np.column_stack([uv[:, 0], uv[:, 1], np.ones(len(uv))]).T).T
+    rt = Rt @ tvec.reshape(3).astype(np.float64)
+    dirs_l = (Rt @ rays.T).T
+    denom = dirs_l[:, 2]
+    valid = np.abs(denom) > 1e-8
+    if not np.any(valid):
+        return None
+    s = np.zeros(len(uv), dtype=np.float64)
+    s[valid] = (float(reference_z) + rt[2]) / denom[valid]
+    valid &= s > 0
+    if np.count_nonzero(valid) < 3:
+        return None
+    pts = (Rt @ (rays[valid] * s[valid, None] - tvec.reshape(1, 3)).T).T
+    return pts
+
+
+def _gauge_for_pair(poly_a: Sequence[Point], poly_b: Sequence[Point], config: Dict[str, Any]) -> float | None:
+    K = _config_array(config, "_intrinsics", (3, 3))
+    rvec = _config_array(config, "_rvec", (3,))
+    tvec = _config_array(config, "_tvec", (3,))
+    if K is None or rvec is None or tvec is None:
+        return None
+    a = np.array(poly_a, dtype=np.float32)
+    b = np.array(poly_b, dtype=np.float32)
+    y0 = max(float(np.min(a[:, 1])), float(np.min(b[:, 1])))
+    y1 = min(float(np.max(a[:, 1])), float(np.max(b[:, 1])))
+    if y1 <= y0 + 4:
+        return None
+    ys = np.linspace(y0, y1, int(_cfg(config, "gauge_sample_count", 25)), dtype=np.float32)
+    uv_a = _interp_polyline_at_y(poly_a, ys)
+    uv_b = _interp_polyline_at_y(poly_b, ys)
+    if uv_a is None or uv_b is None:
+        return None
+    reference_z = float(config.get("_reference_z", 0.0))
+    pts_a = _backproject_to_lidar_plane(uv_a, K, rvec, tvec, reference_z)
+    pts_b = _backproject_to_lidar_plane(uv_b, K, rvec, tvec, reference_z)
+    if pts_a is None or pts_b is None:
+        return None
+    n = min(len(pts_a), len(pts_b))
+    if n < 3:
+        return None
+    dist = np.linalg.norm(pts_a[:n, :2] - pts_b[:n, :2], axis=1)
+    dist = dist[np.isfinite(dist)]
+    if dist.size == 0:
+        return None
+    return float(np.median(dist))
+
+
+def _select_main_pair(
+    curves: List[Dict[str, Any]],
+    vp: np.ndarray | None,
+    config: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if len(curves) < 2:
+        return curves, {"pair_score": 0.0, "gauge_median_m": None, "gauge_error_m": None}
+
+    polylines = [_smooth_curve(c, config) for c in curves]
+    items = [(c, p) for c, p in zip(curves, polylines) if len(p) >= 2]
+    if len(items) < 2:
+        return [c for c, _ in items], {"pair_score": 0.0, "gauge_median_m": None, "gauge_error_m": None}
+
+    gauge_m = float(_cfg(config, "track_gauge_m", 1.435))
+    gauge_tol = float(_cfg(config, "track_gauge_tolerance_m", 0.45))
+    best = None
+    best_valid = None
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            c1, p1 = items[i]
+            c2, p2 = items[j]
+            total_len = float(c1["length"] + c2["length"])
+            mean_resp = 0.5 * float(c1["mean_response"] + c2["mean_response"])
+            mean_prior = 0.5 * float(c1["mean_rail_prob"] + c2["mean_rail_prob"])
+            vp_score = 1.0
+            if vp is not None:
+                angle_th = max(1e-6, float(_cfg(config, "vp_angle_thresh_deg", 10.0)))
+                vp_score = max(0.0, 1.0 - (_angle_to_vp(c1, vp) + _angle_to_vp(c2, vp)) / (2.0 * angle_th))
+            gauge = _gauge_for_pair(p1, p2, config)
+            gauge_err = None if gauge is None else abs(gauge - gauge_m)
+            gauge_score = 0.5 if gauge_err is None else max(0.0, 1.0 - gauge_err / max(1e-6, gauge_tol))
+            score = (
+                min(1.0, total_len / max(1.0, float(_cfg(config, "min_total_length_px", 1200.0)))) * 0.30
+                + min(1.0, mean_resp / 0.20) * 0.20
+                + min(1.0, mean_prior / max(0.02, float(_cfg(config, "min_mean_rail_prob", 0.08)))) * 0.20
+                + vp_score * 0.15
+                + gauge_score * 0.15
+            )
+            info = {
+                "pair_score": float(score),
+                "gauge_median_m": None if gauge is None else float(gauge),
+                "gauge_error_m": None if gauge_err is None else float(gauge_err),
+            }
+            candidate = (score, [c1, c2], info)
+            if best is None or score > best[0]:
+                best = candidate
+            if gauge_err is None or gauge_err <= gauge_tol:
+                if best_valid is None or score > best_valid[0]:
+                    best_valid = candidate
+
+    chosen = best_valid or best
+    if chosen is None:
+        return [c for c, _ in items[:2]], {"pair_score": 0.0, "gauge_median_m": None, "gauge_error_m": None}
+    return chosen[1], chosen[2]
+
+
+def refine_rail_lines(
+    image_bgr: np.ndarray,
+    rail_prob: np.ndarray,
+    config: Dict[str, Any],
+    lidar_prior: np.ndarray | None = None,
+) -> Dict[str, Any]:
     h, w = rail_prob.shape[:2]
-    method = "steger_sam_roi"
+    lidar_prior_used = lidar_prior is not None and bool(_cfg(config, "use_lidar_bev_prior", False))
+    method = "lidar_bev_sam_steger_vp_gauge" if lidar_prior_used else "steger_sam_roi"
     enabled = bool(_cfg(config, "enabled", True))
     if not enabled:
         quality = {
@@ -297,8 +482,8 @@ def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict
         }
 
     gray = _enhance_gray(image_bgr, config)
-    candidate_mask, response = _steger_candidate_map(gray, rail_prob, config)
-    curves = _component_curves(candidate_mask, response, rail_prob, config)
+    candidate_mask, response, rail_likelihood = _steger_candidate_map(gray, rail_prob, config, lidar_prior=lidar_prior)
+    curves = _component_curves(candidate_mask, response, rail_likelihood, config)
     vp, vp_ratio = _estimate_vanishing_point(curves, (h, w), config)
 
     angle_th = float(_cfg(config, "vp_angle_thresh_deg", 10.0))
@@ -308,7 +493,10 @@ def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict
     else:
         filtered = [c for c in curves if c["mean_rail_prob"] >= min_prob]
 
-    if bool(_cfg(config, "prefer_main_pair", True)) and len(filtered) > 2:
+    pair_info = {"pair_score": 0.0, "gauge_median_m": None, "gauge_error_m": None}
+    if bool(_cfg(config, "prefer_main_pair", True)) and len(filtered) >= 2:
+        filtered, pair_info = _select_main_pair(filtered, vp, config)
+    elif len(filtered) > 2:
         filtered.sort(key=lambda c: (c["length"] * (0.4 + c["mean_response"]) * (0.3 + c["mean_rail_prob"])), reverse=True)
         filtered = filtered[: max(2, int(_cfg(config, "max_output_lines", 2)))]
 
@@ -321,7 +509,7 @@ def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict
     dil_k = max(3, dil_k | 1)
     dil = cv2.dilate(centerline, np.ones((dil_k, dil_k), np.uint8))
     resp_blur = cv2.GaussianBlur(response, (0, 0), sigmaX=1.0)
-    weight = (dil > 0).astype(np.float32) * resp_blur * (0.3 + 0.7 * np.clip(rail_prob, 0.0, 1.0))
+    weight = (dil > 0).astype(np.float32) * resp_blur * (0.3 + 0.7 * np.clip(rail_likelihood, 0.0, 1.0))
     weight = np.clip(weight, 0.0, 1.0)
 
     total_length = float(sum(_polyline_span(np.array(poly, dtype=np.float32)) for poly in polylines if len(poly) >= 2))
@@ -346,6 +534,9 @@ def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict
         reasons.append("line_count_low")
     if total_length < min_length:
         reasons.append("total_length_low")
+    gauge_err = pair_info.get("gauge_error_m")
+    if gauge_err is not None and gauge_err > float(_cfg(config, "track_gauge_tolerance_m", 0.45)):
+        reasons.append("gauge_error_high")
     if score < min_quality:
         reasons.append("quality_score_low")
     enabled_out = not reasons
@@ -353,12 +544,16 @@ def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict
     quality = {
         "enabled": bool(enabled_out),
         "method": method,
+        "lidar_prior_used": bool(lidar_prior_used),
         "line_count": int(len(polylines)),
         "total_length_px": float(total_length),
         "mean_response": float(mean_resp),
         "mean_rail_prob_on_lines": float(mean_prob),
         "vanishing_point": None if vp is None else [float(vp[0]), float(vp[1])],
         "vp_inlier_ratio": float(vp_ratio),
+        "pair_score": float(pair_info.get("pair_score", 0.0) or 0.0),
+        "gauge_median_m": pair_info.get("gauge_median_m"),
+        "gauge_error_m": pair_info.get("gauge_error_m"),
         "rail_dist_valid_ratio": float(rail_dist_valid_ratio),
         "rail_weight_valid_ratio": float(rail_weight_valid_ratio),
         "quality_score": float(score),
@@ -372,4 +567,5 @@ def refine_rail_lines(image_bgr: np.ndarray, rail_prob: np.ndarray, config: Dict
         "quality": quality,
         "candidate_mask": (candidate_mask * 255).astype(np.uint8),
         "response": response.astype(np.float32),
+        "rail_likelihood": rail_likelihood.astype(np.float32),
     }
