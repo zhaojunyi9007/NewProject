@@ -66,6 +66,10 @@ EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(con
     std::copy(config_.init_t, config_.init_t + 3, t_curr_);
     sem_cfg_.class_weights = config_.class_weights;
     sem_cfg_.pyramid_scales = config_.pyramid_scales;
+    sem_cfg_.rail_low_visible_policy = config_.rail_low_visible_policy;
+    sem_cfg_.min_rail_visible_count = config_.min_rail_visible_count;
+    sem_cfg_.min_rail_visible_ratio = config_.min_rail_visible_ratio;
+    sem_cfg_.rail_low_visible_penalty = config_.rail_low_visible_penalty;
 }
 
 bool EdgeCalibrator::LoadData() {
@@ -497,7 +501,9 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
                 rail_sample_points_[i],
                 &rail_dist_,
                 rail_weight_.empty() ? nullptr : &rail_weight_,
-                R_rect_, P_rect_, W_, H_);
+                R_rect_, P_rect_, W_, H_,
+                config_.rail_visibility_residual_weight,
+                config_.rail_oob_residual_weight);
             problem.AddResidualBlock(new ceres::AutoDiffCostFunction<WeightedRailEdgeCost, 1, 3, 3>(rail_cost),
                                      new ceres::HuberLoss(0.05), r_curr_, t_curr_);
         }
@@ -644,6 +650,11 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "rail_sample_count: " << last_score_breakdown_.rail_sample_count << "\n";
     result_file << "rail_visible_count: " << last_score_breakdown_.rail_visible_count << "\n";
     result_file << "rail_low_visible_fallback: " << last_score_breakdown_.rail_low_visible_fallback << "\n";
+    result_file << "rail_visible_ratio: " << last_score_breakdown_.rail_visible_ratio << "\n";
+    result_file << "rail_low_visible_penalty_applied: " << last_score_breakdown_.rail_low_visible_penalty_applied << "\n";
+    result_file << "rail_mean_dist_visible: " << last_score_breakdown_.rail_mean_dist_visible << "\n";
+    result_file << "rail_mean_weight_visible: " << last_score_breakdown_.rail_mean_weight_visible << "\n";
+    result_file << "rail_strict_mode: " << last_score_breakdown_.rail_strict_mode << "\n";
     // Phase C5: unified confidences inferred from extracted line confidences.
     result_file << "rail_confidence: " << last_score_breakdown_.rail_confidence << "\n";
     result_file << "vertical_structure_confidence: " << last_score_breakdown_.vertical_structure_confidence << "\n";

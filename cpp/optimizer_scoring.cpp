@@ -235,6 +235,91 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
     return total_score;
 }
 
+namespace {
+struct RailAttractionStats {
+    int visible_count = 0;
+    double visible_ratio = 0.0;
+    bool low_visible = false;
+    bool penalty_applied = false;
+    double mean_dist = 0.0;
+    double mean_weight = 0.0;
+};
+
+double RailAttractionScoreNorm(const std::vector<PointFeature>& points,
+                               const cv::Mat& dist_map,
+                               const cv::Mat& weight_map,
+                               const Eigen::Matrix3d& R_rect,
+                               const Eigen::Matrix<double, 3, 4>& P_rect,
+                               int W,
+                               int H,
+                               const Eigen::Matrix3d& R,
+                               const Eigen::Vector3d& t,
+                               const SemanticScoringConfig& cfg,
+                               RailAttractionStats* stats) {
+    RailAttractionStats st;
+    if (dist_map.empty() || points.empty()) {
+        if (stats) *stats = st;
+        return 0.0;
+    }
+
+    double total_score = 0.0;
+    double dist_sum = 0.0;
+    double weight_sum = 0.0;
+    for (const auto& pt : points) {
+        int u = 0, v = 0;
+        if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) {
+            continue;
+        }
+        float dist_value = GetDistanceValue(dist_map, u, v);
+        if (!std::isfinite(dist_value)) {
+            dist_value = 1.0f;
+        }
+        dist_value = std::min(std::max(dist_value, 0.0f), 1.0f);
+
+        float image_weight = 1.0f;
+        if (!weight_map.empty()) {
+            image_weight = GetDistanceValue(weight_map, u, v);
+            if (!std::isfinite(image_weight)) {
+                image_weight = 0.0f;
+            }
+            image_weight = std::min(std::max(image_weight, 0.0f), 1.0f);
+            if (image_weight <= 1e-4f) {
+                continue;
+            }
+        }
+
+        total_score += (1.0 - static_cast<double>(dist_value)) *
+                       static_cast<double>(image_weight) * pt.weight;
+        dist_sum += static_cast<double>(dist_value);
+        weight_sum += static_cast<double>(image_weight);
+        st.visible_count++;
+    }
+
+    const double n = static_cast<double>(std::max<size_t>(1, points.size()));
+    st.visible_ratio = static_cast<double>(st.visible_count) / n;
+    st.mean_dist = st.visible_count > 0 ? dist_sum / static_cast<double>(st.visible_count) : 1.0;
+    st.mean_weight = st.visible_count > 0 ? weight_sum / static_cast<double>(st.visible_count) : 0.0;
+
+    const int min_count = std::max(1, cfg.min_rail_visible_count);
+    const double min_ratio = std::max(1e-9, cfg.min_rail_visible_ratio);
+    st.low_visible = st.visible_count < min_count || st.visible_ratio < min_ratio;
+
+    double score_norm = total_score / n;
+    if (st.low_visible && cfg.rail_low_visible_policy == "penalty") {
+        const double ratio_progress = std::min(1.0, std::max(0.0, st.visible_ratio / min_ratio));
+        score_norm = -std::max(0.0, cfg.rail_low_visible_penalty) * (1.0 - ratio_progress);
+        st.penalty_applied = true;
+    } else if (st.low_visible) {
+        score_norm = 0.0;
+    }
+
+    if (stats) {
+        *stats = st;
+    }
+    return score_norm;
+}
+}  // namespace
+
 double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeature>& edge_points,
                                                     const cv::Mat& edge_dist,
                                                     const cv::Mat& edge_weight,
@@ -279,16 +364,17 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
     // Phase F (sam_2d): rail term (reuses edge attraction score on rail distance/weight maps).
     bd.rail_score_norm = 0.0;
     if (!rail_dist.empty() && !rail_points.empty()) {
-        int rail_visible = 0;
-        bool rail_low_visible = false;
-        const double raw = EdgeAttractionScore(
-            rail_points, rail_dist, rail_weight, R_rect, P_rect, W, H, R, t,
-            true, &rail_visible, &rail_low_visible);
-        const double n = static_cast<double>(std::max<size_t>(1, rail_points.size()));
-        bd.rail_score_norm = raw / n;
+        RailAttractionStats rail_stats;
+        bd.rail_score_norm = RailAttractionScoreNorm(
+            rail_points, rail_dist, rail_weight, R_rect, P_rect, W, H, R, t, sem_cfg, &rail_stats);
         bd.rail_sample_count = static_cast<double>(rail_points.size());
-        bd.rail_visible_count = static_cast<double>(rail_visible);
-        bd.rail_low_visible_fallback = rail_low_visible ? 1.0 : 0.0;
+        bd.rail_visible_count = static_cast<double>(rail_stats.visible_count);
+        bd.rail_low_visible_fallback = rail_stats.low_visible ? 1.0 : 0.0;
+        bd.rail_visible_ratio = rail_stats.visible_ratio;
+        bd.rail_low_visible_penalty_applied = rail_stats.penalty_applied ? 1.0 : 0.0;
+        bd.rail_mean_dist_visible = rail_stats.mean_dist;
+        bd.rail_mean_weight_visible = rail_stats.mean_weight;
+        bd.rail_strict_mode = (sem_cfg.rail_low_visible_policy == "penalty") ? 1.0 : 0.0;
     }
 
     bd.edge_score = w_edge * bd.edge_score_norm;

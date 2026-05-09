@@ -19,6 +19,8 @@ struct BEVOptimizeConfig {
 
 struct ScoreBreakdown {
     double rail_score = 0.0;
+    double best_score_raw = 0.0;
+    double best_score_norm = 0.0;
     double pole_score = 0.0;
     double total = 0.0;
 };

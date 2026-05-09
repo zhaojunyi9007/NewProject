@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -33,6 +34,53 @@ def _parse_pose_after_bev(path: str):
     if len(nums) < 6:
         return None
     return {"rvec": nums[0:3], "tvec": nums[3:6]}
+
+
+def _load_json_dict(path: str) -> dict:
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _bev_rail_nonzero_ratio(path: str) -> float:
+    try:
+        import numpy as np
+
+        with open(path, "rb") as f:
+            if f.read(8) != b"EDGEBEV1":
+                return 0.0
+            nx, ny, nch = struct.unpack("iii", f.read(12))
+            f.read(16)
+            n = int(nx) * int(ny)
+            if n <= 0 or nch <= 0:
+                return 0.0
+            arr = np.frombuffer(f.read(n * int(nch) * 4), dtype=np.float32)
+            if arr.size < n * int(nch):
+                return 0.0
+            rail = arr[:n] if nch == 1 else arr[(int(nch) - 1) * n : int(nch) * n]
+            return float((rail > 1e-4).mean())
+    except Exception:
+        return 0.0
+
+
+def _delta_within_oracle_limits(parsed: dict, base_r: list[float], base_t: list[float], bev_cfg: dict) -> tuple[bool, str]:
+    max_tx = float(bev_cfg.get("oracle_max_abs_tx_m", 2.0))
+    max_ty = float(bev_cfg.get("oracle_max_abs_ty_m", 1.0))
+    max_yaw = float(bev_cfg.get("oracle_max_abs_yaw_deg", 3.0))
+    dt = [float(parsed["tvec"][i]) - float(base_t[i]) for i in range(3)]
+    if abs(dt[0]) > max_tx:
+        return False, f"oracle_tx_delta_exceeds_{max_tx}"
+    if abs(dt[1]) > max_ty:
+        return False, f"oracle_ty_delta_exceeds_{max_ty}"
+    yaw_delta_deg = abs(float(parsed["rvec"][2]) - float(base_r[2])) * 180.0 / 3.141592653589793
+    if yaw_delta_deg > max_yaw:
+        return False, f"oracle_yaw_delta_exceeds_{max_yaw}"
+    return True, ""
 
 
 def run(context: RuntimeContext) -> None:
@@ -105,9 +153,17 @@ def run(context: RuntimeContext) -> None:
             continue
 
         img_bin = os.path.join(frame_dir, "image_rail_bev.bin")
-        if not export_image_rail_bin(pseudo_npz, img_bin, bev_cfg):
+        export_dbg: dict = {}
+        if not export_image_rail_bin(pseudo_npz, img_bin, bev_cfg, export_dbg):
             print(f"[Warning] 导出 image BEV 失败: {fid}")
             continue
+        export_dbg["lidar_rail_nonzero_ratio"] = _bev_rail_nonzero_ratio(lidar_bin)
+        rail_quality = _load_json_dict(os.path.join(os.path.abspath(img_root), fid, "rail_quality.json"))
+        oracle_rail = (
+            bool(rail_quality.get("label_track_prior_used", False))
+            and bool(rail_quality.get("enabled", False))
+            and float(rail_quality.get("quality_score", 0.0) or 0.0) >= float(bev_cfg.get("oracle_min_quality_score", 0.8))
+        )
 
         init_path = os.path.join(frame_dir, "init_pose.txt")
         with open(init_path, "w", encoding="utf-8") as f:
@@ -138,18 +194,43 @@ def run(context: RuntimeContext) -> None:
                 pass
         if os.path.isfile(after_path):
             parsed = _parse_pose_after_bev(after_path)
-            min_rail_score = float(bev_cfg.get("min_rail_score_to_apply", 0.01))
+            min_rail_score = float(
+                bev_cfg.get("oracle_min_rail_score_to_apply", bev_cfg.get("min_rail_score_to_apply", 0.01))
+                if oracle_rail
+                else bev_cfg.get("min_rail_score_to_apply", 0.01)
+            )
             actual_rail_score = float(breakdown.get("rail_score", 0.0)) if breakdown else 0.0
+            reject_reason = ""
+            if parsed and oracle_rail:
+                ok_delta, reject_reason = _delta_within_oracle_limits(parsed, rvec, tvec, bev_cfg)
+                if not ok_delta:
+                    parsed = None
             if parsed and actual_rail_score >= min_rail_score:
                 last_pose = parsed
                 context.bev_pose_by_frame[frame_id] = parsed
+                breakdown["delta_applied"] = True
+                breakdown["reject_reason"] = ""
                 print(f"  [BEV] 帧 {fid} BEV delta 已应用：rail_score={actual_rail_score:.4f} >= {min_rail_score}")
             else:
+                if not reject_reason:
+                    reject_reason = f"rail_score_below_{min_rail_score}"
                 print(
                     f"  [BEV] 帧 {fid} BEV delta 被拒绝：rail_score={actual_rail_score:.6f} < "
                     f"min_rail_score_to_apply={min_rail_score}，保留原始 init_pose"
                 )
                 parsed = None
+                breakdown["delta_applied"] = False
+                breakdown["reject_reason"] = reject_reason
+            breakdown.update(export_dbg)
+            breakdown["oracle_rail_mode"] = oracle_rail
+            breakdown["min_rail_score_to_apply"] = min_rail_score
+            breakdown["best_score_raw"] = float(breakdown.get("best_score_raw", breakdown.get("rail_score", 0.0)))
+            breakdown["best_score_norm"] = float(breakdown.get("rail_score", 0.0))
+            try:
+                with open(bev_dbg, "w", encoding="utf-8") as f:
+                    json.dump(breakdown, f, ensure_ascii=False)
+            except OSError:
+                pass
             write_unified_debug_json(
                 os.path.join(frame_dir, "debug_score_breakdown.json"),
                 stage="bev",

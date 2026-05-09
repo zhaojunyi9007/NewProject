@@ -232,9 +232,13 @@ struct WeightedRailEdgeCost {
                          const cv::Mat* weight_map,
                          const Eigen::Matrix3d& R_rect,
                          const Eigen::Matrix<double, 3, 4>& P_rect,
-                         int W, int H)
+                         int W, int H,
+                         double visibility_residual_weight = 0.0,
+                         double oob_residual_weight = 0.0)
         : pt_(pt), dist_map_(dist_map), weight_map_(weight_map),
-          R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H) {}
+          R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H),
+          visibility_residual_weight_(visibility_residual_weight),
+          oob_residual_weight_(oob_residual_weight) {}
 
     template <typename T>
     bool operator()(const T* const r, const T* const t, T* residual) const {
@@ -249,7 +253,7 @@ struct WeightedRailEdgeCost {
 
         Eigen::Matrix<T, 3, 1> p_rect = R_rect_.cast<T>() * p_cam;
         if (ScalarValue(p_rect.z()) < 0.1) {
-            residual[0] = T(0.0);
+            residual[0] = T(oob_residual_weight_) * T(std::sqrt(std::max(0.0, pt_.weight)));
             return true;
         }
 
@@ -264,8 +268,17 @@ struct WeightedRailEdgeCost {
         T v_f = uv.y() / uv.z();
         const double u_scalar = ScalarValue(u_f);
         const double v_scalar = ScalarValue(v_f);
+        const T eps = T(1e-6);
+        auto smooth_hinge = [&](const T& x) -> T {
+            return (x + ceres::sqrt(x * x + eps)) * T(0.5);
+        };
         if (u_scalar < 0 || u_scalar >= W_ - 1 || v_scalar < 0 || v_scalar >= H_ - 1) {
-            residual[0] = T(0.0);
+            const T left = smooth_hinge(-u_f);
+            const T right = smooth_hinge(u_f - T(W_ - 1));
+            const T top = smooth_hinge(-v_f);
+            const T bottom = smooth_hinge(v_f - T(H_ - 1));
+            residual[0] = T(oob_residual_weight_) * (left + right + top + bottom) / T(W_ + H_) *
+                          T(std::sqrt(std::max(0.0, pt_.weight)));
             return true;
         }
 
@@ -281,11 +294,17 @@ struct WeightedRailEdgeCost {
         if (weight_map_ && !weight_map_->empty()) {
             image_weight = BilinearInterpolateT(*weight_map_, u_f, v_f);
             const double iw = ScalarValue(image_weight);
-            if (iw <= 1e-4 || !std::isfinite(iw)) {
-                residual[0] = T(0.0);
+            if (!std::isfinite(iw)) {
+                residual[0] = T(visibility_residual_weight_) * T(std::sqrt(std::max(0.0, pt_.weight)));
                 return true;
             }
+            if (iw < 0.0) image_weight = T(0.0);
             if (iw > 1.0) image_weight = T(1.0);
+            if (iw <= 1e-4) {
+                residual[0] = T(visibility_residual_weight_) * T(std::sqrt(std::max(0.0, pt_.weight))) *
+                              (T(1.0) - image_weight);
+                return true;
+            }
         }
 
         residual[0] = dist * ceres::sqrt(T(std::max(0.0, pt_.weight)) * image_weight);
@@ -299,4 +318,6 @@ struct WeightedRailEdgeCost {
     Eigen::Matrix<double, 3, 4> P_rect_;
     int W_;
     int H_;
+    double visibility_residual_weight_;
+    double oob_residual_weight_;
 };

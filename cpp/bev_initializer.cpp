@@ -143,7 +143,11 @@ int main(int argc, char** argv) {
     {
         std::ofstream f(p_json);
         f << "{\"frame_id\":\"" << frame_id << "\",\"yaw_rad\":" << delta.yaw_rad << ",\"tx_m\":" << delta.tx_m
-          << ",\"ty_m\":" << delta.ty_m << ",\"rail_score\":" << score.rail_score << ",\"total\":" << score.total
+          << ",\"ty_m\":" << delta.ty_m
+          << ",\"rail_score\":" << score.rail_score
+          << ",\"best_score_raw\":" << score.best_score_raw
+          << ",\"best_score_norm\":" << score.best_score_norm
+          << ",\"total\":" << score.total
           << "}\n";
     }
 

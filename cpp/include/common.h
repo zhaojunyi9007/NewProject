@@ -130,6 +130,11 @@ struct ScoreBreakdown {
     double rail_sample_count = 0.0;
     double rail_visible_count = 0.0;
     double rail_low_visible_fallback = 0.0;
+    double rail_visible_ratio = 0.0;
+    double rail_low_visible_penalty_applied = 0.0;
+    double rail_mean_dist_visible = 0.0;
+    double rail_mean_weight_visible = 0.0;
+    double rail_strict_mode = 0.0;
 
     double total_score = 0.0;
 };

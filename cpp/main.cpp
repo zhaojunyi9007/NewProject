@@ -19,6 +19,9 @@ int main(int argc, char** argv) {
             << "            [--semantic_probs P] [--lidar_semantic_points P] [--init_pose_from_bev P]\n"
             << "            [--semantic_js_weight X] [--histogram_weight X] [--edge_weight X] [--rail_weight X]\n"
             << "            [--lidar_semantic_max_points N]\n"
+            << "            [--rail_low_visible_policy zero|penalty] [--min_rail_visible_count N]\n"
+            << "            [--min_rail_visible_ratio X] [--rail_low_visible_penalty X]\n"
+            << "            [--rail_visibility_residual_weight X] [--rail_oob_residual_weight X]\n"
             << "            [--class_weights \"w0,w1,...\"] [--pyramid_scales \"1.0,0.5,0.25\"]\n"
             << "            [--mode full_calib|refine_only] [--max_delta_deg X] [--max_delta_m X]\n";
     };
@@ -79,6 +82,12 @@ int main(int argc, char** argv) {
             else if (a == "--edge_weight" && need(i)) config.edge_weight = std::atof(argv[++i]);
             else if (a == "--rail_weight" && need(i)) config.rail_weight = std::atof(argv[++i]);
             else if (a == "--lidar_semantic_max_points" && need(i)) config.lidar_semantic_max_points = std::atoi(argv[++i]);
+            else if (a == "--rail_low_visible_policy" && need(i)) config.rail_low_visible_policy = argv[++i];
+            else if (a == "--min_rail_visible_count" && need(i)) config.min_rail_visible_count = std::atoi(argv[++i]);
+            else if (a == "--min_rail_visible_ratio" && need(i)) config.min_rail_visible_ratio = std::atof(argv[++i]);
+            else if (a == "--rail_low_visible_penalty" && need(i)) config.rail_low_visible_penalty = std::atof(argv[++i]);
+            else if (a == "--rail_visibility_residual_weight" && need(i)) config.rail_visibility_residual_weight = std::atof(argv[++i]);
+            else if (a == "--rail_oob_residual_weight" && need(i)) config.rail_oob_residual_weight = std::atof(argv[++i]);
             else if (a == "--class_weights" && need(i)) split_csv_doubles(argv[++i], &config.class_weights);
             else if (a == "--pyramid_scales" && need(i)) split_csv_doubles(argv[++i], &config.pyramid_scales);
 

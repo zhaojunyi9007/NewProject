@@ -79,7 +79,9 @@ bool EstimateBEVDelta(
     *out_delta = best;
     if (debug_score) {
         const double denom = static_cast<double>(std::max(1, L.rows * L.cols));
-        debug_score->rail_score = best_score / denom;
+        debug_score->best_score_raw = best_score;
+        debug_score->best_score_norm = best_score / denom;
+        debug_score->rail_score = debug_score->best_score_norm;
         debug_score->pole_score = 0.0;
         debug_score->total = debug_score->rail_score;
     }

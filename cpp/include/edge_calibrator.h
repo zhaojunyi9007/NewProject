@@ -29,6 +29,12 @@ struct EdgeCalibratorConfig {
     // Phase D7 (sam_2d): rail term weight (new).
     double rail_weight = 1.2;
     int lidar_semantic_max_points = 0;        // 0 means keep all points.
+    std::string rail_low_visible_policy = "zero";
+    int min_rail_visible_count = 50;
+    double min_rail_visible_ratio = 0.08;
+    double rail_low_visible_penalty = 0.50;
+    double rail_visibility_residual_weight = 0.0;
+    double rail_oob_residual_weight = 0.0;
     std::vector<double> class_weights;        // same order as image semantic classes
     std::vector<double> pyramid_scales;       // e.g. 1.0,0.5,0.25
 

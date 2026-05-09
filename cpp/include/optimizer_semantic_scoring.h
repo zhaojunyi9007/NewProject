@@ -28,6 +28,10 @@ struct SemanticScoreBreakdown {
 struct SemanticScoringConfig {
     std::vector<double> class_weights;
     std::vector<double> pyramid_scales;
+    std::string rail_low_visible_policy = "zero";
+    int min_rail_visible_count = 50;
+    double min_rail_visible_ratio = 0.08;
+    double rail_low_visible_penalty = 0.50;
 };
 
 // Binary format exported by tools/export_semantic_probs_bin.py
@@ -70,4 +74,3 @@ double ComputeSemanticScore(const std::vector<SemanticPointRecord>& lidar_sem,
                             const Eigen::Vector3d& t,
                             const SemanticScoringConfig& cfg,
                             SemanticScoreBreakdown* breakdown);
-
