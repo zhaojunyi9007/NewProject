@@ -72,6 +72,47 @@ def _load_json_dict(path: str) -> dict:
         return {}
 
 
+
+def _is_oracle_rail_enabled(rail_quality: dict, min_quality: float) -> bool:
+    return (
+        bool(rail_quality.get("label_track_prior_used", False))
+        and bool(rail_quality.get("enabled", False))
+        and float(rail_quality.get("quality_score", 0.0) or 0.0) >= float(min_quality)
+    )
+
+
+def _write_invalid_calib_result(path: str, rvec: list[float], tvec: list[float], reason: str, extra: dict | None = None) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    extra = extra or {}
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"r: {rvec[0]} {rvec[1]} {rvec[2]}\n")
+        f.write(f"t: {tvec[0]} {tvec[1]} {tvec[2]}\n")
+        f.write("Score: 0\n")
+        f.write("semantic_js_divergence: 0\n")
+        f.write("semantic_hist_similarity: 0\n")
+        f.write("edge_term_norm: 0\n")
+        f.write("rail_term_norm: 0\n")
+        f.write("final_pose_valid: 0\n")
+        f.write("rail_gate_failed: 1\n")
+        f.write("optimizer_skipped: 1\n")
+        f.write(f"invalid_reason: {reason}\n")
+        for k, v in extra.items():
+            if isinstance(v, (str, int, float, bool)):
+                f.write(f"{k}: {v}\n")
+            elif isinstance(v, (list, tuple)):
+                f.write(f"{k}: {' '.join(str(x) for x in v)}\n")
+
+
+def _should_skip_optimizer_for_rail_mismatch(sem_cfg: dict, oracle_rail: bool, rail_debug: dict, align_debug: dict) -> tuple[bool, str]:
+    if not oracle_rail or not bool(sem_cfg.get("skip_optimizer_on_rail_refinement_mismatch", False)):
+        return False, ""
+    if rail_debug and not bool(rail_debug.get("rail_refinement_valid", True)):
+        return True, "rail_bev_alignment_mismatch"
+    if align_debug and not bool(align_debug.get("rail_bev_alignment_valid", True)):
+        return True, "rail_bev_alignment_mismatch"
+    return False, ""
+
+
 def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: bool) -> dict:
     out = dict(breakdown or {})
     out.setdefault("final_pose_valid", 1.0)
@@ -278,6 +319,36 @@ def run(context: RuntimeContext) -> None:
                     oracle_rail = False
             else:
                 oracle_rail = False
+            align_debug = _load_json_dict(f"{feature_base}_rail_bev_alignment_debug.json")
+            rail_debug_current = _load_json_dict(f"{feature_base}_rail_bev_debug.json")
+            skip_optimizer, skip_reason = _should_skip_optimizer_for_rail_mismatch(
+                sem_cfg, bool(oracle_rail), rail_debug_current, align_debug
+            )
+            if skip_optimizer:
+                extra = {
+                    "rail_refinement_valid": rail_debug_current.get("rail_refinement_valid", 1),
+                    "rail_bev_alignment_valid": align_debug.get("rail_bev_alignment_valid", 0),
+                    "rail_bev_alignment_best_transform": align_debug.get("best_transform", ""),
+                    "rail_bev_alignment_best_shift_cells": align_debug.get("best_shift_cells", [0, 0]),
+                    "rail_bev_alignment_best_score": align_debug.get("best_shift_score", 0.0),
+                }
+                _write_invalid_calib_result(output_file, list(r_use), list(t_use), skip_reason, extra)
+                br = _parse_calib_breakdown(output_file)
+                pose_out = _parse_calib_pose(output_file)
+                write_unified_debug_json(
+                    os.path.join(calib_dir, f"{frame_id:010d}_debug_score_breakdown.json"),
+                    stage="calib",
+                    frame_id=f"{frame_id:010d}",
+                    input_pose={"rvec": list(r_use), "tvec": list(t_use)},
+                    output_pose=pose_out,
+                    breakdown=br,
+                    elapsed_sec=0.0,
+                    meta={"optimizer_skipped": True, "skip_reason": skip_reason},
+                )
+                context.current_pose_semantic = pose_out
+                print(f"[Info] Skip optimizer for frame {frame_id:010d}: {skip_reason}")
+                continue
+
             rail_meta_path = f"{feature_base}_rail_meta.json"
             if os.path.isfile(rail_meta_path):
                 try:
@@ -331,6 +402,16 @@ def run(context: RuntimeContext) -> None:
                 str(effective_rail_weight),
                 "--lidar_semantic_max_points",
                 str(int(sem_cfg.get("lidar_semantic_max_points", 12000))),
+                "--stratified_semantic_sampling",
+                "1" if bool(sem_cfg.get("stratified_semantic_sampling", False)) else "0",
+                "--rail_early_reject_enabled",
+                "1" if bool(sem_cfg.get("rail_early_reject_enabled", False)) else "0",
+                "--rail_early_reject_visible_ratio",
+                str(float(sem_cfg.get("rail_early_reject_visible_ratio", 0.02))),
+                "--rail_early_reject_visible_count",
+                str(int(sem_cfg.get("rail_early_reject_visible_count", 10))),
+                "--optimizer_num_threads",
+                str(int(sem_cfg.get("optimizer_num_threads", 0))),
                 "--rail_low_visible_policy",
                 str(sem_cfg.get("rail_low_visible_policy", "penalty" if oracle_rail else "zero") if oracle_rail else "zero"),
                 "--edge_low_visible_policy",

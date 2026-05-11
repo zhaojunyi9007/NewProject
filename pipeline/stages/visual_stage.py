@@ -11,7 +11,7 @@ from pipeline.datasets import get_adapter
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def _read_calib_pose(path: str):
+def _read_calib_meta(path: str) -> dict[str, str]:
     kv: dict[str, str] = {}
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -21,11 +21,42 @@ def _read_calib_pose(path: str):
             if ":" in s:
                 k, v = s.split(":", 1)
                 kv[k.strip()] = v.strip()
+    return kv
+
+
+def _read_calib_pose(path: str):
+    kv = _read_calib_meta(path)
     if "r" not in kv or "t" not in kv:
         return None
     r_vec = kv["r"].split()
     t_vec = kv["t"].split()
     return (r_vec, t_vec) if len(r_vec) == 3 and len(t_vec) == 3 else None
+
+
+def _calib_meta_valid(kv: dict[str, str]) -> bool:
+    try:
+        return float((kv.get("final_pose_valid", "1") or "1").split()[0]) >= 0.5
+    except (TypeError, ValueError):
+        return True
+
+
+def _initial_pose_from_context(context: RuntimeContext, adapter):
+    ext = None
+    if hasattr(adapter, "load_initial_extrinsic"):
+        try:
+            ext = adapter.load_initial_extrinsic()
+        except Exception:
+            ext = None
+    if isinstance(ext, dict) and "rvec" in ext and "tvec" in ext:
+        return ([str(float(x)) for x in ext["rvec"][:3]], [str(float(x)) for x in ext["tvec"][:3]])
+    if isinstance(ext, (list, tuple)) and len(ext) >= 2:
+        r0, t0 = ext[0], ext[1]
+        if len(r0) >= 3 and len(t0) >= 3:
+            return ([str(float(x)) for x in r0[:3]], [str(float(x)) for x in t0[:3]])
+    cfg_ext = (context.config.get("calibration") or {}).get("initial_extrinsic") or {}
+    r = cfg_ext.get("rotation", [0.0, 0.0, 0.0])
+    t = cfg_ext.get("translation", [0.0, 0.0, 0.0])
+    return ([str(float(x)) for x in r[:3]], [str(float(x)) for x in t[:3]])
 
 
 def _read_window_pose(path: str):
@@ -67,18 +98,28 @@ def run(context: RuntimeContext) -> None:
             print(f"[Warning] 标定结果不存在，跳过帧 {frame_id:010d}")
             continue
 
-        pose_source = str((context.config.get("visualization") or {}).get("pose_source", "refined") or "refined")
+        vis_cfg = context.config.get("visualization") or {}
+        pose_source = str(vis_cfg.get("pose_source", "refined") or "refined")
+        calib_meta = _read_calib_meta(calib_result_file)
+        calib_valid = _calib_meta_valid(calib_meta)
         pose = None
         used_pose_source = "calibration"
-        if pose_source == "refined":
-            ref_root = (context.paths or {}).get("refinement") or context.config["data"].get("refinement_output_dir", "")
-            refined_pose = os.path.join(ref_root, f"{frame_id:010d}_window_pose.txt")
-            if os.path.isfile(refined_pose):
-                pose = _read_window_pose(refined_pose)
-                used_pose_source = "refined"
-        if pose is None:
-            pose = _read_calib_pose(calib_result_file)
-            used_pose_source = "calibration"
+        invalid_reason = calib_meta.get("invalid_reason", "invalid_calibration_pose")
+        reject_invalid = bool(vis_cfg.get("reject_invalid_pose", True))
+        invalid_fallback = str(vis_cfg.get("invalid_pose_fallback", "initial") or "initial")
+        if not calib_valid and reject_invalid and invalid_fallback == "initial":
+            pose = _initial_pose_from_context(context, adapter)
+            used_pose_source = "initial_due_to_invalid_calib"
+        else:
+            if pose_source == "refined":
+                ref_root = (context.paths or {}).get("refinement") or context.config["data"].get("refinement_output_dir", "")
+                refined_pose = os.path.join(ref_root, f"{frame_id:010d}_window_pose.txt")
+                if os.path.isfile(refined_pose):
+                    pose = _read_window_pose(refined_pose)
+                    used_pose_source = "refined"
+            if pose is None:
+                pose = _read_calib_pose(calib_result_file)
+                used_pose_source = "calibration"
         if pose is None:
             print(f"[Warning] 标定结果格式异常(缺少 r/t)，跳过帧 {frame_id:010d}: {calib_result_file}")
             continue
@@ -86,6 +127,8 @@ def run(context: RuntimeContext) -> None:
 
         print(f"可视化帧 {frame_id:010d}...")
         print(f"  visualization_pose_source={used_pose_source}")
+        if not calib_valid:
+            print(f"  invalid_calibration_pose=1 reason={invalid_reason}")
         print(f"  logical_frame_id={frame_id:010d}")
         print(f"  source_image={img_path}")
         print(f"  feature_base={feature_base}")
@@ -104,7 +147,6 @@ def run(context: RuntimeContext) -> None:
         if img_sensor:
             cmd.extend(["--image_sensor", img_sensor])
 
-        vis_cfg = context.config.get("visualization") or {}
         if bool(vis_cfg.get("enable_diag_panels", True)):
             img_feat = os.path.join(
                 context.config["data"].get("image_features_output_dir", "") or "",

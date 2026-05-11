@@ -9,8 +9,8 @@
 #include <string>
 #include <vector>
 
-#include <ceres/ceres.h>
-#include <ceres/rotation.h>
+#include "/usr/include/ceres/ceres.h"
+#include "/usr/include/ceres/rotation.h"
 #include <eigen3/Eigen/Core>
 #include <eigen3/Eigen/Geometry>
 #include <opencv2/opencv.hpp>

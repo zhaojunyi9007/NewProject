@@ -29,6 +29,16 @@ struct EdgeCalibratorConfig {
     // Phase D7 (sam_2d): rail term weight (new).
     double rail_weight = 1.2;
     int lidar_semantic_max_points = 0;        // 0 means keep all points.
+    bool stratified_semantic_sampling = false;
+    int semantic_sample_budget_rail = 800;
+    int semantic_sample_budget_ballast = 800;
+    int semantic_sample_budget_vertical = 600;
+    int semantic_sample_budget_platform_building = 500;
+    int semantic_sample_budget_other = 300;
+    bool rail_early_reject_enabled = false;
+    int rail_early_reject_visible_count = 10;
+    double rail_early_reject_visible_ratio = 0.02;
+    int optimizer_num_threads = 0;
     std::string rail_low_visible_policy = "zero";
     int min_rail_visible_count = 50;
     double min_rail_visible_ratio = 0.08;
@@ -60,6 +70,7 @@ public:
 private:
     // Phase E11 (sam_2d): sample rail points from 3D rail lines.
     void BuildRailSamplePoints();
+    void DownsampleSemanticPoints();
 
     // Phase B5: new high-level flow (kept private to preserve public API compatibility).
     void ApplyPoseFromBEVIfProvided();

@@ -82,6 +82,16 @@ int main(int argc, char** argv) {
             else if (a == "--edge_weight" && need(i)) config.edge_weight = std::atof(argv[++i]);
             else if (a == "--rail_weight" && need(i)) config.rail_weight = std::atof(argv[++i]);
             else if (a == "--lidar_semantic_max_points" && need(i)) config.lidar_semantic_max_points = std::atoi(argv[++i]);
+            else if (a == "--stratified_semantic_sampling" && need(i)) config.stratified_semantic_sampling = (std::atoi(argv[++i]) != 0);
+            else if (a == "--semantic_sample_budget_rail" && need(i)) config.semantic_sample_budget_rail = std::atoi(argv[++i]);
+            else if (a == "--semantic_sample_budget_ballast" && need(i)) config.semantic_sample_budget_ballast = std::atoi(argv[++i]);
+            else if (a == "--semantic_sample_budget_vertical" && need(i)) config.semantic_sample_budget_vertical = std::atoi(argv[++i]);
+            else if (a == "--semantic_sample_budget_platform_building" && need(i)) config.semantic_sample_budget_platform_building = std::atoi(argv[++i]);
+            else if (a == "--semantic_sample_budget_other" && need(i)) config.semantic_sample_budget_other = std::atoi(argv[++i]);
+            else if (a == "--rail_early_reject_enabled" && need(i)) config.rail_early_reject_enabled = (std::atoi(argv[++i]) != 0);
+            else if (a == "--rail_early_reject_visible_count" && need(i)) config.rail_early_reject_visible_count = std::atoi(argv[++i]);
+            else if (a == "--rail_early_reject_visible_ratio" && need(i)) config.rail_early_reject_visible_ratio = std::atof(argv[++i]);
+            else if (a == "--optimizer_num_threads" && need(i)) config.optimizer_num_threads = std::atoi(argv[++i]);
             else if (a == "--rail_low_visible_policy" && need(i)) config.rail_low_visible_policy = argv[++i];
             else if (a == "--edge_low_visible_policy" && need(i)) config.edge_low_visible_policy = argv[++i];
             else if (a == "--min_edge_visible_count" && need(i)) config.min_edge_visible_count = std::atoi(argv[++i]);

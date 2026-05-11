@@ -245,20 +245,20 @@ bool LoadSemanticPoints(const std::string& path, std::vector<SemanticPointRecord
     return !out.empty();
 }
 
-double ComputeSemanticJSDivergence(const std::vector<SemanticPointRecord>& lidar_sem,
-                                  const SemanticProbMaps& image_probs,
-                                  const Eigen::Matrix3d& R_rect,
-                                  const Eigen::Matrix<double, 3, 4>& P_rect,
-                                  const Eigen::Matrix3d& R,
-                                  const Eigen::Vector3d& t,
-                                  const SemanticScoringConfig& cfg,
-                                  SemanticScoreBreakdown* breakdown) {
+double ComputeSemanticDistributionScore(const std::vector<SemanticPointRecord>& lidar_sem,
+                                        const SemanticProbMaps& image_probs,
+                                        const Eigen::Matrix3d& R_rect,
+                                        const Eigen::Matrix<double, 3, 4>& P_rect,
+                                        const Eigen::Matrix3d& R,
+                                        const Eigen::Vector3d& t,
+                                        const SemanticScoringConfig& cfg,
+                                        SemanticScoreBreakdown* breakdown) {
+    SemanticScoreBreakdown bd;
     if (image_probs.empty() || lidar_sem.empty()) {
-        if (breakdown) {
-            breakdown->semantic_js_divergence = 0.0;
-        }
+        if (breakdown) *breakdown = bd;
         return 0.0;
     }
+
     const int C = image_probs.C;
     std::vector<double> Pdist(static_cast<size_t>(C), 0.0);
     std::vector<double> Qdist(static_cast<size_t>(C), 0.0);
@@ -278,17 +278,34 @@ double ComputeSemanticJSDivergence(const std::vector<SemanticPointRecord>& lidar
         used++;
     }
     if (used < 5) {
-        if (breakdown) breakdown->semantic_js_divergence = 0.0;
+        if (breakdown) *breakdown = bd;
         return 0.0;
     }
+
     NormalizeProb(&Pdist);
     NormalizeProb(&Qdist);
     ApplyClassWeights(&Pdist, cfg.class_weights);
     ApplyClassWeights(&Qdist, cfg.class_weights);
 
-    const double js = JSD(Pdist, Qdist);
-    if (breakdown) breakdown->semantic_js_divergence = js;
-    return js;
+    bd.semantic_js_divergence = JSD(Pdist, Qdist);
+    const double l1 = L1(Pdist, Qdist);
+    bd.semantic_hist_similarity = std::max(0.0, 1.0 - 0.5 * l1);
+    if (breakdown) *breakdown = bd;
+    return (-bd.semantic_js_divergence) + 0.5 * bd.semantic_hist_similarity;
+}
+
+double ComputeSemanticJSDivergence(const std::vector<SemanticPointRecord>& lidar_sem,
+                                  const SemanticProbMaps& image_probs,
+                                  const Eigen::Matrix3d& R_rect,
+                                  const Eigen::Matrix<double, 3, 4>& P_rect,
+                                  const Eigen::Matrix3d& R,
+                                  const Eigen::Vector3d& t,
+                                  const SemanticScoringConfig& cfg,
+                                  SemanticScoreBreakdown* breakdown) {
+    SemanticScoreBreakdown bd;
+    ComputeSemanticDistributionScore(lidar_sem, image_probs, R_rect, P_rect, R, t, cfg, &bd);
+    if (breakdown) breakdown->semantic_js_divergence = bd.semantic_js_divergence;
+    return bd.semantic_js_divergence;
 }
 
 double ComputeSemanticHistogramConsistency(const std::vector<SemanticPointRecord>& lidar_sem,
@@ -299,42 +316,10 @@ double ComputeSemanticHistogramConsistency(const std::vector<SemanticPointRecord
                                           const Eigen::Vector3d& t,
                                           const SemanticScoringConfig& cfg,
                                           SemanticScoreBreakdown* breakdown) {
-    if (image_probs.empty() || lidar_sem.empty()) {
-        if (breakdown) {
-            breakdown->semantic_hist_similarity = 0.0;
-        }
-        return 0.0;
-    }
-    const int C = image_probs.C;
-    std::vector<double> Pdist(static_cast<size_t>(C), 0.0);
-    std::vector<double> Qdist(static_cast<size_t>(C), 0.0);
-    std::vector<double> p_prior;
-    std::vector<double> q_uv;
-    int used = 0;
-    for (const auto& sp : lidar_sem) {
-        int u = 0, v = 0;
-        if (!ProjectPoint(sp.p, R_rect, P_rect, R, t, image_probs.W, image_probs.H, u, v)) continue;
-        BuildLidarSemanticPriorDistribution(sp, C, &p_prior);
-        if (!SampleSemanticProbNN(image_probs, u, v, &q_uv)) continue;
-        NormalizeProb(&q_uv);
-        for (int c = 0; c < C; ++c) {
-            Pdist[static_cast<size_t>(c)] += p_prior[static_cast<size_t>(c)];
-            Qdist[static_cast<size_t>(c)] += q_uv[static_cast<size_t>(c)];
-        }
-        used++;
-    }
-    if (used < 5) {
-        if (breakdown) breakdown->semantic_hist_similarity = 0.0;
-        return 0.0;
-    }
-    NormalizeProb(&Pdist);
-    NormalizeProb(&Qdist);
-    ApplyClassWeights(&Pdist, cfg.class_weights);
-    ApplyClassWeights(&Qdist, cfg.class_weights);
-    const double l1 = L1(Pdist, Qdist);
-    const double sim = std::max(0.0, 1.0 - 0.5 * l1);  // [0,1]
-    if (breakdown) breakdown->semantic_hist_similarity = sim;
-    return sim;
+    SemanticScoreBreakdown bd;
+    ComputeSemanticDistributionScore(lidar_sem, image_probs, R_rect, P_rect, R, t, cfg, &bd);
+    if (breakdown) breakdown->semantic_hist_similarity = bd.semantic_hist_similarity;
+    return bd.semantic_hist_similarity;
 }
 
 double ComputeSemanticScore(const std::vector<SemanticPointRecord>& lidar_sem,
@@ -345,11 +330,5 @@ double ComputeSemanticScore(const std::vector<SemanticPointRecord>& lidar_sem,
                             const Eigen::Vector3d& t,
                             const SemanticScoringConfig& cfg,
                             SemanticScoreBreakdown* breakdown) {
-    SemanticScoreBreakdown bd;
-    const double js = ComputeSemanticJSDivergence(lidar_sem, image_probs, R_rect, P_rect, R, t, cfg, &bd);
-    const double hist = ComputeSemanticHistogramConsistency(lidar_sem, image_probs, R_rect, P_rect, R, t, cfg, &bd);
-    if (breakdown) *breakdown = bd;
-    // Higher is better: penalize divergence, reward histogram similarity.
-    return (-js) + 0.5 * hist;
+    return ComputeSemanticDistributionScore(lidar_sem, image_probs, R_rect, P_rect, R, t, cfg, breakdown);
 }
-

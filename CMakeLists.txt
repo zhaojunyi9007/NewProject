@@ -4,10 +4,11 @@ project(HSR_Lidar_Camera_Calibration)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Prefer conda environment libraries when available.
+# The runtime is usually a conda env, but this project links against system PCL/Ceres/GDAL.
+# Do not prepend CONDA_PREFIX to CMAKE_PREFIX_PATH here: conda glog/libcurl can conflict
+# with the system libraries pulled in by PCL/GDAL and break optimizer builds.
 if(DEFINED ENV{CONDA_PREFIX})
-    list(PREPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
-    message(STATUS "Conda prefix detected: $ENV{CONDA_PREFIX}")
+    message(STATUS "Conda prefix detected for runtime: $ENV{CONDA_PREFIX}")
 endif()
 
 # --- Find Packages ---
@@ -15,16 +16,17 @@ find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Ceres REQUIRED)
+find_package(OpenMP)
 
 # --- Include Directories ---
 # Put project path first so we can provide tiny compatibility shims
 # (e.g. a glog namespace bridge for some conda builds).
+include_directories(BEFORE /usr/include)
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp   # cpp/ 下有 include/common.h 等头文件
     ${PCL_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIRS}
-    ${CERES_INCLUDE_DIRS}
 )
 
 link_directories(
@@ -36,6 +38,22 @@ add_definitions(${PCL_DEFINITIONS})
 # --- Output Directories ---
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
+function(strip_conda_include_dirs target_name)
+    if(DEFINED ENV{CONDA_PREFIX})
+        get_target_property(_inc ${target_name} INCLUDE_DIRECTORIES)
+        if(_inc)
+            list(FILTER _inc EXCLUDE REGEX "^$ENV{CONDA_PREFIX}/include")
+            set_target_properties(${target_name} PROPERTIES INCLUDE_DIRECTORIES "${_inc}")
+        endif()
+        get_target_property(_sysinc ${target_name} SYSTEM_INCLUDE_DIRECTORIES)
+        if(_sysinc)
+            list(FILTER _sysinc EXCLUDE REGEX "^$ENV{CONDA_PREFIX}/include")
+            set_target_properties(${target_name} PROPERTIES SYSTEM_INCLUDE_DIRECTORIES "${_sysinc}")
+        endif()
+    endif()
+endfunction()
+
+
 # --- Common Utils ---
 # 编译 io_utils.cpp 为一个对象库或者直接添加到目标中
 # 这里为了简单，直接添加到每个目标源列表中
@@ -45,6 +63,7 @@ add_executable(lidar_extractor
     cpp/lidar_extractor.cpp 
     cpp/io_utils.cpp
     cpp/bev_builder.cpp
+    cpp/bev_io.cpp
     cpp/rail_bev_extractor.cpp
     cpp/vertical_structure_extractor.cpp
 )
@@ -57,10 +76,9 @@ target_link_libraries(lidar_extractor
 add_executable(bev_initializer
     cpp/bev_initializer.cpp
     cpp/bev_matcher.cpp
-    cpp/bev_builder.cpp
+    cpp/bev_io.cpp
 )
 target_link_libraries(bev_initializer
-    ${PCL_LIBRARIES}
     ${OpenCV_LIBS}
     Eigen3::Eigen
 )
@@ -75,11 +93,14 @@ add_executable(optimizer
     cpp/optimizer_semantic_scoring.cpp
 )
 target_link_libraries(optimizer
-    ${PCL_LIBRARIES}
     ${OpenCV_LIBS}
     ${CERES_LIBRARIES}
     Eigen3::Eigen
 )
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(optimizer OpenMP::OpenMP_CXX)
+endif()
+strip_conda_include_dirs(optimizer)
 
 message(STATUS "=== Build Configuration ===")
 message(STATUS "Project: ${PROJECT_NAME}")

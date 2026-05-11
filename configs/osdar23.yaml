@@ -117,6 +117,9 @@ bev:
   oracle_max_abs_ty_m: 1.0
   oracle_max_abs_yaw_deg: 3.0
   use_refined_lidar_rail: true
+  auto_test_bev_axis_transforms: true
+  rail_alignment_min_overlap: 0.15
+  rail_alignment_max_shift_cells: 120
 
 semantic_calib:
   rail_weight: 1.5
@@ -136,7 +139,14 @@ semantic_calib:
   min_final_rail_visible_ratio: 0.08
   min_final_rail_visible_count: 50
   reject_pose_on_rail_gate_fail: true
-  lidar_semantic_max_points: 12000
+  lidar_semantic_max_points: 3000
+  stratified_semantic_sampling: true
+  rail_early_reject_enabled: true
+  rail_early_reject_visible_ratio: 0.02
+  rail_early_reject_visible_count: 10
+  optimizer_num_threads: 0
+  use_fallback_rail_samples_when_mismatch: false
+  skip_optimizer_on_rail_refinement_mismatch: true
   rail_low_visible_policy: "penalty"
   min_rail_visible_count: 50
   min_rail_visible_ratio: 0.08
@@ -167,6 +177,11 @@ semantic_calib:
 
 visualization:
   pose_source: "refined"
+  reject_invalid_pose: true
+  invalid_pose_fallback: "initial"
+
+refine:
+  skip_invalid_calibration_pose: true
 
 # ========================================
 # LiDAR 特征提取配置（针对 OSDaR23 点云密度微调）

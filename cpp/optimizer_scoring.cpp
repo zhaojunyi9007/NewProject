@@ -345,19 +345,48 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
                                                     double w_rail,
                                                     const SemanticScoringConfig& sem_cfg,
                                                     TotalScoreBreakdown* breakdown) {
+    (void)lines3d;
     TotalScoreBreakdown bd;
+    bd.semantic_points_used = static_cast<double>(lidar_semantic_points.size());
 
-    // Semantic terms (dominant).
+    // Rail is the hard oracle cue. Score it first so obviously bad candidates can
+    // skip the expensive full semantic distribution pass.
+    bd.rail_score_norm = 0.0;
+    if (!rail_dist.empty() && !rail_points.empty()) {
+        RailAttractionStats rail_stats;
+        bd.rail_score_norm = RailAttractionScoreNorm(
+            rail_points, rail_dist, rail_weight, R_rect, P_rect, W, H, R, t, sem_cfg, &rail_stats);
+        bd.rail_sample_count = static_cast<double>(rail_points.size());
+        bd.rail_visible_count = static_cast<double>(rail_stats.visible_count);
+        bd.rail_low_visible_fallback = rail_stats.low_visible ? 1.0 : 0.0;
+        bd.rail_visible_ratio = rail_stats.visible_ratio;
+        bd.rail_low_visible_penalty_applied = rail_stats.penalty_applied ? 1.0 : 0.0;
+        bd.rail_mean_dist_visible = rail_stats.mean_dist;
+        bd.rail_mean_weight_visible = rail_stats.mean_weight;
+        bd.rail_strict_mode = (sem_cfg.rail_low_visible_policy == "penalty") ? 1.0 : 0.0;
+    }
+    bd.rail_score = w_rail * bd.rail_score_norm;
+
+    const bool rail_early_reject =
+        sem_cfg.rail_early_reject_enabled && !rail_points.empty() &&
+        (bd.rail_visible_count < static_cast<double>(std::max(1, sem_cfg.rail_early_reject_visible_count)) ||
+         bd.rail_visible_ratio < std::max(0.0, sem_cfg.rail_early_reject_visible_ratio));
+    if (rail_early_reject) {
+        bd.rail_early_reject_applied = 1.0;
+        bd.rail_early_reject_count = 1.0;
+        bd.total_score = bd.rail_score;
+        if (breakdown) *breakdown = bd;
+        return bd.total_score;
+    }
+
+    // Combined semantic pass: one projection/traversal computes both JSD and histogram similarity.
     SemanticScoreBreakdown sem_bd;
-    bd.semantic_js_divergence =
-        ComputeSemanticJSDivergence(lidar_semantic_points, image_semantic_probs, R_rect, P_rect, R, t, sem_cfg, &sem_bd);
-    bd.semantic_hist_similarity = 
-        ComputeSemanticHistogramConsistency(lidar_semantic_points, image_semantic_probs, R_rect, P_rect, R, t, sem_cfg, &sem_bd);
-
+    ComputeSemanticDistributionScore(lidar_semantic_points, image_semantic_probs, R_rect, P_rect, R, t, sem_cfg, &sem_bd);
+    bd.semantic_js_divergence = sem_bd.semantic_js_divergence;
+    bd.semantic_hist_similarity = sem_bd.semantic_hist_similarity;
     bd.semantic_js_score = -bd.semantic_js_divergence;
     bd.semantic_hist_score = bd.semantic_hist_similarity;
 
-    // Edge term: normalize by point count for scale stability.
     bd.edge_score_norm = 0.0;
     if (!edge_dist.empty() && !edge_points.empty()) {
         int edge_visible_count = 0;
@@ -373,30 +402,11 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
         bd.edge_low_visible_fallback = edge_low_visible ? 1.0 : 0.0;
     }
 
-    // Phase F (sam_2d): rail term (reuses edge attraction score on rail distance/weight maps).
-    bd.rail_score_norm = 0.0;
-    if (!rail_dist.empty() && !rail_points.empty()) {
-        RailAttractionStats rail_stats;
-        bd.rail_score_norm = RailAttractionScoreNorm(
-            rail_points, rail_dist, rail_weight, R_rect, P_rect, W, H, R, t, sem_cfg, &rail_stats);
-        bd.rail_sample_count = static_cast<double>(rail_points.size());
-        bd.rail_visible_count = static_cast<double>(rail_stats.visible_count);
-        bd.rail_low_visible_fallback = rail_stats.low_visible ? 1.0 : 0.0;
-        bd.rail_visible_ratio = rail_stats.visible_ratio;
-        bd.rail_low_visible_penalty_applied = rail_stats.penalty_applied ? 1.0 : 0.0;
-        bd.rail_mean_dist_visible = rail_stats.mean_dist;
-        bd.rail_mean_weight_visible = rail_stats.mean_weight;
-        bd.rail_strict_mode = (sem_cfg.rail_low_visible_policy == "penalty") ? 1.0 : 0.0;
-    }
-
     bd.edge_score = w_edge * bd.edge_score_norm;
-    bd.rail_score = w_rail * bd.rail_score_norm;
+    bd.total_score = w_semantic_js * bd.semantic_js_score +
+                     w_semantic_hist * bd.semantic_hist_score +
+                     bd.edge_score + bd.rail_score;
 
-    // Phase 8 (sam_2d): rail term is the only track-specific term in total score.
-    bd.total_score = w_semantic_js * bd.semantic_js_score + w_semantic_hist * bd.semantic_hist_score + bd.edge_score + bd.rail_score;
-
-    if (breakdown) {
-        *breakdown = bd;
-    }
+    if (breakdown) *breakdown = bd;
     return bd.total_score;
 }

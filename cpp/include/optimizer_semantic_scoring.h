@@ -35,6 +35,9 @@ struct SemanticScoringConfig {
     std::string edge_low_visible_policy = "zero";
     int min_edge_visible_count = 50;
     double edge_low_visible_penalty = 0.15;
+    bool rail_early_reject_enabled = false;
+    int rail_early_reject_visible_count = 10;
+    double rail_early_reject_visible_ratio = 0.02;
 };
 
 // Binary format exported by tools/export_semantic_probs_bin.py
@@ -51,6 +54,15 @@ bool LoadSemanticPoints(const std::string& path, std::vector<SemanticPointRecord
 // - Computes:
 //   * semantic_js_divergence (lower is better)
 //   * semantic_hist_similarity (higher is better)
+double ComputeSemanticDistributionScore(const std::vector<SemanticPointRecord>& lidar_sem,
+                                        const SemanticProbMaps& image_probs,
+                                        const Eigen::Matrix3d& R_rect,
+                                        const Eigen::Matrix<double, 3, 4>& P_rect,
+                                        const Eigen::Matrix3d& R,
+                                        const Eigen::Vector3d& t,
+                                        const SemanticScoringConfig& cfg,
+                                        SemanticScoreBreakdown* breakdown);
+
 double ComputeSemanticJSDivergence(const std::vector<SemanticPointRecord>& lidar_sem,
                                   const SemanticProbMaps& image_probs,
                                   const Eigen::Matrix3d& R_rect,

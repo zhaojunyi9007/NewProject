@@ -64,6 +64,37 @@ def _parse_calib_result(path: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _calib_pose_valid(parsed: Dict[str, Any]) -> bool:
+    br = parsed.get("breakdown") or {}
+    try:
+        return float(br.get("final_pose_valid", 1.0) or 0.0) >= 0.5
+    except (TypeError, ValueError):
+        return True
+
+
+def _write_refine_skip_debug(
+    out: str,
+    fid: str,
+    frame_id: int,
+    parsed: Dict[str, Any],
+    obs: float,
+    obs_debug: Dict[str, Any],
+    reason: str,
+) -> None:
+    debug = {
+        "frame_id": frame_id,
+        "refinement_skipped": 1,
+        "skip_reason": reason,
+        "observability": obs,
+        "observability_debug": obs_debug,
+        "semantic_rvec": parsed.get("rvec"),
+        "semantic_tvec": parsed.get("tvec"),
+        "calibration_breakdown": parsed.get("breakdown") or {},
+    }
+    with open(os.path.join(out, f"{fid}_window_debug.json"), "w", encoding="utf-8") as f:
+        json.dump(debug, f, indent=2, ensure_ascii=False)
+
+
 def _save_trajectory_png(
     path: str,
     frames: List[int],
@@ -147,6 +178,33 @@ def run(context: RuntimeContext) -> None:
             frame_id, lidar_dir=lidar_dir, image_features_dir=image_features_dir, config=context.config
         )
         br = parsed.get("breakdown") or {}
+
+        if bool(cfg.get("skip_invalid_calibration_pose", True)) and not _calib_pose_valid(parsed):
+            skip_reason = "invalid_calibration_pose"
+            stale_pose = os.path.join(out, f"{fid}_window_pose.txt")
+            if os.path.exists(stale_pose):
+                try:
+                    os.remove(stale_pose)
+                except OSError:
+                    pass
+            _write_refine_skip_debug(out, fid, frame_id, parsed, obs, dbg, skip_reason)
+            write_unified_debug_json(
+                os.path.join(out, f"{fid}_debug_score_breakdown.json"),
+                stage="refine",
+                frame_id=fid,
+                input_pose={"rvec": list(parsed["rvec"]), "tvec": list(parsed["tvec"])},
+                output_pose=None,
+                breakdown=dict(br) if br else None,
+                observability=obs,
+                meta={
+                    "refinement_skipped": True,
+                    "skip_reason": skip_reason,
+                    "window_debug": f"{fid}_window_debug.json",
+                },
+            )
+            save_state(state_path, state)
+            print(f"  frame={fid} refinement_skipped=1 reason={skip_reason}")
+            continue
 
         append_frame_result(
             state,

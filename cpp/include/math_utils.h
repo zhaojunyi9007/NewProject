@@ -2,8 +2,8 @@
 
 #include <cmath>
 
-#include <ceres/ceres.h>
-#include <ceres/jet.h>
+#include "/usr/include/ceres/ceres.h"
+#include "/usr/include/ceres/jet.h"
 #include <opencv2/opencv.hpp>
 
 template <typename T>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose image/LiDAR rail BEV alignment overlap and coarse cell shift."""
+"""Diagnose image/LiDAR rail BEV alignment overlap, axis transforms, and coarse cell shift."""
 
 from __future__ import annotations
 
@@ -40,9 +40,7 @@ def _load_refined_png(path: str | None, shape: tuple[int, int]) -> np.ndarray:
     if img is None:
         return np.zeros(shape, dtype=np.float32)
     arr = img.astype(np.float32) / 255.0
-    if arr.shape != shape:
-        arr = cv2.resize(arr, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
-    return arr
+    return _resize_like(arr, shape)
 
 
 def _resize_like(src: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -51,6 +49,22 @@ def _resize_like(src: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     import cv2
 
     return cv2.resize(src.astype(np.float32), (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def _apply_transform(src: np.ndarray, name: str) -> np.ndarray:
+    if name == "identity":
+        return src
+    if name == "flip_x":
+        return np.fliplr(src)
+    if name == "flip_y":
+        return np.flipud(src)
+    if name == "swap_xy":
+        return src.T
+    if name == "swap_xy_flip_x":
+        return np.fliplr(src.T)
+    if name == "swap_xy_flip_y":
+        return np.flipud(src.T)
+    raise ValueError(f"unknown transform: {name}")
 
 
 def _overlap(a: np.ndarray, b: np.ndarray, threshold: float) -> float:
@@ -108,22 +122,72 @@ def _best_shift(image: np.ndarray, lidar: np.ndarray, threshold: float, max_shif
     return best, float(best_score)
 
 
-def diagnose(image_pseudo_bev: str, lidar_bev_maps: str, refined_png: str | None = None, threshold: float = 1e-4, max_shift_cells: int = 80) -> dict:
-    image = _load_image_rail(image_pseudo_bev)
-    lidar_raw = _resize_like(_load_lidar_raw(lidar_bev_maps), image.shape)
-    lidar_refined = _load_refined_png(refined_png, image.shape)
-    if not lidar_refined.any():
-        lidar_refined = lidar_raw
-    best_shift, best_shift_score = _best_shift(image, lidar_refined, threshold, int(max_shift_cells))
+def diagnose_arrays(
+    image: np.ndarray,
+    lidar_raw: np.ndarray,
+    lidar_refined: np.ndarray | None = None,
+    threshold: float = 1e-4,
+    max_shift_cells: int = 80,
+    min_overlap: float = 0.15,
+    test_transforms: bool = True,
+) -> dict:
+    image = np.nan_to_num(image.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    raw_base = np.nan_to_num(lidar_raw.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    refined_base = raw_base if lidar_refined is None or not np.asarray(lidar_refined).any() else np.nan_to_num(
+        lidar_refined.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0
+    )
+    transforms = ["identity", "flip_x", "flip_y", "swap_xy", "swap_xy_flip_x", "swap_xy_flip_y"] if test_transforms else ["identity"]
+    candidates = []
+    for name in transforms:
+        raw = _resize_like(_apply_transform(raw_base, name), image.shape)
+        refined = _resize_like(_apply_transform(refined_base, name), image.shape)
+        shift, score = _best_shift(image, refined, threshold, int(max_shift_cells))
+        candidates.append(
+            {
+                "transform_name": name,
+                "overlap_ratio_raw": _overlap(image, raw, threshold),
+                "overlap_ratio_refined": _overlap(image, refined, threshold),
+                "best_shift_cells": shift,
+                "best_shift_score": score,
+            }
+        )
+    best = max(candidates, key=lambda x: float(x["best_shift_score"])) if candidates else {}
     return {
         "image_rail_nonzero_ratio": float((image > threshold).mean()),
-        "lidar_rail_raw_nonzero_ratio": float((lidar_raw > threshold).mean()),
-        "lidar_rail_refined_nonzero_ratio": float((lidar_refined > threshold).mean()),
-        "overlap_ratio_raw": _overlap(image, lidar_raw, threshold),
-        "overlap_ratio_refined": _overlap(image, lidar_refined, threshold),
-        "best_shift_cells": best_shift,
-        "best_shift_score": best_shift_score,
+        "lidar_rail_raw_nonzero_ratio": float((_resize_like(raw_base, image.shape) > threshold).mean()),
+        "lidar_rail_refined_nonzero_ratio": float((_resize_like(refined_base, image.shape) > threshold).mean()),
+        "overlap_ratio_raw": float(candidates[0]["overlap_ratio_raw"]) if candidates else 0.0,
+        "overlap_ratio_refined": float(candidates[0]["overlap_ratio_refined"]) if candidates else 0.0,
+        "best_transform": best.get("transform_name", "identity"),
+        "best_shift_cells": best.get("best_shift_cells", [0, 0]),
+        "best_shift_score": float(best.get("best_shift_score", 0.0)),
+        "rail_bev_alignment_valid": bool(float(best.get("best_shift_score", 0.0)) >= float(min_overlap)),
+        "rail_bev_alignment_min_overlap": float(min_overlap),
+        "transform_candidates": candidates,
     }
+
+
+def diagnose(
+    image_pseudo_bev: str,
+    lidar_bev_maps: str,
+    refined_png: str | None = None,
+    threshold: float = 1e-4,
+    max_shift_cells: int = 80,
+    min_overlap: float = 0.15,
+    test_transforms: bool = True,
+) -> dict:
+    image = _load_image_rail(image_pseudo_bev)
+    lidar_raw = _load_lidar_raw(lidar_bev_maps)
+    lidar_refined = _load_refined_png(refined_png, lidar_raw.shape) if refined_png else None
+    return diagnose_arrays(
+        image,
+        lidar_raw,
+        lidar_refined,
+        threshold=threshold,
+        max_shift_cells=max_shift_cells,
+        min_overlap=min_overlap,
+        test_transforms=test_transforms,
+    )
 
 
 def main() -> int:
@@ -133,6 +197,8 @@ def main() -> int:
     ap.add_argument("--lidar-rail-refined-png", default="")
     ap.add_argument("--threshold", type=float, default=1e-4)
     ap.add_argument("--max-shift-cells", type=int, default=80)
+    ap.add_argument("--min-overlap", type=float, default=0.15)
+    ap.add_argument("--no-axis-transforms", action="store_true")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
     obj = diagnose(
@@ -141,6 +207,8 @@ def main() -> int:
         args.lidar_rail_refined_png or None,
         threshold=args.threshold,
         max_shift_cells=args.max_shift_cells,
+        min_overlap=args.min_overlap,
+        test_transforms=not args.no_axis_transforms,
     )
     text = json.dumps(obj, ensure_ascii=False, indent=2)
     if args.out:

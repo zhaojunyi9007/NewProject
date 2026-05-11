@@ -220,3 +220,94 @@ def test_overlay_json_rail_centerlines_parses_poly_id_u_v(tmp_path):
     # Cyan line should be near actual u coordinates, not at x=0/poly_id.
     assert out[20, 10].sum() > 0 or out[20, 20].sum() > 0
     assert out[:, 0].sum() == 0
+
+
+def test_bev_stage_run_selects_lidar_before_debug_fields():
+    import inspect
+    from pipeline.stages import bev_stage
+
+    src = inspect.getsource(bev_stage.run)
+    assign = "lidar_bin, lidar_rail_source, selected_lidar_rail_ratio = _select_lidar_bev_input"
+    use = "export_dbg[\"lidar_rail_nonzero_ratio\"] = selected_lidar_rail_ratio"
+
+    assert assign in src
+    assert use in src
+    assert src.index(assign) < src.index(use)
+
+
+
+def test_bev_alignment_diagnose_detects_flip_y():
+    from tools.diagnose_rail_bev_alignment import diagnose_arrays
+
+    image = np.zeros((24, 32), dtype=np.float32)
+    image[2:8, 8:10] = 1.0
+    image[15:18, 20:24] = 1.0
+    lidar = np.flipud(image)
+
+    out = diagnose_arrays(
+        image,
+        lidar,
+        threshold=0.1,
+        max_shift_cells=2,
+        min_overlap=0.5,
+        test_transforms=True,
+    )
+
+    assert out["best_transform"] == "flip_y"
+    assert out["rail_bev_alignment_valid"] is True
+    assert out["best_shift_score"] > 0.9
+
+
+def test_bev_alignment_diagnose_detects_swap_xy():
+    from tools.diagnose_rail_bev_alignment import diagnose_arrays
+
+    image = np.zeros((20, 30), dtype=np.float32)
+    image[5:15, 12:14] = 1.0
+    lidar = image.T
+
+    out = diagnose_arrays(
+        image,
+        lidar,
+        threshold=0.1,
+        max_shift_cells=2,
+        min_overlap=0.5,
+        test_transforms=True,
+    )
+
+    assert out["best_transform"] == "swap_xy"
+    assert out["rail_bev_alignment_valid"] is True
+
+
+
+def test_calib_stage_skips_optimizer_on_rail_alignment_mismatch():
+    from pipeline.stages.calib_stage import _should_skip_optimizer_for_rail_mismatch
+
+    skip, reason = _should_skip_optimizer_for_rail_mismatch(
+        {"skip_optimizer_on_rail_refinement_mismatch": True},
+        True,
+        {"rail_refinement_valid": False},
+        {"rail_bev_alignment_valid": False},
+    )
+
+    assert skip is True
+    assert reason == "rail_bev_alignment_mismatch"
+
+
+def test_write_invalid_calib_result_contains_skip_fields(tmp_path):
+    from pipeline.stages.calib_stage import _parse_calib_breakdown, _write_invalid_calib_result
+
+    out = tmp_path / "bad_calib.txt"
+    _write_invalid_calib_result(
+        str(out),
+        [1.0, 2.0, 3.0],
+        [4.0, 5.0, 6.0],
+        "rail_bev_alignment_mismatch",
+        {"rail_bev_alignment_best_score": 0.08},
+    )
+    text = out.read_text(encoding="utf-8")
+    br = _parse_calib_breakdown(str(out))
+
+    assert "optimizer_skipped: 1" in text
+    assert "invalid_reason: rail_bev_alignment_mismatch" in text
+    assert br["final_pose_valid"] == 0.0
+    assert br["rail_bev_alignment_best_score"] == 0.08

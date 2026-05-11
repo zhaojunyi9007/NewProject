@@ -137,6 +137,11 @@ struct ScoreBreakdown {
     double rail_mean_dist_visible = 0.0;
     double rail_mean_weight_visible = 0.0;
     double rail_strict_mode = 0.0;
+    double rail_early_reject_applied = 0.0;
+    double rail_early_reject_count = 0.0;
+    double semantic_points_used = 0.0;
+    double optimizer_candidate_count = 0.0;
+    double optimizer_threads = 1.0;
 
     double total_score = 0.0;
 };

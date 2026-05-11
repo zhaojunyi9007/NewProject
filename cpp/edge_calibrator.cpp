@@ -1,13 +1,18 @@
 #include "include/edge_calibrator.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <vector>
 
-#include <ceres/ceres.h>
-#include <ceres/rotation.h>
+#include "/usr/include/ceres/ceres.h"
+#include "/usr/include/ceres/rotation.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "include/optimizer_cost_function.h"
 #include "include/optimizer_scoring.h"
@@ -73,6 +78,9 @@ EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(con
     sem_cfg_.edge_low_visible_policy = config_.edge_low_visible_policy;
     sem_cfg_.min_edge_visible_count = config_.min_edge_visible_count;
     sem_cfg_.edge_low_visible_penalty = config_.edge_low_visible_penalty;
+    sem_cfg_.rail_early_reject_enabled = config_.rail_early_reject_enabled;
+    sem_cfg_.rail_early_reject_visible_count = config_.rail_early_reject_visible_count;
+    sem_cfg_.rail_early_reject_visible_ratio = config_.rail_early_reject_visible_ratio;
 }
 
 bool EdgeCalibrator::LoadData() {
@@ -123,22 +131,7 @@ bool EdgeCalibrator::LoadData() {
         if (LoadSemanticProbabilityMaps(config_.semantic_probs_path, semantic_probs_) &&
             LoadSemanticPoints(config_.lidar_semantic_points_path, semantic_points_) &&
             !semantic_probs_.empty() && !semantic_points_.empty()) {
-            const int max_semantic_points = config_.lidar_semantic_max_points;
-            if (max_semantic_points > 0 &&
-                semantic_points_.size() > static_cast<size_t>(max_semantic_points)) {
-                const size_t step =
-                    (semantic_points_.size() + static_cast<size_t>(max_semantic_points) - 1) /
-                    static_cast<size_t>(max_semantic_points);
-                std::vector<SemanticPointRecord> sampled;
-                sampled.reserve(static_cast<size_t>(max_semantic_points));
-                for (size_t i = 0; i < semantic_points_.size(); i += step) {
-                    sampled.push_back(semantic_points_[i]);
-                }
-                std::cout << "[Info] Downsample LiDAR semantic points for optimizer scoring: "
-                          << semantic_points_.size() << " -> " << sampled.size()
-                          << " (max=" << max_semantic_points << ")" << std::endl;
-                semantic_points_.swap(sampled);
-            }
+            DownsampleSemanticPoints();
             semantic_inputs_ready_ = true;
             std::cout << "[Info] Semantic inputs ready: probs=" << semantic_probs_.W << "x" << semantic_probs_.H
                       << "x" << semantic_probs_.C << ", points=" << semantic_points_.size() << std::endl;
@@ -155,6 +148,66 @@ bool EdgeCalibrator::LoadData() {
               << ", lines3d=" << lines3d_.size()
               << ", rail_sample_points=" << rail_sample_points_.size() << std::endl;
     return true;
+}
+
+void EdgeCalibrator::DownsampleSemanticPoints() {
+    const int max_semantic_points = config_.lidar_semantic_max_points;
+    if (max_semantic_points <= 0 || semantic_points_.size() <= static_cast<size_t>(max_semantic_points)) {
+        return;
+    }
+
+    std::vector<SemanticPointRecord> sampled;
+    sampled.reserve(static_cast<size_t>(max_semantic_points));
+    auto take_group = [&](int semantic_id, int budget) {
+        if (budget <= 0) return;
+        std::vector<size_t> idx;
+        idx.reserve(semantic_points_.size() / 4 + 1);
+        for (size_t i = 0; i < semantic_points_.size(); ++i) {
+            if (semantic_points_[i].semantic_id == semantic_id) idx.push_back(i);
+        }
+        if (idx.empty()) return;
+        const size_t step = std::max<size_t>(1, (idx.size() + static_cast<size_t>(budget) - 1) / static_cast<size_t>(budget));
+        for (size_t k = 0; k < idx.size() && sampled.size() < static_cast<size_t>(max_semantic_points); k += step) {
+            sampled.push_back(semantic_points_[idx[k]]);
+        }
+    };
+    auto take_other = [&](int budget) {
+        if (budget <= 0) return;
+        std::vector<size_t> idx;
+        for (size_t i = 0; i < semantic_points_.size(); ++i) {
+            const int sid = semantic_points_[i].semantic_id;
+            if (sid != SEM_RAIL_LIKE && sid != SEM_BALLAST_GROUND &&
+                sid != SEM_VERTICAL_STRUCTURE && sid != SEM_PLATFORM_OR_BUILDING) {
+                idx.push_back(i);
+            }
+        }
+        if (idx.empty()) return;
+        const size_t step = std::max<size_t>(1, (idx.size() + static_cast<size_t>(budget) - 1) / static_cast<size_t>(budget));
+        for (size_t k = 0; k < idx.size() && sampled.size() < static_cast<size_t>(max_semantic_points); k += step) {
+            sampled.push_back(semantic_points_[idx[k]]);
+        }
+    };
+
+    if (config_.stratified_semantic_sampling) {
+        take_group(SEM_RAIL_LIKE, config_.semantic_sample_budget_rail);
+        take_group(SEM_BALLAST_GROUND, config_.semantic_sample_budget_ballast);
+        take_group(SEM_VERTICAL_STRUCTURE, config_.semantic_sample_budget_vertical);
+        take_group(SEM_PLATFORM_OR_BUILDING, config_.semantic_sample_budget_platform_building);
+        take_other(config_.semantic_sample_budget_other);
+    }
+
+    if (sampled.empty()) {
+        const size_t step = (semantic_points_.size() + static_cast<size_t>(max_semantic_points) - 1) /
+                            static_cast<size_t>(max_semantic_points);
+        for (size_t i = 0; i < semantic_points_.size(); i += step) sampled.push_back(semantic_points_[i]);
+    }
+    if (sampled.size() > static_cast<size_t>(max_semantic_points)) sampled.resize(static_cast<size_t>(max_semantic_points));
+
+    std::cout << "[Info] Downsample LiDAR semantic points for optimizer scoring: "
+              << semantic_points_.size() << " -> " << sampled.size()
+              << " (max=" << max_semantic_points
+              << ", mode=" << (config_.stratified_semantic_sampling ? "stratified" : "uniform") << ")" << std::endl;
+    semantic_points_.swap(sampled);
 }
 
 void EdgeCalibrator::BuildRailSamplePoints() {
@@ -248,56 +301,66 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
     double ty_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TY_STEP", 0.15));
     double tz_step = std::max(1e-6, GetEnvDouble("EDGECALIB_COARSE_TZ_STEP", 0.15));
 
-    double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
-    double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
+    const double w_edge = config_.edge_weight;
+    const double w_rail = config_.rail_weight;
 
     Eigen::Matrix3d R0;
     ceres::AngleAxisToRotationMatrix(r_curr_, R0.data());
     Eigen::Vector3d t0(t_curr_[0], t_curr_[1], t_curr_[2]);
-
-    const double w_edge = config_.edge_weight;
-    const double w_rail = config_.rail_weight;
-
     best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
                                                               rail_sample_points_, rail_dist_, rail_weight_,
-                                                              semantic_points_,
-                                                              semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
+                                                              semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
                                                               config_.semantic_js_weight, config_.histogram_weight,
                                                               w_edge, w_rail, sem_cfg_, &last_score_breakdown_);
     PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 
+    std::vector<std::array<double, 6>> candidates;
     for (double tx = t_curr_[0] - tx_range; tx <= t_curr_[0] + tx_range + 1e-12; tx += tx_step) {
         for (double ty = t_curr_[1] - ty_range; ty <= t_curr_[1] + ty_range + 1e-12; ty += ty_step) {
             for (double tz = t_curr_[2] - tz_range; tz <= t_curr_[2] + tz_range + 1e-12; tz += tz_step) {
                 for (double rx = r_curr_[0] - angle_range; rx <= r_curr_[0] + angle_range + 1e-9; rx += angle_step) {
                     for (double ry = r_curr_[1] - angle_range; ry <= r_curr_[1] + angle_range + 1e-9; ry += angle_step) {
                         for (double rz = r_curr_[2] - angle_range; rz <= r_curr_[2] + angle_range + 1e-9; rz += angle_step) {
-                            double r_try[3] = {rx, ry, rz};
-                            Eigen::Matrix3d R_try;
-                            ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
-                            Eigen::Vector3d t_try(tx, ty, tz);
-                            TotalScoreBreakdown bd;
-                            const double score =
-                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
-                                                                             rail_sample_points_, rail_dist_, rail_weight_,
-                                                                             semantic_points_,
-                                                                             semantic_probs_, R_rect_, P_rect_, W_, H_,
-                                                                             R_try, t_try, config_.semantic_js_weight,
-                                                                             config_.histogram_weight, w_edge, w_rail, sem_cfg_, &bd);
-                            if (score > best_score_) {
-                                best_score_ = score;
-                                std::copy(r_try, r_try + 3, best_r);
-                                best_t[0] = tx;
-                                best_t[1] = ty;
-                                best_t[2] = tz;
-                                last_score_breakdown_ = bd;
-                            }
+                            candidates.push_back({rx, ry, rz, tx, ty, tz});
                         }
                     }
                 }
             }
         }
     }
+    std::vector<double> scores(candidates.size(), -1e100);
+    std::vector<TotalScoreBreakdown> breakdowns(candidates.size());
+    int threads_used = 1;
+#ifdef _OPENMP
+    if (config_.optimizer_num_threads > 0) omp_set_num_threads(config_.optimizer_num_threads);
+#pragma omp parallel for schedule(dynamic)
+#endif
+    for (long long i = 0; i < static_cast<long long>(candidates.size()); ++i) {
+#ifdef _OPENMP
+        if (omp_get_thread_num() == 0) threads_used = omp_get_num_threads();
+#endif
+        const auto& c = candidates[static_cast<size_t>(i)];
+        double r_try[3] = {c[0], c[1], c[2]};
+        Eigen::Matrix3d R_try;
+        ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
+        Eigen::Vector3d t_try(c[3], c[4], c[5]);
+        scores[static_cast<size_t>(i)] = ComputeTotalCalibrationScoreSemanticDominant(
+            edge_points_, edge_dist_, edge_weight_, lines3d_, rail_sample_points_, rail_dist_, rail_weight_,
+            semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R_try, t_try,
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
+    }
+    double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
+    double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (scores[i] > best_score_) {
+            best_score_ = scores[i];
+            best_r[0] = candidates[i][0]; best_r[1] = candidates[i][1]; best_r[2] = candidates[i][2];
+            best_t[0] = candidates[i][3]; best_t[1] = candidates[i][4]; best_t[2] = candidates[i][5];
+            last_score_breakdown_ = breakdowns[i];
+        }
+    }
+    last_score_breakdown_.optimizer_candidate_count = static_cast<double>(candidates.size());
+    last_score_breakdown_.optimizer_threads = static_cast<double>(std::max(1, threads_used));
 
     std::copy(best_r, best_r + 3, r_curr_);
     std::copy(best_t, best_t + 3, t_curr_);
@@ -317,43 +380,55 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
 
     const double w_edge = config_.edge_weight;
     const double w_rail = config_.rail_weight;
-
-    double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
-    double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
-    double local_best = best_score_;
-
+    std::vector<std::array<double, 6>> candidates;
     for (double tx = t_curr_[0] - t_range; tx <= t_curr_[0] + t_range + 1e-12; tx += t_step) {
         for (double ty = t_curr_[1] - t_range; ty <= t_curr_[1] + t_range + 1e-12; ty += t_step) {
             for (double tz = t_curr_[2] - t_range; tz <= t_curr_[2] + t_range + 1e-12; tz += t_step) {
                 for (double rx = r_curr_[0] - a_range; rx <= r_curr_[0] + a_range + 1e-9; rx += a_step) {
                     for (double ry = r_curr_[1] - a_range; ry <= r_curr_[1] + a_range + 1e-9; ry += a_step) {
                         for (double rz = r_curr_[2] - a_range; rz <= r_curr_[2] + a_range + 1e-9; rz += a_step) {
-                            double r_try[3] = {rx, ry, rz};
-                            Eigen::Matrix3d R_try;
-                            ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
-                            Eigen::Vector3d t_try(tx, ty, tz);
-                            TotalScoreBreakdown bd;
-                            const double score =
-                                ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
-                                                                             rail_sample_points_, rail_dist_, rail_weight_,
-                                                                             semantic_points_,
-                                                                             semantic_probs_, R_rect_, P_rect_, W_, H_,
-                                                                             R_try, t_try, config_.semantic_js_weight,
-                                                                             config_.histogram_weight, w_edge, w_rail, sem_cfg_, &bd);
-                            if (score > local_best) {
-                                local_best = score;
-                                std::copy(r_try, r_try + 3, best_r);
-                                best_t[0] = tx;
-                                best_t[1] = ty;
-                                best_t[2] = tz;
-                                last_score_breakdown_ = bd;
-                            }
+                            candidates.push_back({rx, ry, rz, tx, ty, tz});
                         }
                     }
                 }
             }
         }
     }
+    std::vector<double> scores(candidates.size(), -1e100);
+    std::vector<TotalScoreBreakdown> breakdowns(candidates.size());
+    int threads_used = 1;
+#ifdef _OPENMP
+    if (config_.optimizer_num_threads > 0) omp_set_num_threads(config_.optimizer_num_threads);
+#pragma omp parallel for schedule(dynamic)
+#endif
+    for (long long i = 0; i < static_cast<long long>(candidates.size()); ++i) {
+#ifdef _OPENMP
+        if (omp_get_thread_num() == 0) threads_used = omp_get_num_threads();
+#endif
+        const auto& c = candidates[static_cast<size_t>(i)];
+        double r_try[3] = {c[0], c[1], c[2]};
+        Eigen::Matrix3d R_try;
+        ceres::AngleAxisToRotationMatrix(r_try, R_try.data());
+        Eigen::Vector3d t_try(c[3], c[4], c[5]);
+        scores[static_cast<size_t>(i)] = ComputeTotalCalibrationScoreSemanticDominant(
+            edge_points_, edge_dist_, edge_weight_, lines3d_, rail_sample_points_, rail_dist_, rail_weight_,
+            semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R_try, t_try,
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
+    }
+
+    double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
+    double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
+    double local_best = best_score_;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        if (scores[i] > local_best) {
+            local_best = scores[i];
+            best_r[0] = candidates[i][0]; best_r[1] = candidates[i][1]; best_r[2] = candidates[i][2];
+            best_t[0] = candidates[i][3]; best_t[1] = candidates[i][4]; best_t[2] = candidates[i][5];
+            last_score_breakdown_ = breakdowns[i];
+        }
+    }
+    last_score_breakdown_.optimizer_candidate_count += static_cast<double>(candidates.size());
+    last_score_breakdown_.optimizer_threads = static_cast<double>(std::max(1, threads_used));
     best_score_ = local_best;
     std::copy(best_r, best_r + 3, r_curr_);
     std::copy(best_t, best_t + 3, t_curr_);
@@ -661,6 +736,10 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "rail_mean_dist_visible: " << last_score_breakdown_.rail_mean_dist_visible << "\n";
     result_file << "rail_mean_weight_visible: " << last_score_breakdown_.rail_mean_weight_visible << "\n";
     result_file << "rail_strict_mode: " << last_score_breakdown_.rail_strict_mode << "\n";
+    result_file << "rail_early_reject_applied: " << last_score_breakdown_.rail_early_reject_applied << "\n";
+    result_file << "semantic_points_used: " << last_score_breakdown_.semantic_points_used << "\n";
+    result_file << "optimizer_candidate_count: " << last_score_breakdown_.optimizer_candidate_count << "\n";
+    result_file << "optimizer_threads: " << last_score_breakdown_.optimizer_threads << "\n";
     // Phase C5: unified confidences inferred from extracted line confidences.
     result_file << "rail_confidence: " << last_score_breakdown_.rail_confidence << "\n";
     result_file << "vertical_structure_confidence: " << last_score_breakdown_.vertical_structure_confidence << "\n";

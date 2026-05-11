@@ -117,6 +117,33 @@ def _maybe_export_refined_lidar_rail(
     return refined_bin, _load_json_dict(debug_path)
 
 
+
+def _diagnose_rail_bev_alignment(fid: str, lidar_root: str, pseudo_npz: str, refined_png: str, bev_cfg: dict) -> dict:
+    if not bool(bev_cfg.get("auto_test_bev_axis_transforms", False)):
+        return {}
+    bev_npz = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_maps.npz")
+    if not os.path.isfile(bev_npz) or not os.path.isfile(pseudo_npz):
+        return {}
+    out_path = os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_alignment_debug.json")
+    try:
+        from diagnose_rail_bev_alignment import diagnose  # noqa: WPS433
+
+        obj = diagnose(
+            pseudo_npz,
+            bev_npz,
+            refined_png if os.path.isfile(refined_png) else None,
+            max_shift_cells=int(bev_cfg.get("rail_alignment_max_shift_cells", 120)),
+            min_overlap=float(bev_cfg.get("rail_alignment_min_overlap", 0.15)),
+            test_transforms=bool(bev_cfg.get("auto_test_bev_axis_transforms", True)),
+        )
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        return obj
+    except Exception as exc:
+        print(f"[Warning] Rail BEV alignment diagnosis failed: {fid}: {exc}")
+        return {}
+
+
 def _delta_within_oracle_limits(parsed: dict, base_r: list[float], base_t: list[float], bev_cfg: dict) -> tuple[bool, str]:
     max_tx = float(bev_cfg.get("oracle_max_abs_tx_m", 2.0))
     max_ty = float(bev_cfg.get("oracle_max_abs_ty_m", 1.0))
@@ -194,12 +221,16 @@ def run(context: RuntimeContext) -> None:
         os.makedirs(frame_dir, exist_ok=True)
 
         pseudo_npz = os.path.join(os.path.abspath(img_root), fid, "pseudo_bev.npz")
-        lidar_bin = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_channels.bin")
+        raw_lidar_bin = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_channels.bin")
         if not os.path.isfile(pseudo_npz):
-            print(f"[Warning] 缺少 {pseudo_npz}，跳过帧 {fid}")
+            print(f"[Warning] Missing {pseudo_npz}, skip frame {fid}")
             continue
+        refined_lidar_bin, refined_dbg = _maybe_export_refined_lidar_rail(fid, lidar_root, pseudo_npz, bev_cfg, sem_cfg)
+        lidar_bin, lidar_rail_source, selected_lidar_rail_ratio = _select_lidar_bev_input(
+            raw_lidar_bin, refined_lidar_bin, bev_cfg
+        )
         if not os.path.isfile(lidar_bin):
-            print(f"[Warning] 缺少 {lidar_bin}（需 LiDAR Phase3 生成 bev），跳过帧 {fid}")
+            print(f"[Warning] Missing {lidar_bin} (LiDAR Phase3 BEV required), skip frame {fid}")
             continue
 
         img_bin = os.path.join(frame_dir, "image_rail_bev.bin")
@@ -213,6 +244,20 @@ def run(context: RuntimeContext) -> None:
         export_dbg["refined_lidar_rail_fallback_used"] = bool(refined_dbg.get("lidar_rail_refine_fallback_used", False))
         export_dbg["rail_refinement_valid"] = bool(refined_dbg.get("rail_refinement_valid", True))
         export_dbg["rail_refinement_mismatch"] = bool(refined_dbg.get("rail_refinement_mismatch", False))
+        align_dbg = _diagnose_rail_bev_alignment(
+            fid,
+            lidar_root,
+            pseudo_npz,
+            os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_refined.png"),
+            bev_cfg,
+        )
+        if align_dbg:
+            export_dbg["rail_bev_alignment_valid"] = bool(align_dbg.get("rail_bev_alignment_valid", False))
+            export_dbg["rail_bev_alignment_mismatch"] = not bool(align_dbg.get("rail_bev_alignment_valid", False))
+            export_dbg["rail_bev_alignment_best_transform"] = align_dbg.get("best_transform", "")
+            export_dbg["rail_bev_alignment_best_shift_x_cells"] = float((align_dbg.get("best_shift_cells") or [0, 0])[0])
+            export_dbg["rail_bev_alignment_best_shift_y_cells"] = float((align_dbg.get("best_shift_cells") or [0, 0])[1])
+            export_dbg["rail_bev_alignment_best_score"] = float(align_dbg.get("best_shift_score", 0.0) or 0.0)
         rail_quality = _load_json_dict(os.path.join(os.path.abspath(img_root), fid, "rail_quality.json"))
         oracle_rail = (
             bool(rail_quality.get("label_track_prior_used", False))
