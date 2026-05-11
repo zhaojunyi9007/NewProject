@@ -98,6 +98,8 @@ def run(context: RuntimeContext) -> None:
             "--r_vec", *r_vec,
             "--t_vec", *t_vec,
             "--output", output_path,
+            "--overlay-json-rail",
+            "--overlay-lidar-rail-samples",
         ]
         if img_sensor:
             cmd.extend(["--image_sensor", img_sensor])

@@ -42,7 +42,7 @@ class LidarStageOSDaRSmokeTest(unittest.TestCase):
             # Last call should include two fused frames: 11 and 12
             last_args, last_kwargs = mock_run.call_args
             cmd = last_args[0]
-            self.assertEqual(cmd[0], "./build/lidar_extractor")
+            self.assertTrue(cmd[0].endswith("build/lidar_extractor"))
             self.assertTrue(cmd[1].endswith("011_123456.pcd"))
             self.assertTrue(cmd[2].endswith("012_123456.pcd"))
             self.assertTrue(cmd[3].endswith("0000000012"))

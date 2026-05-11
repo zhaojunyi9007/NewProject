@@ -129,6 +129,12 @@ semantic_calib:
   lidar_bev_rail_sample_stride_cells: 2
   lidar_bev_rail_sample_max_points: 8000
   min_lidar_bev_rail_samples: 200
+  lidar_bev_oracle_overlap_dilate_cells: 3
+  lidar_bev_rail_min_component_cells: 20
+  oracle_rail_hard_gate: true
+  min_final_rail_visible_ratio: 0.08
+  min_final_rail_visible_count: 50
+  reject_pose_on_rail_gate_fail: true
   lidar_semantic_max_points: 12000
   rail_low_visible_policy: "penalty"
   min_rail_visible_count: 50
@@ -174,6 +180,21 @@ lidar:
   pole_ransac_threshold: 0.15
   pole_vertical_tolerance: 0.15
   pole_max_lines: 60
+  edge_source: "range_depth"
+  edge_max_range_m: 45.0
+  edge_min_z: -0.5
+  edge_max_z: 4.0
+  edge_keep_near_track_only: true
+  edge_track_y_margin_m: 8.0
+  edge_cluster_min_size: 5
+  vertical_enable_for_optimizer: false
+  vertical_max_range_m: 45.0
+  vertical_min_height_m: 1.2
+  vertical_max_radius_m: 0.45
+  vertical_min_linearity: 0.55
+  vertical_min_verticality: 0.75
+  vertical_max_plane_extent_m: 1.0
+  vertical_max_lines: 32
   ndt:
     transformation_epsilon: 0.01
     step_size: 0.1

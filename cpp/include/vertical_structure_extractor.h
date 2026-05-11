@@ -12,6 +12,13 @@ struct VerticalStructureConfig {
     double cluster_tolerance = 0.35;
     int min_cluster_size = 25;
     double vertical_line_distance_thresh = 0.12;
+    double max_range_m = 45.0;
+    double min_height_m = 1.2;
+    double max_radius_m = 0.45;
+    double min_linearity = 0.55;
+    double min_verticality = 0.75;
+    double max_plane_extent_m = 1.0;
+    int max_lines = 32;
 };
 
 // 候选（高程 + 可选标签）→ 欧式聚类 → 各簇内拟合竖直线（平行 Z），替代整片点云全局 RANSAC。

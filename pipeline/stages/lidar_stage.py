@@ -61,6 +61,21 @@ def run(context: RuntimeContext) -> None:
         "EDGECALIB_LIDAR_POLE_RANSAC_THRESHOLD": lidar_cfg.get("pole_ransac_threshold"),
         "EDGECALIB_LIDAR_POLE_VERTICAL_TOLERANCE": lidar_cfg.get("pole_vertical_tolerance"),
         "EDGECALIB_LIDAR_POLE_MAX_LINES": lidar_cfg.get("pole_max_lines"),
+        "EDGECALIB_LIDAR_EDGE_SOURCE": lidar_cfg.get("edge_source"),
+        "EDGECALIB_LIDAR_EDGE_MAX_RANGE_M": lidar_cfg.get("edge_max_range_m"),
+        "EDGECALIB_LIDAR_EDGE_MIN_Z": lidar_cfg.get("edge_min_z"),
+        "EDGECALIB_LIDAR_EDGE_MAX_Z": lidar_cfg.get("edge_max_z"),
+        "EDGECALIB_LIDAR_EDGE_KEEP_NEAR_TRACK_ONLY": (
+            "1" if lidar_cfg.get("edge_keep_near_track_only") is True else "0" if lidar_cfg.get("edge_keep_near_track_only") is False else None
+        ),
+        "EDGECALIB_LIDAR_EDGE_TRACK_Y_MARGIN_M": lidar_cfg.get("edge_track_y_margin_m"),
+        "EDGECALIB_LIDAR_VERT_MAX_RANGE_M": lidar_cfg.get("vertical_max_range_m"),
+        "EDGECALIB_LIDAR_VERT_MIN_HEIGHT_M": lidar_cfg.get("vertical_min_height_m"),
+        "EDGECALIB_LIDAR_VERT_MAX_RADIUS_M": lidar_cfg.get("vertical_max_radius_m"),
+        "EDGECALIB_LIDAR_VERT_MIN_LINEARITY": lidar_cfg.get("vertical_min_linearity"),
+        "EDGECALIB_LIDAR_VERT_MIN_VERTICALITY": lidar_cfg.get("vertical_min_verticality"),
+        "EDGECALIB_LIDAR_VERT_MAX_PLANE_EXTENT_M": lidar_cfg.get("vertical_max_plane_extent_m"),
+        "EDGECALIB_LIDAR_VERT_MAX_LINES": lidar_cfg.get("vertical_max_lines"),
     }
     if temporal_enabled:
         env_map.update(

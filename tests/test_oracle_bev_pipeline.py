@@ -86,3 +86,49 @@ def test_bev_export_prefers_sparse_label_track_prior(tmp_path):
     arr = np.frombuffer(raw[36:], dtype=np.float32).reshape(ny, nx)
     assert int((arr > 0).sum()) == 4
     assert arr[2:4, 3:5].min() > 0.9
+
+
+
+def test_refined_lidar_rail_bev_uses_oracle_overlap_to_reduce_noise(tmp_path):
+    from lidar_bev_rail_points import refine_lidar_rail_probability
+
+    rail = np.ones((40, 40), dtype=np.float32) * 0.2
+    rail[:, 8:10] = 0.9
+    rail[:, 18:20] = 0.85
+    oracle = np.zeros((40, 40), dtype=np.float32)
+    oracle[:, 8:10] = 1.0
+    oracle[:, 18:20] = 1.0
+    debug = {}
+
+    refined = refine_lidar_rail_probability(
+        rail,
+        min_prob=0.15,
+        oracle_rail=oracle,
+        oracle_overlap_dilate_cells=1,
+        min_component_cells=10,
+        debug_out=debug,
+    )
+
+    assert refined.shape == rail.shape
+    assert debug["lidar_rail_raw_nonzero_ratio"] > 0.9
+    assert debug["lidar_rail_refined_nonzero_ratio"] < 0.2
+    assert refined[:, 8:10].max() > 0.5
+    assert refined[:, 18:20].max() > 0.5
+
+
+def test_oracle_rail_hard_gate_marks_low_visibility_invalid():
+    from pipeline.stages.calib_stage import _apply_final_rail_hard_gate
+
+    breakdown = {"rail_visible_count": 18.0, "rail_visible_ratio": 0.034}
+    cfg = {
+        "oracle_rail_hard_gate": True,
+        "min_final_rail_visible_count": 50,
+        "min_final_rail_visible_ratio": 0.08,
+        "reject_pose_on_rail_gate_fail": True,
+    }
+
+    gated = _apply_final_rail_hard_gate(breakdown, cfg, oracle_rail=True)
+
+    assert gated["rail_gate_failed"] == 1.0
+    assert gated["final_pose_valid"] == 0.0
+    assert "rail_visible" in gated["invalid_reason"]

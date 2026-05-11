@@ -72,6 +72,29 @@ def _load_json_dict(path: str) -> dict:
         return {}
 
 
+def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: bool) -> dict:
+    out = dict(breakdown or {})
+    out.setdefault("final_pose_valid", 1.0)
+    out.setdefault("rail_gate_failed", 0.0)
+    out.setdefault("invalid_reason", "")
+    if not oracle_rail or not bool(sem_cfg.get("oracle_rail_hard_gate", False)):
+        return out
+    min_count = float(sem_cfg.get("min_final_rail_visible_count", sem_cfg.get("min_rail_visible_count", 50)))
+    min_ratio = float(sem_cfg.get("min_final_rail_visible_ratio", sem_cfg.get("min_rail_visible_ratio", 0.08)))
+    visible_count = float(out.get("rail_visible_count", 0.0) or 0.0)
+    visible_ratio = float(out.get("rail_visible_ratio", 0.0) or 0.0)
+    failed = visible_count < min_count or visible_ratio < min_ratio
+    if failed:
+        out["rail_gate_failed"] = 1.0
+        if bool(sem_cfg.get("reject_pose_on_rail_gate_fail", True)):
+            out["final_pose_valid"] = 0.0
+        out["invalid_reason"] = (
+            f"rail_visible_gate_failed(count={visible_count:.0f}<{min_count:.0f} "
+            f"or ratio={visible_ratio:.6f}<{min_ratio:.6f})"
+        )
+    return out
+
+
 def run(context: RuntimeContext) -> None:
     print("\n" + "=" * 40)
     print("[阶段3] 两阶段标定优化")
@@ -200,6 +223,9 @@ def run(context: RuntimeContext) -> None:
                 bev_npz = f"{feature_base}_bev_maps.npz"
                 if os.path.isfile(bev_npz):
                     try:
+                        rail_debug_path = f"{feature_base}_rail_bev_debug.json"
+                        rail_png_path = f"{feature_base}_rail_bev_refined.png"
+                        oracle_bev = os.path.join(frame_dir, "pseudo_bev.npz")
                         bev_rail_count = export_lidar_bev_rail_points(
                             bev_npz,
                             bev_rail_points,
@@ -207,6 +233,11 @@ def run(context: RuntimeContext) -> None:
                             stride_cells=int(sem_cfg.get("lidar_bev_rail_sample_stride_cells", 2)),
                             max_points=int(sem_cfg.get("lidar_bev_rail_sample_max_points", 8000)),
                             reference_z=float((context.config.get("dataset") or {}).get("reference_z", 0.0)),
+                            oracle_npz_path=oracle_bev if os.path.isfile(oracle_bev) else None,
+                            oracle_overlap_dilate_cells=int(sem_cfg.get("lidar_bev_oracle_overlap_dilate_cells", 3)),
+                            min_component_cells=int(sem_cfg.get("lidar_bev_rail_min_component_cells", 20)),
+                            debug_path=rail_debug_path,
+                            refined_png_path=rail_png_path,
                         )
                         print(f"[Info] Exported LiDAR BEV rail samples: {bev_rail_count} -> {bev_rail_points}")
                     except Exception as exc:
@@ -347,6 +378,26 @@ def run(context: RuntimeContext) -> None:
         if pose_out:
             context.current_pose_semantic = pose_out
         br = _parse_calib_breakdown(output_file)
+        rail_debug = _load_json_dict(f"{feature_base}_rail_bev_debug.json")
+        edge_debug = _load_json_dict(f"{feature_base}_edge_meta.json")
+        if rail_debug:
+            if "lidar_rail_refined_nonzero_ratio" in rail_debug:
+                br["refined_lidar_rail_nonzero_ratio"] = rail_debug["lidar_rail_refined_nonzero_ratio"]
+            elif "lidar_rail_raw_nonzero_ratio" in rail_debug:
+                br["refined_lidar_rail_nonzero_ratio"] = rail_debug.get("lidar_rail_refined_nonzero_ratio", rail_debug.get("lidar_rail_raw_nonzero_ratio", 0.0))
+        if edge_debug:
+            for k in ("edge_raw_count", "edge_kept_count", "edge_range_gt_50_count", "edge_near_track_count"):
+                if k in edge_debug:
+                    br[k] = edge_debug[k]
+        br = _apply_final_rail_hard_gate(br, sem_cfg, bool(locals().get("oracle_rail", False)))
+        if output_file and os.path.isfile(output_file):
+            with open(output_file, "a", encoding="utf-8") as f:
+                f.write(f"final_pose_valid: {br.get('final_pose_valid', 1.0)}\n")
+                f.write(f"rail_gate_failed: {br.get('rail_gate_failed', 0.0)}\n")
+                if br.get("invalid_reason"):
+                    f.write(f"invalid_reason: {br.get('invalid_reason')}\n")
+                if "refined_lidar_rail_nonzero_ratio" in br:
+                    f.write(f"refined_lidar_rail_nonzero_ratio: {br['refined_lidar_rail_nonzero_ratio']}\n")
         write_unified_debug_json(
             os.path.join(calib_dir, f"{frame_id:010d}_debug_score_breakdown.json"),
             stage="calib",

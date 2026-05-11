@@ -270,7 +270,7 @@ def load_features(feature_base, point_source="edge"):
     
     return points, lines_3d
 
-def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t):
+def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t, draw_vertical=True):
     """
     将3D线投影到图像上
     投影公式(使用KITTI官方方法):
@@ -288,6 +288,8 @@ def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t):
         p1 = np.array([line[0], line[1], line[2]])
         p2 = np.array([line[3], line[4], line[5]])
         l_type = int(line[6])
+        if l_type == 1 and not draw_vertical:
+            continue
         
         # Transform: LiDAR坐标系 -> 相机坐标系
         p1_c = R @ p1 + t
@@ -324,6 +326,73 @@ def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t):
             cv2.line(img, (u1, v1), (u2, v2), color, thickness)
     
     return img
+
+def overlay_json_rail_centerlines(img, frame_dir):
+    if not frame_dir:
+        return img
+    path = os.path.join(frame_dir, "rail_centerlines_2d.txt")
+    if not os.path.isfile(path):
+        path = os.path.join(frame_dir, "label_track_centerlines_2d.txt")
+    if not os.path.isfile(path):
+        return img
+    polylines = []
+    cur = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s:
+                if len(cur) >= 2:
+                    polylines.append(np.array(cur, dtype=np.int32))
+                cur = []
+                continue
+            if s.startswith("#"):
+                continue
+            parts = s.replace(",", " ").split()
+            if len(parts) < 2:
+                continue
+            try:
+                cur.append([int(round(float(parts[0]))), int(round(float(parts[1])))])
+            except ValueError:
+                continue
+    if len(cur) >= 2:
+        polylines.append(np.array(cur, dtype=np.int32))
+    for pl in polylines:
+        cv2.polylines(img, [pl.reshape(-1, 1, 2)], False, (255, 255, 0), 3, lineType=cv2.LINE_AA)
+    return img
+
+
+def overlay_lidar_rail_samples(img, feature_base, K, R_rect, P_rect, R, t, max_points=2500):
+    path = feature_base + "_rail_bev_points.txt"
+    if not os.path.isfile(path):
+        return img
+    pts = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 3:
+                continue
+            try:
+                pts.append((float(parts[0]), float(parts[1]), float(parts[2])))
+            except ValueError:
+                continue
+    if not pts:
+        return img
+    step = max(1, len(pts) // max(1, int(max_points)))
+    h, w = img.shape[:2]
+    for p in pts[::step]:
+        pc = R @ np.array(p, dtype=np.float64) + t
+        pr = R_rect @ pc
+        if pr[2] <= 0.1:
+            continue
+        uv = P_rect @ np.hstack([pr, 1.0])
+        u, v = int(round(uv[0] / uv[2])), int(round(uv[1] / uv[2]))
+        if 0 <= u < w and 0 <= v < h:
+            cv2.circle(img, (u, v), 2, (255, 0, 0), -1, lineType=cv2.LINE_AA)
+    return img
+
 
 def project_points(img, points, K, R_rect, P_rect, R, t, subsample=5):
     """
@@ -566,6 +635,9 @@ Examples:
         help="Phase 7 (sam_2d): overlay rail_dist heatmap (same semantics as edge_dist: low=on track).",
     )
     parser.add_argument("--rail_dist_alpha", type=float, default=0.35, help="Alpha for rail_dist overlay (0..1).")
+    parser.add_argument("--overlay-json-rail", action="store_true", help="Overlay JSON/Steger 2D rail centerlines in cyan.")
+    parser.add_argument("--overlay-lidar-rail-samples", action="store_true", help="Project LiDAR rail BEV sample points in blue.")
+    parser.add_argument("--overlay-diagnostic-vertical-lines", action="store_true", help="Draw diagnostic vertical structure lines in red.")
     parser.add_argument("--diag", action="append", choices=["bev", "semantic", "refine", "rail"],
                         help="Phase 7：额外生成诊断拼图（bev/semantic/refine/rail，可重复指定）")
     parser.add_argument("--image_features_frame", type=str, default="",
@@ -795,6 +867,11 @@ Examples:
         img = overlay_edge_dist(img, rail_dist01, alpha=args.rail_dist_alpha)
     if dist01 is not None and args.overlay_edge_dist:
         img = overlay_edge_dist(img, dist01, alpha=args.edge_dist_alpha)
+    if args.overlay_json_rail:
+        rail_dir = args.sam_frame_dir.strip() or args.image_features_frame.strip()
+        img = overlay_json_rail_centerlines(img, rail_dir)
+    if args.overlay_lidar_rail_samples:
+        img = overlay_lidar_rail_samples(img, args.feature_base, K, R_rect, P_rect, R, t_vec)
     
     # 先画点 (作为背景)
     if points:
@@ -802,7 +879,7 @@ Examples:
     
     # 再画线 (更显眼)
     if lines_3d:
-        img = project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t_vec)
+        img = project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t_vec, draw_vertical=args.overlay_diagnostic_vertical_lines)
 
     # 4b. Phase 7 诊断图（在图例之前，使用干净背景做语义拼图）
     if args.diag:
