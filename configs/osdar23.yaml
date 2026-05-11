@@ -116,6 +116,7 @@ bev:
   oracle_max_abs_tx_m: 2.0
   oracle_max_abs_ty_m: 1.0
   oracle_max_abs_yaw_deg: 3.0
+  use_refined_lidar_rail: true
 
 semantic_calib:
   rail_weight: 1.5
@@ -142,6 +143,9 @@ semantic_calib:
   rail_low_visible_penalty: 0.50
   rail_visibility_residual_weight: 0.15
   rail_oob_residual_weight: 0.20
+  edge_low_visible_policy: "zero"
+  min_edge_visible_count: 50
+  edge_low_visible_penalty: 0.15
   min_image_rail_quality: 0.42
   low_image_rail_quality_weight: 0.0
   # Phase C6: suppress rail term on switch/low-confidence rail extraction frames.

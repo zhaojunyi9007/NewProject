@@ -83,6 +83,9 @@ int main(int argc, char** argv) {
             else if (a == "--rail_weight" && need(i)) config.rail_weight = std::atof(argv[++i]);
             else if (a == "--lidar_semantic_max_points" && need(i)) config.lidar_semantic_max_points = std::atoi(argv[++i]);
             else if (a == "--rail_low_visible_policy" && need(i)) config.rail_low_visible_policy = argv[++i];
+            else if (a == "--edge_low_visible_policy" && need(i)) config.edge_low_visible_policy = argv[++i];
+            else if (a == "--min_edge_visible_count" && need(i)) config.min_edge_visible_count = std::atoi(argv[++i]);
+            else if (a == "--edge_low_visible_penalty" && need(i)) config.edge_low_visible_penalty = std::atof(argv[++i]);
             else if (a == "--min_rail_visible_count" && need(i)) config.min_rail_visible_count = std::atoi(argv[++i]);
             else if (a == "--min_rail_visible_ratio" && need(i)) config.min_rail_visible_ratio = std::atof(argv[++i]);
             else if (a == "--rail_low_visible_penalty" && need(i)) config.rail_low_visible_penalty = std::atof(argv[++i]);

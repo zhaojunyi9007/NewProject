@@ -238,6 +238,7 @@ def run(context: RuntimeContext) -> None:
                             min_component_cells=int(sem_cfg.get("lidar_bev_rail_min_component_cells", 20)),
                             debug_path=rail_debug_path,
                             refined_png_path=rail_png_path,
+                            refined_bin_path=f"{feature_base}_rail_bev_refined.bin",
                         )
                         print(f"[Info] Exported LiDAR BEV rail samples: {bev_rail_count} -> {bev_rail_points}")
                     except Exception as exc:
@@ -332,6 +333,12 @@ def run(context: RuntimeContext) -> None:
                 str(int(sem_cfg.get("lidar_semantic_max_points", 12000))),
                 "--rail_low_visible_policy",
                 str(sem_cfg.get("rail_low_visible_policy", "penalty" if oracle_rail else "zero") if oracle_rail else "zero"),
+                "--edge_low_visible_policy",
+                str(sem_cfg.get("edge_low_visible_policy", "zero")),
+                "--min_edge_visible_count",
+                str(int(sem_cfg.get("min_edge_visible_count", 50))),
+                "--edge_low_visible_penalty",
+                str(float(sem_cfg.get("edge_low_visible_penalty", 0.15))),
                 "--min_rail_visible_count",
                 str(int(sem_cfg.get("min_rail_visible_count", 50))),
                 "--min_rail_visible_ratio",

@@ -32,6 +32,9 @@ struct SemanticScoringConfig {
     int min_rail_visible_count = 50;
     double min_rail_visible_ratio = 0.08;
     double rail_low_visible_penalty = 0.50;
+    std::string edge_low_visible_policy = "zero";
+    int min_edge_visible_count = 50;
+    double edge_low_visible_penalty = 0.15;
 };
 
 // Binary format exported by tools/export_semantic_probs_bin.py

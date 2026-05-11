@@ -70,6 +70,9 @@ EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(con
     sem_cfg_.min_rail_visible_count = config_.min_rail_visible_count;
     sem_cfg_.min_rail_visible_ratio = config_.min_rail_visible_ratio;
     sem_cfg_.rail_low_visible_penalty = config_.rail_low_visible_penalty;
+    sem_cfg_.edge_low_visible_policy = config_.edge_low_visible_policy;
+    sem_cfg_.min_edge_visible_count = config_.min_edge_visible_count;
+    sem_cfg_.edge_low_visible_penalty = config_.edge_low_visible_penalty;
 }
 
 bool EdgeCalibrator::LoadData() {
@@ -644,6 +647,9 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "semantic_js_divergence: " << last_score_breakdown_.semantic_js_divergence << "\n";
     result_file << "semantic_hist_similarity: " << last_score_breakdown_.semantic_hist_similarity << "\n";
     result_file << "edge_term_norm: " << last_score_breakdown_.edge_score_norm << "\n";
+    result_file << "edge_visible_count: " << last_score_breakdown_.edge_visible_count << "\n";
+    result_file << "edge_low_visible_fallback: " << last_score_breakdown_.edge_low_visible_fallback << "\n";
+    result_file << "edge_low_visible_policy: " << config_.edge_low_visible_policy << "\n";
     // Phase 7 (sam_2d): rail term replaces line term in exported breakdown.
     result_file << "rail_term_norm: " << last_score_breakdown_.rail_score_norm << "\n";
     result_file << "rail_sample_source: " << rail_sample_source_ << "\n";

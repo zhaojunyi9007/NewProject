@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 // Phase 8 (sam_2d): line alignment term removed; rail term is the only track-specific 2D cue.
 
@@ -186,7 +187,9 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
                            int W, int H,
                            const Eigen::Matrix3d& R,
                            const Eigen::Vector3d& t,
-                           bool low_visible_zero,
+                           const std::string& low_visible_policy,
+                           int min_visible_count,
+                           double low_visible_penalty,
                            int* visible_count_out,
                            bool* low_visible_out) {
     if (dist_map.empty()) return -1e6;
@@ -223,15 +226,16 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
         visible_count++;
     }
 
-    // When fewer than 50 points project in-image the edge score is too flat to
-    // distinguish poses.  Fall back to a score that simply prefers candidates
-    // that get more points into the image, so the coarse search still drives
-    // toward better alignment rather than returning an identical sentinel for
-    // every candidate.
     if (visible_count_out) *visible_count_out = visible_count;
-    const bool low_visible = visible_count < 50;
+    const bool low_visible = visible_count < std::max(1, min_visible_count);
     if (low_visible_out) *low_visible_out = low_visible;
-    if (low_visible) return low_visible_zero ? 0.0 : (-1e5 + visible_count);
+    if (low_visible) {
+        if (low_visible_policy == "penalty") {
+            return -std::max(0.0, low_visible_penalty) *
+                   static_cast<double>(std::max<size_t>(1, points.size()));
+        }
+        return 0.0;
+    }
     return total_score;
 }
 
@@ -356,9 +360,17 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
     // Edge term: normalize by point count for scale stability.
     bd.edge_score_norm = 0.0;
     if (!edge_dist.empty() && !edge_points.empty()) {
-        const double raw = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R, t);
+        int edge_visible_count = 0;
+        bool edge_low_visible = false;
+        const double raw = EdgeAttractionScore(edge_points, edge_dist, edge_weight, R_rect, P_rect, W, H, R, t,
+                                               sem_cfg.edge_low_visible_policy,
+                                               sem_cfg.min_edge_visible_count,
+                                               sem_cfg.edge_low_visible_penalty,
+                                               &edge_visible_count, &edge_low_visible);
         const double n = static_cast<double>(std::max<size_t>(1, edge_points.size()));
         bd.edge_score_norm = raw / n;
+        bd.edge_visible_count = static_cast<double>(edge_visible_count);
+        bd.edge_low_visible_fallback = edge_low_visible ? 1.0 : 0.0;
     }
 
     // Phase F (sam_2d): rail term (reuses edge attraction score on rail distance/weight maps).

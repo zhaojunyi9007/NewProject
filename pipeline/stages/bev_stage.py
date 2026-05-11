@@ -68,6 +68,55 @@ def _bev_rail_nonzero_ratio(path: str) -> float:
         return 0.0
 
 
+
+def _select_lidar_bev_input(raw_bin: str, refined_bin: str, bev_cfg: dict) -> tuple[str, str, float]:
+    """Select the LiDAR BEV input for BEV matcher, preferring non-empty refined rail BEV when enabled."""
+    if bool(bev_cfg.get("use_refined_lidar_rail", False)) and refined_bin and os.path.isfile(refined_bin):
+        ratio = _bev_rail_nonzero_ratio(refined_bin)
+        if ratio > 0.0:
+            return refined_bin, "refined", ratio
+    return raw_bin, "raw_bev_channels", _bev_rail_nonzero_ratio(raw_bin)
+
+
+def _maybe_export_refined_lidar_rail(
+    fid: str,
+    lidar_root: str,
+    pseudo_npz: str,
+    bev_cfg: dict,
+    sem_cfg: dict,
+) -> tuple[str, dict]:
+    refined_bin = os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_refined.bin")
+    debug_path = os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_debug.json")
+    if not bool(bev_cfg.get("use_refined_lidar_rail", False)):
+        return refined_bin, _load_json_dict(debug_path)
+    if os.path.isfile(refined_bin) and _bev_rail_nonzero_ratio(refined_bin) > 0.0:
+        return refined_bin, _load_json_dict(debug_path)
+
+    bev_npz = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_maps.npz")
+    if not os.path.isfile(bev_npz):
+        return refined_bin, _load_json_dict(debug_path)
+    try:
+        from lidar_bev_rail_points import export_lidar_bev_rail_points  # noqa: WPS433
+
+        export_lidar_bev_rail_points(
+            bev_npz,
+            os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_points.txt"),
+            min_prob=float(sem_cfg.get("lidar_bev_rail_sample_min_prob", 0.15)),
+            stride_cells=int(sem_cfg.get("lidar_bev_rail_sample_stride_cells", 2)),
+            max_points=int(sem_cfg.get("lidar_bev_rail_sample_max_points", 8000)),
+            reference_z=float(sem_cfg.get("lidar_bev_rail_sample_reference_z", 0.0)),
+            oracle_npz_path=pseudo_npz if os.path.isfile(pseudo_npz) else None,
+            oracle_overlap_dilate_cells=int(sem_cfg.get("lidar_bev_oracle_overlap_dilate_cells", 3)),
+            min_component_cells=int(sem_cfg.get("lidar_bev_rail_min_component_cells", 20)),
+            debug_path=debug_path,
+            refined_png_path=os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_refined.png"),
+            refined_bin_path=refined_bin,
+        )
+    except Exception as exc:
+        print(f"[Warning] Export refined LiDAR rail BEV failed: {fid}: {exc}")
+    return refined_bin, _load_json_dict(debug_path)
+
+
 def _delta_within_oracle_limits(parsed: dict, base_r: list[float], base_t: list[float], bev_cfg: dict) -> tuple[bool, str]:
     max_tx = float(bev_cfg.get("oracle_max_abs_tx_m", 2.0))
     max_ty = float(bev_cfg.get("oracle_max_abs_ty_m", 1.0))
@@ -89,6 +138,7 @@ def run(context: RuntimeContext) -> None:
     print("=" * 40)
 
     bev_cfg = context.config.get("bev") or {}
+    sem_cfg = context.config.get("semantic_calib") or {}
     if not bool(bev_cfg.get("enabled", False)):
         print("[Info] bev.enabled=false，跳过")
         return
@@ -157,7 +207,12 @@ def run(context: RuntimeContext) -> None:
         if not export_image_rail_bin(pseudo_npz, img_bin, bev_cfg, export_dbg):
             print(f"[Warning] 导出 image BEV 失败: {fid}")
             continue
-        export_dbg["lidar_rail_nonzero_ratio"] = _bev_rail_nonzero_ratio(lidar_bin)
+        export_dbg["lidar_rail_nonzero_ratio"] = selected_lidar_rail_ratio
+        export_dbg["lidar_rail_source"] = lidar_rail_source
+        export_dbg["refined_lidar_rail_nonzero_ratio"] = _bev_rail_nonzero_ratio(refined_lidar_bin) if os.path.isfile(refined_lidar_bin) else 0.0
+        export_dbg["refined_lidar_rail_fallback_used"] = bool(refined_dbg.get("lidar_rail_refine_fallback_used", False))
+        export_dbg["rail_refinement_valid"] = bool(refined_dbg.get("rail_refinement_valid", True))
+        export_dbg["rail_refinement_mismatch"] = bool(refined_dbg.get("rail_refinement_mismatch", False))
         rail_quality = _load_json_dict(os.path.join(os.path.abspath(img_root), fid, "rail_quality.json"))
         oracle_rail = (
             bool(rail_quality.get("label_track_prior_used", False))

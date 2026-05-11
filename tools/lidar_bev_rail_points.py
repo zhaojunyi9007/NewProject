@@ -1,10 +1,11 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Export refined LiDAR rail BEV cells as optimizer-friendly 3D rail samples."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import struct
 from typing import Any, Optional
 
 import numpy as np
@@ -35,6 +36,17 @@ def _resize_like(src: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     import cv2
 
     return cv2.resize(src.astype(np.float32), (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def _write_single_channel_bev_bin(path: str, rail: np.ndarray, x0: float, y0: float, res: float) -> None:
+    arr = np.nan_to_num(np.asarray(rail, dtype=np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    arr = np.clip(arr, 0.0, 1.0)
+    ny, nx = arr.shape
+    with open(path, "wb") as f:
+        f.write(b"EDGEBEV1")
+        f.write(struct.pack("iii", int(nx), int(ny), 1))
+        f.write(struct.pack("ffff", float(x0), float(y0), float(res), 0.0))
+        f.write(arr.astype(np.float32, copy=False).tobytes(order="C"))
 
 
 def refine_lidar_rail_probability(
@@ -86,14 +98,15 @@ def refine_lidar_rail_probability(
             refined[comp] = arr[comp]
             kept_components += 1
 
-    refined_nonzero = float((refined > 1e-4).mean()) if refined.size else 0.0
+    pre_fallback_refined_nonzero = float((refined > 1e-4).mean()) if refined.size else 0.0
+    refined_nonzero = pre_fallback_refined_nonzero
     fallback_used = False
     if refined_nonzero <= 0.0 and raw_nonzero > 0.0:
-        # Avoid making the rail term disappear when oracle/geometry refinement is over-strict
-        # or when the image/LiDAR BEV grids do not overlap well enough yet.
+        # Preserve samples for diagnostics, but mark oracle mismatch explicitly.
         refined = np.where(arr >= float(min_prob), arr, 0.0).astype(np.float32)
         refined_nonzero = float((refined > 1e-4).mean()) if refined.size else 0.0
         fallback_used = True
+
     if debug_out is not None:
         debug_out.update(
             {
@@ -104,6 +117,9 @@ def refine_lidar_rail_probability(
                 "lidar_rail_component_count": float(component_count),
                 "lidar_rail_kept_component_count": float(kept_components),
                 "lidar_rail_refine_fallback_used": bool(fallback_used),
+                "rail_refinement_valid": bool(not (fallback_used and oracle_used)),
+                "rail_refinement_mismatch": bool(fallback_used and oracle_used),
+                "rail_refinement_empty": bool(pre_fallback_refined_nonzero <= 0.0),
                 "lidar_rail_min_prob": float(min_prob),
                 "lidar_rail_min_component_cells": float(max(1, int(min_component_cells))),
             }
@@ -123,6 +139,7 @@ def export_lidar_bev_rail_points(
     min_component_cells: int = 1,
     debug_path: Optional[str] = None,
     refined_png_path: Optional[str] = None,
+    refined_bin_path: Optional[str] = None,
 ) -> int:
     z = np.load(npz_path)
     if "rail_probability_refined" in z.files:
@@ -142,11 +159,18 @@ def export_lidar_bev_rail_points(
         return 0
     if rail.ndim != 2 or rail.size == 0:
         return 0
+
     x0 = _load_scalar(z, "bev_xmin", 0.0)
     y0 = _load_scalar(z, "bev_ymin", 0.0)
     res = _load_scalar(z, "bev_resolution", 0.2)
-    stride = max(1, int(stride_cells))
+    if refined_bin_path:
+        _write_single_channel_bev_bin(refined_bin_path, rail, x0, y0, res)
+    if refined_png_path:
+        import cv2
 
+        cv2.imwrite(refined_png_path, np.clip(rail * 255.0, 0, 255).astype(np.uint8))
+
+    stride = max(1, int(stride_cells))
     yy, xx = np.where(rail >= float(min_prob))
     if yy.size == 0:
         with open(out_path, "w", encoding="utf-8") as f:
@@ -156,6 +180,7 @@ def export_lidar_bev_rail_points(
             with open(debug_path, "w", encoding="utf-8") as f:
                 json.dump(debug, f, ensure_ascii=False, indent=2)
         return 0
+
     keep = ((yy % stride) == 0) & ((xx % stride) == 0)
     yy, xx = yy[keep], xx[keep]
     conf = rail[yy, xx]
@@ -170,10 +195,6 @@ def export_lidar_bev_rail_points(
         for x, y, c in zip(xs, ys, conf):
             f.write(f"{float(x):.6f} {float(y):.6f} {float(reference_z):.6f} {float(c):.6f}\n")
 
-    if refined_png_path:
-        import cv2
-
-        cv2.imwrite(refined_png_path, np.clip(rail * 255.0, 0, 255).astype(np.uint8))
     if debug_path:
         debug.update(
             {
@@ -201,6 +222,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--min-component-cells", type=int, default=20)
     ap.add_argument("--debug-path", default="")
     ap.add_argument("--refined-png", default="")
+    ap.add_argument("--refined-bin", default="")
     args = ap.parse_args(argv)
     n = export_lidar_bev_rail_points(
         args.npz_path,
@@ -214,6 +236,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         min_component_cells=args.min_component_cells,
         debug_path=args.debug_path or None,
         refined_png_path=args.refined_png or None,
+        refined_bin_path=args.refined_bin or None,
     )
     print(n)
     return 0

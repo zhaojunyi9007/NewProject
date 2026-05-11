@@ -64,7 +64,9 @@ double EdgeAttractionScore(const std::vector<PointFeature>& points,
                            int W, int H,
                            const Eigen::Matrix3d& R,
                            const Eigen::Vector3d& t,
-                           bool low_visible_zero = false,
+                           const std::string& low_visible_policy = "zero",
+                           int min_visible_count = 50,
+                           double low_visible_penalty = 0.15,
                            int* visible_count_out = nullptr,
                            bool* low_visible_out = nullptr);
 

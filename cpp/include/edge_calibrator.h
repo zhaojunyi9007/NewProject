@@ -35,6 +35,9 @@ struct EdgeCalibratorConfig {
     double rail_low_visible_penalty = 0.50;
     double rail_visibility_residual_weight = 0.0;
     double rail_oob_residual_weight = 0.0;
+    std::string edge_low_visible_policy = "zero";
+    int min_edge_visible_count = 50;
+    double edge_low_visible_penalty = 0.15;
     std::vector<double> class_weights;        // same order as image semantic classes
     std::vector<double> pyramid_scales;       // e.g. 1.0,0.5,0.25
 

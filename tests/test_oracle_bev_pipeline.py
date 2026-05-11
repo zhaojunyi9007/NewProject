@@ -132,3 +132,91 @@ def test_oracle_rail_hard_gate_marks_low_visibility_invalid():
     assert gated["rail_gate_failed"] == 1.0
     assert gated["final_pose_valid"] == 0.0
     assert "rail_visible" in gated["invalid_reason"]
+
+
+
+def test_export_lidar_bev_rail_points_writes_refined_bev_bin(tmp_path):
+    npz = tmp_path / "bev_maps.npz"
+    out = tmp_path / "rail_points.txt"
+    refined_bin = tmp_path / "rail_refined.bin"
+    rail = np.zeros((3, 4), dtype=np.float32)
+    rail[1, 1:3] = 0.8
+    np.savez_compressed(npz, rail_probability=rail, bev_xmin=2.0, bev_ymin=-1.0, bev_resolution=0.25)
+
+    n = export_lidar_bev_rail_points(
+        str(npz),
+        str(out),
+        min_prob=0.15,
+        stride_cells=1,
+        max_points=10,
+        refined_bin_path=str(refined_bin),
+    )
+
+    assert n == 2
+    raw = refined_bin.read_bytes()
+    assert raw[:8] == b"EDGEBEV1"
+    nx, ny, nch = struct.unpack("iii", raw[8:20])
+    assert (nx, ny, nch) == (4, 3, 1)
+    arr = np.frombuffer(raw[36:], dtype=np.float32).reshape(ny, nx)
+    assert arr[1, 1:3].min() > 0.7
+
+
+def test_rail_refinement_mismatch_is_reported_when_oracle_clears_all(tmp_path):
+    from lidar_bev_rail_points import export_lidar_bev_rail_points
+
+    npz = tmp_path / "bev_maps.npz"
+    oracle_npz = tmp_path / "pseudo_bev.npz"
+    out = tmp_path / "rail_points.txt"
+    dbg = tmp_path / "rail_debug.json"
+    rail = np.zeros((20, 20), dtype=np.float32)
+    rail[:, 2:4] = 0.9
+    oracle = np.zeros((20, 20), dtype=np.float32)
+    oracle[:, 15:17] = 1.0
+    np.savez_compressed(npz, rail_probability=rail, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=1.0)
+    np.savez_compressed(oracle_npz, rail_from_label_track=oracle)
+
+    export_lidar_bev_rail_points(
+        str(npz),
+        str(out),
+        min_prob=0.15,
+        stride_cells=1,
+        oracle_npz_path=str(oracle_npz),
+        oracle_overlap_dilate_cells=0,
+        min_component_cells=5,
+        debug_path=str(dbg),
+    )
+
+    obj = __import__("json").loads(dbg.read_text())
+    assert obj["rail_refinement_valid"] is False
+    assert obj["rail_refinement_mismatch"] is True
+    assert obj["lidar_rail_refine_fallback_used"] is True
+
+
+def test_bev_stage_prefers_nonempty_refined_lidar_rail_bin(tmp_path):
+    from pipeline.stages.bev_stage import _select_lidar_bev_input
+
+    raw = tmp_path / "0000000012_bev_channels.bin"
+    refined = tmp_path / "0000000012_rail_bev_refined.bin"
+    raw.write_bytes(b"raw")
+    refined.write_bytes(b"EDGEBEV1" + struct.pack("iii", 1, 1, 1) + struct.pack("ffff", 0.0, 0.0, 1.0, 0.0) + np.array([1.0], dtype=np.float32).tobytes())
+
+    selected, source, ratio = _select_lidar_bev_input(str(raw), str(refined), {"use_refined_lidar_rail": True})
+
+    assert selected == str(refined)
+    assert source == "refined"
+    assert ratio == 1.0
+
+
+def test_overlay_json_rail_centerlines_parses_poly_id_u_v(tmp_path):
+    from tools.visualize import overlay_json_rail_centerlines
+
+    frame = tmp_path / "frame"
+    frame.mkdir()
+    (frame / "rail_centerlines_2d.txt").write_text("# poly_id u v\n0 10 20\n0 20 20\n1 30 40\n1 40 40\n", encoding="utf-8")
+    img = np.zeros((60, 60, 3), dtype=np.uint8)
+
+    out = overlay_json_rail_centerlines(img, str(frame))
+
+    # Cyan line should be near actual u coordinates, not at x=0/poly_id.
+    assert out[20, 10].sum() > 0 or out[20, 20].sum() > 0
+    assert out[:, 0].sum() == 0

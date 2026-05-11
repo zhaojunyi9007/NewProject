@@ -115,6 +115,8 @@ struct ScoreBreakdown {
     double semantic_js_divergence = 0.0;     // lower is better
     double semantic_hist_similarity = 0.0;   // higher is better (0..1)
     double edge_score_norm = 0.0;            // normalized edge attraction (higher is better)
+    double edge_visible_count = 0.0;
+    double edge_low_visible_fallback = 0.0;
     // Phase D6 (sam_2d): rail term replaces line term as main track feature.
     double rail_score_norm = 0.0;            // normalized rail attraction (higher is better)
 

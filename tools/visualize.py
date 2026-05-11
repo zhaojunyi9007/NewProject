@@ -335,28 +335,39 @@ def overlay_json_rail_centerlines(img, frame_dir):
         path = os.path.join(frame_dir, "label_track_centerlines_2d.txt")
     if not os.path.isfile(path):
         return img
-    polylines = []
-    cur = []
+
+    grouped = {}
+    legacy_cur = []
+    legacy_idx = 0
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             s = line.strip()
             if not s:
-                if len(cur) >= 2:
-                    polylines.append(np.array(cur, dtype=np.int32))
-                cur = []
+                if len(legacy_cur) >= 2:
+                    grouped[f"legacy_{legacy_idx}"] = legacy_cur
+                    legacy_idx += 1
+                legacy_cur = []
                 continue
             if s.startswith("#"):
                 continue
             parts = s.replace(",", " ").split()
-            if len(parts) < 2:
-                continue
             try:
-                cur.append([int(round(float(parts[0]))), int(round(float(parts[1])))])
+                if len(parts) >= 3:
+                    poly_id = parts[0]
+                    u = int(round(float(parts[1])))
+                    v = int(round(float(parts[2])))
+                    grouped.setdefault(poly_id, []).append([u, v])
+                elif len(parts) >= 2:
+                    legacy_cur.append([int(round(float(parts[0]))), int(round(float(parts[1])))])
             except ValueError:
                 continue
-    if len(cur) >= 2:
-        polylines.append(np.array(cur, dtype=np.int32))
-    for pl in polylines:
+    if len(legacy_cur) >= 2:
+        grouped[f"legacy_{legacy_idx}"] = legacy_cur
+
+    for pts in grouped.values():
+        if len(pts) < 2:
+            continue
+        pl = np.array(pts, dtype=np.int32)
         cv2.polylines(img, [pl.reshape(-1, 1, 2)], False, (255, 255, 0), 3, lineType=cv2.LINE_AA)
     return img
 
