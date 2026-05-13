@@ -301,11 +301,14 @@ def run(context: RuntimeContext) -> None:
             )
             actual_rail_score = float(breakdown.get("rail_score", 0.0)) if breakdown else 0.0
             reject_reason = ""
-            if parsed and oracle_rail:
+            if actual_rail_score < min_rail_score:
+                reject_reason = f"rail_score_below_{min_rail_score}"
+                parsed = None
+            elif parsed and oracle_rail:
                 ok_delta, reject_reason = _delta_within_oracle_limits(parsed, rvec, tvec, bev_cfg)
                 if not ok_delta:
                     parsed = None
-            if parsed and actual_rail_score >= min_rail_score:
+            if parsed:
                 last_pose = parsed
                 context.bev_pose_by_frame[frame_id] = parsed
                 breakdown["delta_applied"] = True
@@ -313,12 +316,11 @@ def run(context: RuntimeContext) -> None:
                 print(f"  [BEV] 帧 {fid} BEV delta 已应用：rail_score={actual_rail_score:.4f} >= {min_rail_score}")
             else:
                 if not reject_reason:
-                    reject_reason = f"rail_score_below_{min_rail_score}"
+                    reject_reason = "pose_parse_failed"
                 print(
-                    f"  [BEV] 帧 {fid} BEV delta 被拒绝：rail_score={actual_rail_score:.6f} < "
-                    f"min_rail_score_to_apply={min_rail_score}，保留原始 init_pose"
+                    f"  [BEV] 帧 {fid} BEV delta 被拒绝：reason={reject_reason}, "
+                    f"rail_score={actual_rail_score:.6f}, min_rail_score_to_apply={min_rail_score}，保留原始 init_pose"
                 )
-                parsed = None
                 breakdown["delta_applied"] = False
                 breakdown["reject_reason"] = reject_reason
             breakdown.update(export_dbg)
@@ -326,6 +328,22 @@ def run(context: RuntimeContext) -> None:
             breakdown["min_rail_score_to_apply"] = min_rail_score
             breakdown["best_score_raw"] = float(breakdown.get("best_score_raw", breakdown.get("rail_score", 0.0)))
             breakdown["best_score_norm"] = float(breakdown.get("rail_score", 0.0))
+            yaw_deg = float(breakdown.get("yaw_rad", 0.0)) * 180.0 / 3.141592653589793
+            tx_m = float(breakdown.get("tx_m", 0.0))
+            ty_m = float(breakdown.get("ty_m", 0.0))
+            eps = 1e-6
+            breakdown["bev_search_hit_yaw_boundary"] = bool(
+                abs(yaw_deg - float(bev_cfg.get("yaw_min_deg", -6.0))) <= eps
+                or abs(yaw_deg - float(bev_cfg.get("yaw_max_deg", 6.0))) <= eps
+            )
+            breakdown["bev_search_hit_tx_boundary"] = bool(
+                abs(tx_m - float(bev_cfg.get("tx_min_m", -2.0))) <= eps
+                or abs(tx_m - float(bev_cfg.get("tx_max_m", 2.0))) <= eps
+            )
+            breakdown["bev_search_hit_ty_boundary"] = bool(
+                abs(ty_m - float(bev_cfg.get("ty_min_m", -2.0))) <= eps
+                or abs(ty_m - float(bev_cfg.get("ty_max_m", 2.0))) <= eps
+            )
             try:
                 with open(bev_dbg, "w", encoding="utf-8") as f:
                     json.dump(breakdown, f, ensure_ascii=False)
