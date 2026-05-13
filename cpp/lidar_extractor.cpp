@@ -1089,14 +1089,22 @@ int main(int argc, char** argv) {
         rcfg.rail_prob_thresh = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_BEV_PROB_THRESH", 0.12));
         rcfg.min_component_cells = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_BEV_MIN_CELLS", 40.0));
         rcfg.smooth_ksize = std::max(3, GetEnvInt("EDGECALIB_LIDAR_RAIL_BEV_SMOOTH_K", 5));
+        rcfg.min_length_m = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_MIN_LENGTH_M", 8.0));
+        rcfg.max_width_m = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_MAX_WIDTH_M", 1.2));
+        rcfg.min_linearity = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_MIN_LINEARITY", 8.0));
+        rcfg.gauge_m = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_GAUGE_M", 1.435));
+        rcfg.gauge_tolerance_m = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_GAUGE_TOL_M", 0.45));
+        rcfg.max_parallel_angle_deg = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_MAX_PARALLEL_ANGLE_DEG", 5.0));
+        rcfg.min_pair_overlap_m = static_cast<float>(GetEnvDouble("EDGECALIB_LIDAR_RAIL_GEOM_MIN_PAIR_OVERLAP_M", 5.0));
         const double ref_z = GetEnvDouble("EDGECALIB_LIDAR_REFERENCE_PLANE_Z", 0.0);
         const int max_rail_seg = std::max(1, GetEnvInt("EDGECALIB_LIDAR_RAIL_BEV_MAX_SEGMENTS", 6));
         float rail_confidence = 0.f;
         bool rail_branch_detected = false;
+        RailBEVDebug rail_debug;
         std::vector<Line3D> rail_lines =
             ExtractMultiRailLinesFromBEV(
                 bev_data, rcfg, ref_z, max_rail_seg,
-                &rail_confidence, &rail_branch_detected);
+                &rail_confidence, &rail_branch_detected, &rail_debug);
         VerticalStructureConfig vcfg;
         vcfg.z_min = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MIN", -1.0);
         vcfg.z_max = GetEnvDouble("EDGECALIB_LIDAR_POLE_Z_MAX", 5.0);
@@ -1127,7 +1135,14 @@ int main(int argc, char** argv) {
             if (jf.is_open()) {
                 jf << "{\"rail_confidence\":" << rail_confidence
                    << ",\"branch_detected\":" << (rail_branch_detected ? "true" : "false")
-                   << ",\"rail_segments\":" << rail_lines.size() << "}";
+                   << ",\"rail_segments\":" << rail_lines.size()
+                   << ",\"lidar_rail_candidate_component_count\":" << rail_debug.candidate_component_count
+                   << ",\"lidar_rail_line_component_count\":" << rail_debug.line_component_count
+                   << ",\"lidar_rail_pair_count\":" << rail_debug.pair_count
+                   << ",\"lidar_rail_best_pair_gauge_m\":" << rail_debug.best_pair_gauge_m
+                   << ",\"lidar_rail_best_pair_angle_deg\":" << rail_debug.best_pair_angle_deg
+                   << ",\"lidar_rail_best_pair_overlap_m\":" << rail_debug.best_pair_overlap_m
+                   << "}";
             }
         }
     }

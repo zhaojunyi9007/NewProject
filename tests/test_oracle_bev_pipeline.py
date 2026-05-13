@@ -1,12 +1,15 @@
 import os
 import struct
 import sys
+import json
 
 import numpy as np
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TOOLS = os.path.join(ROOT, "tools")
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
@@ -116,6 +119,84 @@ def test_refined_lidar_rail_bev_uses_oracle_overlap_to_reduce_noise(tmp_path):
     assert refined[:, 18:20].max() > 0.5
 
 
+def test_metric_oracle_resampling_preserves_physical_alignment(tmp_path):
+    npz = tmp_path / "bev_maps.npz"
+    oracle_npz = tmp_path / "pseudo_bev.npz"
+    out = tmp_path / "rail_points.txt"
+    dbg = tmp_path / "rail_debug.json"
+
+    lidar = np.zeros((20, 20), dtype=np.float32)
+    lidar[:, 5:7] = 0.9
+    image = np.zeros((80, 80), dtype=np.float32)
+    image[:, 20:28] = 1.0
+    np.savez_compressed(npz, rail_probability=lidar, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=0.2)
+    np.savez_compressed(
+        oracle_npz,
+        rail_from_label_track=image,
+        bev_x_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_y_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_resolution=np.array([0.05], dtype=np.float32),
+    )
+
+    n = export_lidar_bev_rail_points(
+        str(npz),
+        str(out),
+        min_prob=0.15,
+        stride_cells=1,
+        oracle_npz_path=str(oracle_npz),
+        oracle_overlap_dilate_cells=0,
+        min_component_cells=5,
+        debug_path=str(dbg),
+    )
+
+    obj = json.loads(dbg.read_text())
+    assert n > 0
+    assert obj["oracle_resampling_mode"] == "metric_cell_center"
+    assert abs(obj["image_bev_resolution"] - 0.05) < 1e-6
+    assert abs(obj["lidar_bev_resolution"] - 0.2) < 1e-6
+    assert obj["metric_overlap_ratio"] > 0.9
+    assert abs(obj["metric_centroid_delta_m"][0]) < 0.11
+
+
+def test_metric_oracle_resampling_rejects_physical_mismatch(tmp_path):
+    npz = tmp_path / "bev_maps.npz"
+    oracle_npz = tmp_path / "pseudo_bev.npz"
+    out = tmp_path / "rail_points.txt"
+    dbg = tmp_path / "rail_debug.json"
+
+    lidar = np.zeros((20, 20), dtype=np.float32)
+    lidar[:, 5:7] = 0.9
+    image = np.zeros((20, 20), dtype=np.float32)
+    image[:, 5:7] = 1.0
+    np.savez_compressed(npz, rail_probability=lidar, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=0.2)
+    np.savez_compressed(
+        oracle_npz,
+        rail_from_label_track=image,
+        bev_x_range=np.array([10.0, 14.0], dtype=np.float32),
+        bev_y_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_resolution=np.array([0.2], dtype=np.float32),
+    )
+
+    n = export_lidar_bev_rail_points(
+        str(npz),
+        str(out),
+        min_prob=0.15,
+        stride_cells=1,
+        oracle_npz_path=str(oracle_npz),
+        oracle_overlap_dilate_cells=0,
+        min_component_cells=5,
+        debug_path=str(dbg),
+    )
+
+    obj = json.loads(dbg.read_text())
+    body = [ln for ln in out.read_text().splitlines() if ln and not ln.startswith("#")]
+    assert n == 0
+    assert body == []
+    assert obj["rail_refinement_valid"] is False
+    assert obj["rail_sample_count_for_optimizer"] == 0
+    assert obj["metric_overlap_ratio"] == 0.0
+
+
 def test_oracle_rail_hard_gate_marks_low_visibility_invalid():
     from pipeline.stages.calib_stage import _apply_final_rail_hard_gate
 
@@ -190,6 +271,9 @@ def test_rail_refinement_mismatch_is_reported_when_oracle_clears_all(tmp_path):
     assert obj["rail_refinement_valid"] is False
     assert obj["rail_refinement_mismatch"] is True
     assert obj["lidar_rail_refine_fallback_used"] is True
+    assert obj["rail_sample_count_for_optimizer"] == 0
+    body = [ln for ln in out.read_text().splitlines() if ln and not ln.startswith("#")]
+    assert body == []
 
 
 def test_bev_stage_prefers_nonempty_refined_lidar_rail_bin(tmp_path):
@@ -205,6 +289,26 @@ def test_bev_stage_prefers_nonempty_refined_lidar_rail_bin(tmp_path):
     assert selected == str(refined)
     assert source == "refined"
     assert ratio == 1.0
+
+
+def test_bev_stage_rejects_invalid_refined_lidar_rail_bin(tmp_path):
+    from pipeline.stages.bev_stage import _select_lidar_bev_input
+
+    raw = tmp_path / "0000000012_bev_channels.bin"
+    refined = tmp_path / "0000000012_rail_bev_refined.bin"
+    raw.write_bytes(b"raw")
+    refined.write_bytes(b"EDGEBEV1" + struct.pack("iii", 1, 1, 1) + struct.pack("ffff", 0.0, 0.0, 1.0, 0.0) + np.array([1.0], dtype=np.float32).tobytes())
+
+    selected, source, ratio = _select_lidar_bev_input(
+        str(raw),
+        str(refined),
+        {"use_refined_lidar_rail": True},
+        {"rail_refinement_valid": False, "rail_refinement_mismatch": True},
+    )
+
+    assert selected == str(raw)
+    assert source == "raw_bev_channels"
+    assert ratio == 0.0
 
 
 def test_overlay_json_rail_centerlines_parses_poly_id_u_v(tmp_path):
@@ -276,6 +380,41 @@ def test_bev_alignment_diagnose_detects_swap_xy():
 
     assert out["best_transform"] == "swap_xy"
     assert out["rail_bev_alignment_valid"] is True
+
+
+def test_bev_alignment_debug_reports_metric_fields(tmp_path):
+    from tools.diagnose_rail_bev_alignment import diagnose
+
+    image = np.zeros((80, 80), dtype=np.float32)
+    image[:, 20:28] = 1.0
+    lidar = np.zeros((20, 20), dtype=np.float32)
+    lidar[:, 5:7] = 1.0
+    image_npz = tmp_path / "pseudo_bev.npz"
+    lidar_npz = tmp_path / "lidar_bev.npz"
+    np.savez_compressed(
+        image_npz,
+        rail_from_label_track=image,
+        bev_x_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_y_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_resolution=np.array([0.05], dtype=np.float32),
+    )
+    np.savez_compressed(lidar_npz, rail_probability=lidar, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=0.2)
+
+    out = diagnose(
+        str(image_npz),
+        str(lidar_npz),
+        threshold=0.1,
+        max_shift_cells=2,
+        min_overlap=0.5,
+        test_transforms=False,
+    )
+
+    assert out["oracle_resampling_mode"] == "metric_cell_center"
+    assert abs(out["image_bev_resolution"] - 0.05) < 1e-6
+    assert abs(out["lidar_bev_resolution"] - 0.2) < 1e-6
+    assert out["metric_lidar_rail_bbox_m"]
+    assert out["metric_image_rail_bbox_m"]
+    assert abs(out["metric_centroid_delta_m"][0]) < 0.11
 
 
 

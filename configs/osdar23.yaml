@@ -120,6 +120,10 @@ bev:
   auto_test_bev_axis_transforms: true
   rail_alignment_min_overlap: 0.15
   rail_alignment_max_shift_cells: 120
+  matcher_score_mode: weighted_chamfer
+  chamfer_sigma_m: 0.8
+  chamfer_distance_cap_m: 2.5
+  min_lidar_rail_weight_sum: 20.0
 
 semantic_calib:
   rail_weight: 1.5
@@ -235,6 +239,14 @@ lidar:
     bev_ymin: -25.0
     bev_ymax: 25.0
     bev_resolution: 0.2
+    rail_geometry:
+      min_length_m: 8.0
+      max_width_m: 1.2
+      min_linearity: 8.0
+      gauge_m: 1.435
+      gauge_tolerance_m: 0.45
+      max_parallel_angle_deg: 5.0
+      min_pair_overlap_m: 5.0
 
 # ========================================
 # 标定优化配置

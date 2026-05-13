@@ -15,6 +15,9 @@ struct BEVOptimizeConfig {
     double ty_min_m = -2.0;
     double ty_max_m = 2.0;
     double trans_step_m = 0.5;
+    double chamfer_sigma_m = 0.8;
+    double chamfer_distance_cap_m = 2.5;
+    double min_lidar_rail_weight_sum = 20.0;
 };
 
 struct ScoreBreakdown {
@@ -31,7 +34,8 @@ struct PoseDeltaBev {
     double ty_m = 0.0;
 };
 
-// 使用 rail_probability 栅格：图像 BEV 会 resize 到与 LiDAR 相同尺寸后做旋转+平移搜索，得分=逐像素乘积和。
+// 使用 rail_probability 栅格：图像 BEV 按物理坐标采样到 LiDAR 网格后做旋转+平移搜索，
+// 得分为 LiDAR rail 权重加权的 image rail 距离变换 chamfer 分数。
 bool EstimateBEVDelta(
     const BEVChannels& lidar_bev,
     const BEVChannels& image_bev,

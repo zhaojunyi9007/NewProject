@@ -86,6 +86,9 @@ int main(int argc, char** argv) {
     cfg.ty_min_m = GetEnvD("EDGECALIB_BEV_TY_MIN_M", cfg.ty_min_m);
     cfg.ty_max_m = GetEnvD("EDGECALIB_BEV_TY_MAX_M", cfg.ty_max_m);
     cfg.trans_step_m = GetEnvD("EDGECALIB_BEV_TRANS_STEP_M", cfg.trans_step_m);
+    cfg.chamfer_sigma_m = GetEnvD("EDGECALIB_BEV_CHAMFER_SIGMA_M", cfg.chamfer_sigma_m);
+    cfg.chamfer_distance_cap_m = GetEnvD("EDGECALIB_BEV_CHAMFER_DISTANCE_CAP_M", cfg.chamfer_distance_cap_m);
+    cfg.min_lidar_rail_weight_sum = GetEnvD("EDGECALIB_BEV_MIN_LIDAR_RAIL_WEIGHT_SUM", cfg.min_lidar_rail_weight_sum);
 
     PoseDeltaBev delta;
     ScoreBreakdown score;

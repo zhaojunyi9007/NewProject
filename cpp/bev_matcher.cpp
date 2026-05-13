@@ -15,6 +15,60 @@ static cv::Mat RailToMat(const BEVChannels& bev) {
     return m.clone();
 }
 
+static cv::Mat ResampleRailToGrid(const BEVChannels& src, const BEVChannels& dst_grid) {
+    cv::Mat out = cv::Mat::zeros(dst_grid.ny, dst_grid.nx, CV_32F);
+    if (src.nx <= 0 || src.ny <= 0 || src.resolution <= 1e-12 || src.rail_probability.empty()) {
+        return out;
+    }
+    for (int y = 0; y < dst_grid.ny; ++y) {
+        const double wy = dst_grid.ymin + (static_cast<double>(y) + 0.5) * dst_grid.resolution;
+        const int sy = static_cast<int>(std::floor((wy - src.ymin) / src.resolution));
+        if (sy < 0 || sy >= src.ny) continue;
+        for (int x = 0; x < dst_grid.nx; ++x) {
+            const double wx = dst_grid.xmin + (static_cast<double>(x) + 0.5) * dst_grid.resolution;
+            const int sx = static_cast<int>(std::floor((wx - src.xmin) / src.resolution));
+            if (sx < 0 || sx >= src.nx) continue;
+            const int idx = sy * src.nx + sx;
+            if (idx >= 0 && idx < static_cast<int>(src.rail_probability.size())) {
+                out.at<float>(y, x) = src.rail_probability[static_cast<size_t>(idx)];
+            }
+        }
+    }
+    return out;
+}
+
+static cv::Mat BuildDistanceMapMeters(const cv::Mat& image_rail, double resolution, double cap_m) {
+    cv::Mat mask;
+    cv::threshold(image_rail, mask, 1e-4, 255.0, cv::THRESH_BINARY);
+    mask.convertTo(mask, CV_8U);
+    cv::Mat inv;
+    cv::bitwise_not(mask, inv);
+    cv::Mat dist_px;
+    cv::distanceTransform(inv, dist_px, cv::DIST_L2, 3);
+    cv::Mat dist_m = dist_px * static_cast<float>(resolution);
+    cv::min(dist_m, static_cast<float>(cap_m), dist_m);
+    return dist_m;
+}
+
+static double WeightedChamferScore(const cv::Mat& lidar_rail, const cv::Mat& warped_distance_m, const BEVOptimizeConfig& cfg) {
+    const double sigma = std::max(1e-6, cfg.chamfer_sigma_m);
+    double score = 0.0;
+    double weight_sum = 0.0;
+    for (int y = 0; y < lidar_rail.rows; ++y) {
+        for (int x = 0; x < lidar_rail.cols; ++x) {
+            const float w = lidar_rail.at<float>(y, x);
+            if (w <= 1e-4f) continue;
+            const double d = static_cast<double>(warped_distance_m.at<float>(y, x));
+            score += static_cast<double>(w) * std::exp(-(d * d) / (sigma * sigma));
+            weight_sum += static_cast<double>(w);
+        }
+    }
+    if (weight_sum < cfg.min_lidar_rail_weight_sum) {
+        return 0.0;
+    }
+    return score / weight_sum;
+}
+
 bool EstimateBEVDelta(
     const BEVChannels& lidar_bev,
     const BEVChannels& image_bev,
@@ -34,12 +88,31 @@ bool EstimateBEVDelta(
     }
 
     cv::Mat L = RailToMat(lidar_bev);
-    cv::Mat I = RailToMat(image_bev);
-    cv::resize(I, I, L.size(), 0, 0, cv::INTER_LINEAR);
+    cv::Mat I = ResampleRailToGrid(image_bev, lidar_bev);
     cv::patchNaNs(L, 0);
     cv::patchNaNs(I, 0);
-    cv::normalize(L, L, 0, 1, cv::NORM_MINMAX);
-    cv::normalize(I, I, 0, 1, cv::NORM_MINMAX);
+    double lmax = 0.0;
+    cv::minMaxLoc(L, nullptr, &lmax);
+    if (lmax > 1e-6) {
+        L = L / static_cast<float>(lmax);
+    }
+    cv::max(I, 0.0f, I);
+    cv::min(I, 1.0f, I);
+    cv::Mat D = BuildDistanceMapMeters(I, lidar_bev.resolution, cfg.chamfer_distance_cap_m);
+
+    const double lidar_weight_sum = static_cast<double>(cv::sum(L)[0]);
+    if (lidar_weight_sum < cfg.min_lidar_rail_weight_sum) {
+        *out_delta = PoseDeltaBev{};
+        if (debug_score) {
+            debug_score->best_score_raw = 0.0;
+            debug_score->best_score_norm = 0.0;
+            debug_score->rail_score = 0.0;
+            debug_score->pole_score = 0.0;
+            debug_score->total = 0.0;
+        }
+        std::cerr << "[BEVMatcher] Not enough LiDAR rail weight: " << lidar_weight_sum << std::endl;
+        return true;
+    }
 
     const cv::Point2f center(static_cast<float>(L.cols - 1) * 0.5f, static_cast<float>(L.rows - 1) * 0.5f);
 
@@ -51,8 +124,10 @@ bool EstimateBEVDelta(
 
     for (double yaw_deg = cfg.yaw_min_deg; yaw_deg <= cfg.yaw_max_deg + 1e-6; yaw_deg += cfg.yaw_step_deg) {
         cv::Mat M = cv::getRotationMatrix2D(center, yaw_deg, 1.0);
-        cv::Mat I_rot;
-        cv::warpAffine(I, I_rot, M, L.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+        cv::Mat D_rot;
+        cv::warpAffine(
+            D, D_rot, M, L.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT,
+            static_cast<double>(cfg.chamfer_distance_cap_m));
 
         for (double tx_m = cfg.tx_min_m; tx_m <= cfg.tx_max_m + 1e-6; tx_m += cfg.trans_step_m) {
             for (double ty_m = cfg.ty_min_m; ty_m <= cfg.ty_max_m + 1e-6; ty_m += cfg.trans_step_m) {
@@ -60,12 +135,12 @@ bool EstimateBEVDelta(
                 const int dy = static_cast<int>(std::llround(ty_m / lidar_bev.resolution));
                 cv::Mat T = (cv::Mat_<double>(2, 3) << 1.0, 0.0, static_cast<double>(dx), 0.0, 1.0,
                              static_cast<double>(dy));
-                cv::Mat I_warp;
-                cv::warpAffine(I_rot, I_warp, T, L.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0);
+                cv::Mat D_warp;
+                cv::warpAffine(
+                    D_rot, D_warp, T, L.size(), cv::INTER_LINEAR, cv::BORDER_CONSTANT,
+                    static_cast<double>(cfg.chamfer_distance_cap_m));
 
-                cv::Mat prod;
-                cv::multiply(L, I_warp, prod);
-                const double s = static_cast<double>(cv::sum(prod)[0]);
+                const double s = WeightedChamferScore(L, D_warp, cfg);
                 if (s > best_score) {
                     best_score = s;
                     best.yaw_rad = yaw_deg * M_PI / 180.0;
@@ -78,9 +153,8 @@ bool EstimateBEVDelta(
 
     *out_delta = best;
     if (debug_score) {
-        const double denom = static_cast<double>(std::max(1, L.rows * L.cols));
         debug_score->best_score_raw = best_score;
-        debug_score->best_score_norm = best_score / denom;
+        debug_score->best_score_norm = best_score;
         debug_score->rail_score = debug_score->best_score_norm;
         debug_score->pole_score = 0.0;
         debug_score->total = debug_score->rail_score;
@@ -97,8 +171,7 @@ bool SaveBEVDebugImages(
     const BEVChannels& image_bev,
     const PoseDeltaBev& delta) {
     cv::Mat L = RailToMat(lidar_bev);
-    cv::Mat I = RailToMat(image_bev);
-    cv::resize(I, I, L.size(), 0, 0, cv::INTER_LINEAR);
+    cv::Mat I = ResampleRailToGrid(image_bev, lidar_bev);
     cv::patchNaNs(L, 0);
     cv::patchNaNs(I, 0);
 

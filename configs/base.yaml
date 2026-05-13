@@ -101,6 +101,14 @@ lidar:
     rail_bev_min_cells: 40.0
     rail_bev_smooth_k: 5
     rail_bev_max_segments: 6
+    rail_geometry:
+      min_length_m: 8.0
+      max_width_m: 1.2
+      min_linearity: 8.0
+      gauge_m: 1.435
+      gauge_tolerance_m: 0.45
+      max_parallel_angle_deg: 5.0
+      min_pair_overlap_m: 5.0
     vert_cluster_tolerance: 0.35
     vert_min_cluster: 25
     use_legacy_range_image: false
@@ -228,6 +236,10 @@ bev:
   ty_min_m: -2.0
   ty_max_m: 2.0
   trans_step_m: 0.5
+  matcher_score_mode: weighted_chamfer
+  chamfer_sigma_m: 0.8
+  chamfer_distance_cap_m: 2.5
+  min_lidar_rail_weight_sum: 20.0
   initializer_binary: ""
   # 低于此 rail_score 时拒绝应用 BEV delta，保留原始 init_pose
   min_rail_score_to_apply: 0.01
@@ -271,4 +283,3 @@ refine:
   max_pose_jump_m: 0.15
   temporal_smoothing_lambda: 0.4
   update_stride: 1
-

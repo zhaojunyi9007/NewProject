@@ -69,8 +69,16 @@ def _bev_rail_nonzero_ratio(path: str) -> float:
 
 
 
-def _select_lidar_bev_input(raw_bin: str, refined_bin: str, bev_cfg: dict) -> tuple[str, str, float]:
+def _select_lidar_bev_input(
+    raw_bin: str,
+    refined_bin: str,
+    bev_cfg: dict,
+    refined_dbg: dict | None = None,
+) -> tuple[str, str, float]:
     """Select the LiDAR BEV input for BEV matcher, preferring non-empty refined rail BEV when enabled."""
+    refined_dbg = refined_dbg or {}
+    if refined_dbg and not bool(refined_dbg.get("rail_refinement_valid", True)):
+        return raw_bin, "raw_bev_channels", _bev_rail_nonzero_ratio(raw_bin)
     if bool(bev_cfg.get("use_refined_lidar_rail", False)) and refined_bin and os.path.isfile(refined_bin):
         ratio = _bev_rail_nonzero_ratio(refined_bin)
         if ratio > 0.0:
@@ -212,6 +220,9 @@ def run(context: RuntimeContext) -> None:
     env["EDGECALIB_BEV_TY_MIN_M"] = str(bev_cfg.get("ty_min_m", -2.0))
     env["EDGECALIB_BEV_TY_MAX_M"] = str(bev_cfg.get("ty_max_m", 2.0))
     env["EDGECALIB_BEV_TRANS_STEP_M"] = str(bev_cfg.get("trans_step_m", 0.5))
+    env["EDGECALIB_BEV_CHAMFER_SIGMA_M"] = str(bev_cfg.get("chamfer_sigma_m", 0.8))
+    env["EDGECALIB_BEV_CHAMFER_DISTANCE_CAP_M"] = str(bev_cfg.get("chamfer_distance_cap_m", 2.5))
+    env["EDGECALIB_BEV_MIN_LIDAR_RAIL_WEIGHT_SUM"] = str(bev_cfg.get("min_lidar_rail_weight_sum", 20.0))
 
     last_pose = None
     context.bev_pose_by_frame.clear()
@@ -227,7 +238,7 @@ def run(context: RuntimeContext) -> None:
             continue
         refined_lidar_bin, refined_dbg = _maybe_export_refined_lidar_rail(fid, lidar_root, pseudo_npz, bev_cfg, sem_cfg)
         lidar_bin, lidar_rail_source, selected_lidar_rail_ratio = _select_lidar_bev_input(
-            raw_lidar_bin, refined_lidar_bin, bev_cfg
+            raw_lidar_bin, refined_lidar_bin, bev_cfg, refined_dbg
         )
         if not os.path.isfile(lidar_bin):
             print(f"[Warning] Missing {lidar_bin} (LiDAR Phase3 BEV required), skip frame {fid}")

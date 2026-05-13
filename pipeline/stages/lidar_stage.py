@@ -96,6 +96,7 @@ def run(context: RuntimeContext) -> None:
     ref_z = float(phase3_cfg.get("reference_plane_z", dataset_meta.get("reference_z", 0.0)))
 
     if phase3_enabled:
+        rail_geom_cfg = phase3_cfg.get("rail_geometry", {}) if isinstance(phase3_cfg.get("rail_geometry", {}), dict) else {}
         extractor_env["EDGECALIB_LIDAR_PHASE3"] = "1"
         extractor_env["EDGECALIB_LIDAR_REFERENCE_PLANE_Z"] = str(ref_z)
         extractor_env["EDGECALIB_LIDAR_RAIL_BAND_ZMIN"] = str(phase3_cfg.get("rail_band_zmin", -0.5))
@@ -109,6 +110,17 @@ def run(context: RuntimeContext) -> None:
         extractor_env["EDGECALIB_LIDAR_RAIL_BEV_MIN_CELLS"] = str(phase3_cfg.get("rail_bev_min_cells", 40.0))
         extractor_env["EDGECALIB_LIDAR_RAIL_BEV_SMOOTH_K"] = str(int(phase3_cfg.get("rail_bev_smooth_k", 5)))
         extractor_env["EDGECALIB_LIDAR_RAIL_BEV_MAX_SEGMENTS"] = str(int(phase3_cfg.get("rail_bev_max_segments", 6)))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_MIN_LENGTH_M"] = str(rail_geom_cfg.get("min_length_m", 8.0))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_MAX_WIDTH_M"] = str(rail_geom_cfg.get("max_width_m", 1.2))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_MIN_LINEARITY"] = str(rail_geom_cfg.get("min_linearity", 8.0))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_GAUGE_M"] = str(rail_geom_cfg.get("gauge_m", 1.435))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_GAUGE_TOL_M"] = str(rail_geom_cfg.get("gauge_tolerance_m", 0.45))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_MAX_PARALLEL_ANGLE_DEG"] = str(
+            rail_geom_cfg.get("max_parallel_angle_deg", 5.0)
+        )
+        extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_MIN_PAIR_OVERLAP_M"] = str(
+            rail_geom_cfg.get("min_pair_overlap_m", 5.0)
+        )
         extractor_env["EDGECALIB_LIDAR_VERT_CLUSTER_TOL"] = str(phase3_cfg.get("vert_cluster_tolerance", 0.35))
         extractor_env["EDGECALIB_LIDAR_VERT_MIN_CLUSTER"] = str(int(phase3_cfg.get("vert_min_cluster", 25)))
         if "use_legacy_range_image" in phase3_cfg:
