@@ -68,6 +68,32 @@ def _bev_rail_nonzero_ratio(path: str) -> float:
         return 0.0
 
 
+def _npz_rail_nonzero_ratio(path: str, key: str) -> float:
+    try:
+        import numpy as np
+
+        if not path or not os.path.isfile(path):
+            return 0.0
+        z = np.load(path)
+        if key not in z.files:
+            return 0.0
+        arr = np.nan_to_num(np.asarray(z[key], dtype=np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+        return float((arr > 1e-4).mean()) if arr.size else 0.0
+    except Exception:
+        return 0.0
+
+
+def _derived_lidar_rail_stale(source_path: str, derived_paths: list[str]) -> bool:
+    if not source_path or not os.path.isfile(source_path):
+        return False
+    src_mtime = os.path.getmtime(source_path)
+    for path in derived_paths:
+        if not path or not os.path.isfile(path):
+            return True
+        if os.path.getmtime(path) < src_mtime:
+            return True
+    return False
+
 
 def _select_lidar_bev_input(
     raw_bin: str,
@@ -93,22 +119,28 @@ def _maybe_export_refined_lidar_rail(
     bev_cfg: dict,
     sem_cfg: dict,
 ) -> tuple[str, dict]:
-    refined_bin = os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_refined.bin")
-    debug_path = os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_debug.json")
+    abs_lidar = os.path.abspath(lidar_root)
+    refined_bin = os.path.join(abs_lidar, f"{fid}_rail_bev_refined.bin")
+    refined_png = os.path.join(abs_lidar, f"{fid}_rail_bev_refined.png")
+    points_path = os.path.join(abs_lidar, f"{fid}_rail_bev_points.txt")
+    debug_path = os.path.join(abs_lidar, f"{fid}_rail_bev_debug.json")
+    bev_npz = os.path.join(abs_lidar, f"{fid}_bev_maps.npz")
     if not bool(bev_cfg.get("use_refined_lidar_rail", False)):
         return refined_bin, _load_json_dict(debug_path)
-    if os.path.isfile(refined_bin) and _bev_rail_nonzero_ratio(refined_bin) > 0.0:
-        return refined_bin, _load_json_dict(debug_path)
-
-    bev_npz = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_maps.npz")
     if not os.path.isfile(bev_npz):
         return refined_bin, _load_json_dict(debug_path)
+
+    derived_paths = [refined_bin, refined_png, debug_path, points_path]
+    stale = _derived_lidar_rail_stale(bev_npz, derived_paths)
+    if not stale and os.path.isfile(refined_bin) and _bev_rail_nonzero_ratio(refined_bin) > 0.0:
+        return refined_bin, _load_json_dict(debug_path)
+
     try:
         from lidar_bev_rail_points import export_lidar_bev_rail_points  # noqa: WPS433
 
         export_lidar_bev_rail_points(
             bev_npz,
-            os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_points.txt"),
+            points_path,
             min_prob=float(sem_cfg.get("lidar_bev_rail_sample_min_prob", 0.15)),
             stride_cells=int(sem_cfg.get("lidar_bev_rail_sample_stride_cells", 2)),
             max_points=int(sem_cfg.get("lidar_bev_rail_sample_max_points", 8000)),
@@ -117,8 +149,11 @@ def _maybe_export_refined_lidar_rail(
             oracle_overlap_dilate_cells=int(sem_cfg.get("lidar_bev_oracle_overlap_dilate_cells", 3)),
             min_component_cells=int(sem_cfg.get("lidar_bev_rail_min_component_cells", 20)),
             debug_path=debug_path,
-            refined_png_path=os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_refined.png"),
+            refined_png_path=refined_png,
             refined_bin_path=refined_bin,
+            crop_to_image_valid=bool(sem_cfg.get("lidar_bev_crop_to_image_valid", True)),
+            crop_to_image_rail_bbox=bool(sem_cfg.get("lidar_bev_crop_to_image_rail_bbox", True)),
+            image_rail_bbox_padding_m=float(sem_cfg.get("lidar_bev_image_rail_bbox_padding_m", 8.0)),
         )
     except Exception as exc:
         print(f"[Warning] Export refined LiDAR rail BEV failed: {fid}: {exc}")
@@ -126,7 +161,14 @@ def _maybe_export_refined_lidar_rail(
 
 
 
-def _diagnose_rail_bev_alignment(fid: str, lidar_root: str, pseudo_npz: str, refined_png: str, bev_cfg: dict) -> dict:
+def _diagnose_rail_bev_alignment(
+    fid: str,
+    lidar_root: str,
+    pseudo_npz: str,
+    refined_png: str,
+    bev_cfg: dict,
+    selected_lidar_bin: str | None = None,
+) -> dict:
     if not bool(bev_cfg.get("auto_test_bev_axis_transforms", False)):
         return {}
     bev_npz = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_maps.npz")
@@ -143,6 +185,7 @@ def _diagnose_rail_bev_alignment(fid: str, lidar_root: str, pseudo_npz: str, ref
             max_shift_cells=int(bev_cfg.get("rail_alignment_max_shift_cells", 120)),
             min_overlap=float(bev_cfg.get("rail_alignment_min_overlap", 0.15)),
             test_transforms=bool(bev_cfg.get("auto_test_bev_axis_transforms", True)),
+            selected_lidar_rail_bin_path=selected_lidar_bin,
         )
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
@@ -249,9 +292,17 @@ def run(context: RuntimeContext) -> None:
         if not export_image_rail_bin(pseudo_npz, img_bin, bev_cfg, export_dbg):
             print(f"[Warning] 导出 image BEV 失败: {fid}")
             continue
+        bev_npz = os.path.join(os.path.abspath(lidar_root), f"{fid}_bev_maps.npz")
+        raw_ratio = _npz_rail_nonzero_ratio(bev_npz, "rail_probability")
+        detector_refined_ratio = _npz_rail_nonzero_ratio(bev_npz, "rail_probability_refined")
+        oracle_refined_ratio = _bev_rail_nonzero_ratio(refined_lidar_bin) if os.path.isfile(refined_lidar_bin) else 0.0
         export_dbg["lidar_rail_nonzero_ratio"] = selected_lidar_rail_ratio
         export_dbg["lidar_rail_source"] = lidar_rail_source
-        export_dbg["refined_lidar_rail_nonzero_ratio"] = _bev_rail_nonzero_ratio(refined_lidar_bin) if os.path.isfile(refined_lidar_bin) else 0.0
+        export_dbg["lidar_rail_selected_nonzero_ratio"] = selected_lidar_rail_ratio
+        export_dbg["lidar_rail_raw_nonzero_ratio"] = raw_ratio
+        export_dbg["lidar_rail_detector_refined_nonzero_ratio"] = detector_refined_ratio
+        export_dbg["lidar_rail_oracle_refined_nonzero_ratio"] = oracle_refined_ratio
+        export_dbg["refined_lidar_rail_nonzero_ratio"] = oracle_refined_ratio
         export_dbg["refined_lidar_rail_fallback_used"] = bool(refined_dbg.get("lidar_rail_refine_fallback_used", False))
         export_dbg["rail_refinement_valid"] = bool(refined_dbg.get("rail_refinement_valid", True))
         export_dbg["rail_refinement_mismatch"] = bool(refined_dbg.get("rail_refinement_mismatch", False))
@@ -261,6 +312,7 @@ def run(context: RuntimeContext) -> None:
             pseudo_npz,
             os.path.join(os.path.abspath(lidar_root), f"{fid}_rail_bev_refined.png"),
             bev_cfg,
+            selected_lidar_bin=lidar_bin,
         )
         if align_dbg:
             export_dbg["rail_bev_alignment_valid"] = bool(align_dbg.get("rail_bev_alignment_valid", False))
@@ -312,12 +364,26 @@ def run(context: RuntimeContext) -> None:
             )
             actual_rail_score = float(breakdown.get("rail_score", 0.0)) if breakdown else 0.0
             reject_reason = ""
+            if parsed:
+                oracle_delta_tx = float(parsed["tvec"][0]) - float(tvec[0])
+                oracle_delta_ty = float(parsed["tvec"][1]) - float(tvec[1])
+                oracle_delta_yaw = (float(parsed["rvec"][2]) - float(rvec[2])) * 180.0 / 3.141592653589793
+                breakdown["oracle_delta_tx_m"] = float(oracle_delta_tx)
+                breakdown["oracle_delta_ty_m"] = float(oracle_delta_ty)
+                breakdown["oracle_delta_yaw_deg"] = float(oracle_delta_yaw)
+                breakdown["oracle_delta_gate_failed_axis"] = ""
             if actual_rail_score < min_rail_score:
                 reject_reason = f"rail_score_below_{min_rail_score}"
                 parsed = None
             elif parsed and oracle_rail:
                 ok_delta, reject_reason = _delta_within_oracle_limits(parsed, rvec, tvec, bev_cfg)
                 if not ok_delta:
+                    if "tx" in reject_reason:
+                        breakdown["oracle_delta_gate_failed_axis"] = "tx"
+                    elif "ty" in reject_reason:
+                        breakdown["oracle_delta_gate_failed_axis"] = "ty"
+                    elif "yaw" in reject_reason:
+                        breakdown["oracle_delta_gate_failed_axis"] = "yaw"
                     parsed = None
             if parsed:
                 last_pose = parsed

@@ -48,6 +48,24 @@ bool SaveBEVChannelsRaw(const std::string& output_base, const BEVChannels& bev) 
     return true;
 }
 
+bool SaveBEVSingleChannelRaw(const std::string& path, const BEVChannels& bev, const std::vector<float>& channel) {
+    const int n = bev.nx * bev.ny;
+    if (n <= 0 || static_cast<int>(channel.size()) != n) return false;
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) {
+        std::cerr << "[BEV] Cannot write " << path << std::endl;
+        return false;
+    }
+    const char magic[8] = {'E', 'D', 'G', 'E', 'B', 'E', 'V', '1'};
+    ofs.write(magic, 8);
+    const int32_t dims[3] = {bev.nx, bev.ny, 1};
+    ofs.write(reinterpret_cast<const char*>(dims), sizeof(dims));
+    const float meta[4] = {static_cast<float>(bev.xmin), static_cast<float>(bev.ymin), static_cast<float>(bev.resolution), 0.f};
+    ofs.write(reinterpret_cast<const char*>(meta), sizeof(meta));
+    ofs.write(reinterpret_cast<const char*>(channel.data()), static_cast<std::streamsize>(channel.size() * sizeof(float)));
+    return true;
+}
+
 bool LoadBEVChannelsBin(const std::string& path, BEVChannels* out) {
     if (!out) return false;
     std::ifstream ifs(path, std::ios::binary);

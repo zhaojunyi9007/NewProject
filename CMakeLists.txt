@@ -83,6 +83,17 @@ target_link_libraries(bev_initializer
     Eigen3::Eigen
 )
 
+
+# --- Synthetic test: LiDAR rail BEV geometry extractor ---
+add_executable(rail_bev_extractor_synthetic_test
+    tests/cpp/rail_bev_extractor_synthetic_test.cpp
+    cpp/rail_bev_extractor.cpp
+)
+target_link_libraries(rail_bev_extractor_synthetic_test
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+)
+
 # --- Executable: Optimizer (Coarse-to-Fine 标定) ---
 add_executable(optimizer
     cpp/main.cpp

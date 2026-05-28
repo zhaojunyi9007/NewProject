@@ -23,6 +23,9 @@ struct BEVChannels {
 // 将 BEV 多通道写入二进制 + JSON 侧车文件，供 Python 打包为 bev_maps.npz。
 bool SaveBEVChannelsRaw(const std::string& output_base, const BEVChannels& bev);
 
+// ????? BEV ?????? EDGEBEV1 ??????? refined rail ???
+bool SaveBEVSingleChannelRaw(const std::string& path, const BEVChannels& bev, const std::vector<float>& channel);
+
 // 读取 SaveBEVChannelsRaw / Python 导出的单通道 rail 的 EDGEBEV1 二进制。
 bool LoadBEVChannelsBin(const std::string& path, BEVChannels* out);
 

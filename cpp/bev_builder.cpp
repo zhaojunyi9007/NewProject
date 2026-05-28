@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <cstdlib>
 
 int BEVGridSpec::nx() const {
     if (resolution <= 1e-9) return 0;
@@ -24,6 +25,34 @@ static int CellIndex(int ix, int iy, int nx) {
 static float Clamp01(float v) {
     return std::max(0.0f, std::min(1.0f, v));
 }
+
+static double GetEnvDoubleLocal(const char* key, double def) {
+    const char* v = std::getenv(key);
+    if (!v) return def;
+    try { return std::stod(v); } catch (...) { return def; }
+}
+
+static int GetEnvIntLocal(const char* key, int def) {
+    const char* v = std::getenv(key);
+    if (!v) return def;
+    try { return std::stoi(v); } catch (...) { return def; }
+}
+
+static float Percentile(std::vector<float> values, double q) {
+    if (values.empty()) return std::numeric_limits<float>::quiet_NaN();
+    q = std::max(0.0, std::min(1.0, q));
+    const size_t idx = static_cast<size_t>(std::floor(q * static_cast<double>(values.size() - 1)));
+    std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(idx), values.end());
+    return values[idx];
+}
+
+static float TriangularScore(float v, float lo, float peak_lo, float peak_hi, float hi) {
+    if (v < lo || v > hi) return 0.f;
+    if (v >= peak_lo && v <= peak_hi) return 1.f;
+    if (v < peak_lo) return Clamp01((v - lo) / std::max(1e-6f, peak_lo - lo));
+    return Clamp01((hi - v) / std::max(1e-6f, hi - peak_hi));
+}
+
 
 bool BuildLidarBEV(
     const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
@@ -44,49 +73,38 @@ bool BuildLidarBEV(
         return false;
     }
 
+    const int local_ground_window = std::max(1, GetEnvIntLocal("EDGECALIB_LIDAR_RAIL_LOCAL_GROUND_WINDOW_CELLS", 4));
+    const double ground_percentile = GetEnvDoubleLocal("EDGECALIB_LIDAR_RAIL_GROUND_PERCENTILE", 0.10);
+    const float residual_min = static_cast<float>(GetEnvDoubleLocal("EDGECALIB_LIDAR_RAIL_RESIDUAL_MIN_M", 0.03));
+    const float residual_max = static_cast<float>(GetEnvDoubleLocal("EDGECALIB_LIDAR_RAIL_RESIDUAL_MAX_M", 0.30));
+    const float max_candidate_height_range = static_cast<float>(GetEnvDoubleLocal("EDGECALIB_LIDAR_RAIL_MAX_CANDIDATE_HEIGHT_RANGE_M", 0.55));
+    const int min_candidate_density = std::max(1, GetEnvIntLocal("EDGECALIB_LIDAR_RAIL_MIN_CANDIDATE_DENSITY", 1));
+    const int linearity_window = std::max(1, GetEnvIntLocal("EDGECALIB_LIDAR_RAIL_LINEARITY_WINDOW_CELLS", 3));
+
     const int ncells = nx * ny;
     std::vector<int> count(ncells, 0);
     std::vector<double> sum_z(ncells, 0.0);
     std::vector<double> sum_i(ncells, 0.0);
     std::vector<double> sum_nz(ncells, 0.0);
     std::vector<double> sum_side_normal(ncells, 0.0);
-    std::vector<double> sum_x(ncells, 0.0);
-    std::vector<double> sum_y(ncells, 0.0);
-    std::vector<double> sum_xx(ncells, 0.0);
-    std::vector<double> sum_yy(ncells, 0.0);
-    std::vector<double> sum_xy(ncells, 0.0);
     std::vector<float> min_z(ncells, std::numeric_limits<float>::infinity());
     std::vector<float> max_z(ncells, -std::numeric_limits<float>::infinity());
-    std::vector<double> rail_acc(ncells, 0.0);
 
     for (size_t i = 0; i < cloud->size(); ++i) {
         const auto& p = cloud->points[i];
         const auto& n = normals->points[i];
-        if (!std::isfinite(p.x) || !std::isfinite(p.y)) continue;
-
+        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) continue;
         const int ix = static_cast<int>(std::floor((p.x - spec.xmin) / spec.resolution));
         const int iy = static_cast<int>(std::floor((p.y - spec.ymin) / spec.resolution));
         if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) continue;
-
         const int ci = CellIndex(ix, iy, nx);
         count[ci]++;
         sum_z[ci] += static_cast<double>(p.z);
         sum_i[ci] += static_cast<double>(p.intensity);
-        const float nz = std::abs(n.normal_z);
-        sum_nz[ci] += static_cast<double>(nz);
-        const float side_normal = std::sqrt(n.normal_x * n.normal_x + n.normal_y * n.normal_y);
-        sum_side_normal[ci] += static_cast<double>(side_normal);
-        sum_x[ci] += static_cast<double>(p.x);
-        sum_y[ci] += static_cast<double>(p.y);
-        sum_xx[ci] += static_cast<double>(p.x) * static_cast<double>(p.x);
-        sum_yy[ci] += static_cast<double>(p.y) * static_cast<double>(p.y);
-        sum_xy[ci] += static_cast<double>(p.x) * static_cast<double>(p.y);
+        sum_nz[ci] += static_cast<double>(std::abs(n.normal_z));
+        sum_side_normal[ci] += static_cast<double>(std::sqrt(n.normal_x * n.normal_x + n.normal_y * n.normal_y));
         min_z[ci] = std::min(min_z[ci], p.z);
         max_z[ci] = std::max(max_z[ci], p.z);
-
-        if (p.z >= rail_band_zmin && p.z <= rail_band_zmax) {
-            rail_acc[ci] += 1.0;
-        }
     }
 
     out->nx = nx;
@@ -102,12 +120,9 @@ bool BuildLidarBEV(
     out->verticality.assign(ncells, 0.f);
     out->rail_probability.assign(ncells, 0.f);
 
-    float max_dens = 0.f;
     for (int c = 0; c < ncells; ++c) {
         if (count[c] <= 0) continue;
-        const float dens = static_cast<float>(count[c]);
-        out->density[c] = dens;
-        max_dens = std::max(max_dens, dens);
+        out->density[c] = static_cast<float>(count[c]);
         out->mean_height[c] = static_cast<float>(sum_z[c] / static_cast<double>(count[c]));
         out->min_height[c] = min_z[c];
         out->max_height[c] = max_z[c];
@@ -115,80 +130,101 @@ bool BuildLidarBEV(
         out->verticality[c] = static_cast<float>(sum_nz[c] / static_cast<double>(count[c]));
     }
 
+    std::vector<float> rail_evidence(ncells, 0.f);
+    std::vector<uint8_t> candidate(ncells, 0);
+
     for (int iy = 0; iy < ny; ++iy) {
         for (int ix = 0; ix < nx; ++ix) {
             const int c = CellIndex(ix, iy, nx);
-            if (count[c] <= 0 || rail_acc[c] <= 0.0) {
-                out->rail_probability[c] = 0.f;
-                continue;
-            }
-
-            float local_ground = std::numeric_limits<float>::infinity();
-            double local_i_sum = 0.0;
-            double local_i_sq_sum = 0.0;
-            int local_i_count = 0;
-            for (int oy = -2; oy <= 2; ++oy) {
-                for (int ox = -2; ox <= 2; ++ox) {
-                    const int nx0 = ix + ox;
-                    const int ny0 = iy + oy;
-                    if (nx0 < 0 || nx0 >= nx || ny0 < 0 || ny0 >= ny) continue;
-                    const int nc = CellIndex(nx0, ny0, nx);
+            if (count[c] < min_candidate_density) continue;
+            std::vector<float> local_ground_values;
+            std::vector<float> local_intensity_values;
+            std::vector<float> local_density_values;
+            local_ground_values.reserve(static_cast<size_t>((2 * local_ground_window + 1) * (2 * local_ground_window + 1)));
+            for (int oy = -local_ground_window; oy <= local_ground_window; ++oy) {
+                for (int ox = -local_ground_window; ox <= local_ground_window; ++ox) {
+                    const int xx = ix + ox;
+                    const int yy = iy + oy;
+                    if (xx < 0 || xx >= nx || yy < 0 || yy >= ny) continue;
+                    const int nc = CellIndex(xx, yy, nx);
                     if (count[nc] <= 0) continue;
-                    local_ground = std::min(local_ground, min_z[nc]);
-                    const double mi = static_cast<double>(out->mean_intensity[nc]);
-                    local_i_sum += mi;
-                    local_i_sq_sum += mi * mi;
-                    local_i_count++;
+                    local_ground_values.push_back(min_z[nc]);
+                    local_intensity_values.push_back(out->mean_intensity[nc]);
+                    local_density_values.push_back(out->density[nc]);
                 }
             }
-            if (!std::isfinite(local_ground)) {
-                local_ground = min_z[c];
+            if (local_ground_values.empty()) continue;
+            const float local_ground = Percentile(local_ground_values, ground_percentile);
+            const float height_residual = out->max_height[c] - local_ground;
+            const float height_range = out->max_height[c] - out->min_height[c];
+            const bool in_legacy_band = out->max_height[c] >= rail_band_zmin && out->min_height[c] <= rail_band_zmax;
+            if (!in_legacy_band || height_residual < residual_min || height_residual > residual_max ||
+                height_range > max_candidate_height_range) {
+                continue;
             }
+            candidate[c] = 1;
+            const float height_score = TriangularScore(height_residual, residual_min, 0.08f, 0.22f, residual_max);
 
-            const float density_norm = (max_dens > 1e-6f) ? Clamp01(out->density[c] / max_dens) : 0.f;
-            const float height_residual = std::max(0.f, out->max_height[c] - local_ground);
-            const float height_residual_score = Clamp01(height_residual / 0.25f);
-
-            float intensity_contrast_score = 0.f;
-            if (local_i_count > 1) {
-                const double mean_i = local_i_sum / static_cast<double>(local_i_count);
-                const double var_i = std::max(0.0, local_i_sq_sum / static_cast<double>(local_i_count) - mean_i * mean_i);
-                const double std_i = std::sqrt(var_i) + 1e-6;
-                intensity_contrast_score = Clamp01(static_cast<float>(std::abs(out->mean_intensity[c] - mean_i) / (2.0 * std_i)));
+            float intensity_score = 0.f;
+            if (local_intensity_values.size() > 1) {
+                double mean = 0.0;
+                for (float v : local_intensity_values) mean += v;
+                mean /= static_cast<double>(local_intensity_values.size());
+                double var = 0.0;
+                for (float v : local_intensity_values) var += (static_cast<double>(v) - mean) * (static_cast<double>(v) - mean);
+                var /= static_cast<double>(local_intensity_values.size());
+                const double stdv = std::sqrt(var) + 1e-6;
+                intensity_score = Clamp01(static_cast<float>(std::abs(static_cast<double>(out->mean_intensity[c]) - mean) / (2.0 * stdv)));
             }
+            const float local_density_p90 = std::max(1e-6f, Percentile(local_density_values, 0.90));
+            const float density_score = Clamp01(out->density[c] / local_density_p90);
+            const float normal_side_score = Clamp01(static_cast<float>(sum_side_normal[c] / std::max(1, count[c])));
+            rail_evidence[c] = Clamp01(
+                0.30f * height_score +
+                0.25f * intensity_score +
+                0.25f * normal_side_score +
+                0.20f * density_score);
+        }
+    }
 
-            const float normal_side_score =
-                Clamp01(static_cast<float>(sum_side_normal[c] / std::max(1, count[c])));
-
-            float local_linearity_score = 0.f;
-            if (count[c] >= 3) {
-                const double inv_n = 1.0 / static_cast<double>(count[c]);
-                const double mx = sum_x[c] * inv_n;
-                const double my = sum_y[c] * inv_n;
-                const double cxx = std::max(0.0, sum_xx[c] * inv_n - mx * mx);
-                const double cyy = std::max(0.0, sum_yy[c] * inv_n - my * my);
-                const double cxy = sum_xy[c] * inv_n - mx * my;
+    for (int iy = 0; iy < ny; ++iy) {
+        for (int ix = 0; ix < nx; ++ix) {
+            const int c = CellIndex(ix, iy, nx);
+            if (!candidate[c] || rail_evidence[c] <= 0.f) continue;
+            double sw = 0.0, sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0;
+            for (int oy = -linearity_window; oy <= linearity_window; ++oy) {
+                for (int ox = -linearity_window; ox <= linearity_window; ++ox) {
+                    const int xx = ix + ox;
+                    const int yy = iy + oy;
+                    if (xx < 0 || xx >= nx || yy < 0 || yy >= ny) continue;
+                    const int nc = CellIndex(xx, yy, nx);
+                    const double w = static_cast<double>(rail_evidence[nc]);
+                    if (w <= 1e-6) continue;
+                    const double mx = spec.xmin + (static_cast<double>(xx) + 0.5) * spec.resolution;
+                    const double my = spec.ymin + (static_cast<double>(yy) + 0.5) * spec.resolution;
+                    sw += w;
+                    sx += w * mx;
+                    sy += w * my;
+                    sxx += w * mx * mx;
+                    syy += w * my * my;
+                    sxy += w * mx * my;
+                }
+            }
+            float linearity_score = 0.f;
+            if (sw > 1e-6) {
+                const double mx = sx / sw;
+                const double my = sy / sw;
+                const double cxx = std::max(0.0, sxx / sw - mx * mx);
+                const double cyy = std::max(0.0, syy / sw - my * my);
+                const double cxy = sxy / sw - mx * my;
                 const double tr = cxx + cyy;
                 const double det_term = std::sqrt(std::max(0.0, (cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy));
                 const double l0 = 0.5 * (tr + det_term);
                 const double l1 = 0.5 * (tr - det_term);
-                if (l0 > 1e-9) {
-                    local_linearity_score = Clamp01(static_cast<float>((l0 - l1) / l0));
-                }
+                const double linearity = l0 / (l1 + 1e-6);
+                linearity_score = Clamp01(static_cast<float>((linearity - 2.0) / 8.0));
             }
-
-            out->rail_probability[c] = Clamp01(
-                0.15f * density_norm +
-                0.20f * height_residual_score +
-                0.20f * intensity_contrast_score +
-                0.20f * normal_side_score +
-                0.25f * local_linearity_score);
-        }
-    }
-
-    for (int c = 0; c < ncells; ++c) {
-        if (count[c] <= 0 || rail_acc[c] <= 0.0) {
-            out->rail_probability[c] = 0.f;
+            out->rail_probability[c] = Clamp01(rail_evidence[c] * (0.35f + 0.65f * linearity_score));
         }
     }
 

@@ -97,9 +97,9 @@ lidar:
     bev_ymin: -25.0
     bev_ymax: 25.0
     bev_resolution: 0.2
-    rail_bev_prob_thresh: 0.12
+    rail_bev_prob_thresh: 0.05
     rail_bev_min_cells: 40.0
-    rail_bev_smooth_k: 5
+    rail_bev_smooth_k: 1
     rail_bev_max_segments: 6
     rail_geometry:
       min_length_m: 8.0
@@ -109,6 +109,19 @@ lidar:
       gauge_tolerance_m: 0.45
       max_parallel_angle_deg: 5.0
       min_pair_overlap_m: 5.0
+      local_ground_window_cells: 4
+      ground_percentile: 0.10
+      rail_residual_min_m: 0.03
+      rail_residual_max_m: 0.30
+      max_candidate_height_range_m: 0.55
+      linearity_window_cells: 3
+      morph_open_kernel_cells: 1
+      hough_min_line_length_m: 8.0
+      hough_max_line_gap_m: 1.2
+      accepted_line_band_m: 0.35
+      blob_max_width_m: 1.8
+      blob_max_fill_ratio: 0.45
+      blob_max_area_cells: 3500
     vert_cluster_tolerance: 0.35
     vert_min_cluster: 25
     use_legacy_range_image: false
@@ -174,7 +187,7 @@ image_features:
   enable_edges: true
   enable_lines: false
   enable_rail_region: true
-  semantic_classes: [rail, ballast, pole, signal, platform, building, road, vehicle, vegetation, sky]
+  semantic_classes: [rail, ballast, pole, signal, platform, building, road, vehicle, person, vegetation, sky]
   save_logits: true
   rail_class_names: [rail, ballast]
   vertical_structure_classes: [pole, signal]
@@ -256,8 +269,15 @@ semantic_calib:
   histogram_weight: 0.5
   edge_weight: 1.0
   rail_weight: 1.2
+  vehicle_object_weight: 0.8
+  person_object_weight: 0.5
+  allow_object_or_edge_to_pass_rail_gate: true
+  min_final_object_visible_count: 1
   min_image_rail_quality: 0.45
   low_image_rail_quality_weight: 0.0
+  lidar_bev_crop_to_image_valid: true
+  lidar_bev_crop_to_image_rail_bbox: true
+  lidar_bev_image_rail_bbox_padding_m: 8.0
   anchor_fixed_sampling: true
   direction_aware_yaw_weighting: true
   class_weights:
@@ -269,6 +289,7 @@ semantic_calib:
     building: 1.0
     road: 0.8
     vehicle: 1.0
+    person: 1.0
     vegetation: 0.2
     sky: 0.0
 

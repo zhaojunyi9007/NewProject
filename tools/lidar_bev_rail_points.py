@@ -25,6 +25,7 @@ class MetricGrid:
 class OracleRail:
     rail: np.ndarray
     grid: MetricGrid
+    valid_mask: Optional[np.ndarray] = None
 
 
 def _load_scalar(z: Any, key: str, default: float) -> float:
@@ -67,12 +68,17 @@ def _load_oracle_rail(oracle_npz_path: Optional[str]) -> Optional[OracleRail]:
         z = np.load(oracle_npz_path)
     except OSError:
         return None
+    valid_mask = None
+    if "bev_valid_mask" in z.files:
+        vm = np.asarray(z["bev_valid_mask"], dtype=np.float32)
+        if vm.ndim == 2 and vm.size:
+            valid_mask = np.nan_to_num(vm, nan=0.0, posinf=1.0, neginf=0.0)
     for key in ("rail_from_label_track", "rail_from_likelihood", "rail"):
         if key in z.files:
             arr = np.asarray(z[key], dtype=np.float32)
             if arr.ndim == 2 and arr.size:
                 arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
-                return OracleRail(rail=arr, grid=_grid_from_npz(z, arr, "image", default_res=1.0))
+                return OracleRail(rail=arr, grid=_grid_from_npz(z, arr, "image", default_res=1.0), valid_mask=valid_mask)
     return None
 
 
@@ -118,6 +124,59 @@ def _overlap_ratio(a: np.ndarray, b: np.ndarray) -> float:
     if denom <= 0:
         return 0.0
     return float(np.logical_and(a, b).sum()) / float(denom)
+
+
+def _nonzero_ratio(arr: np.ndarray, threshold: float = 1e-4) -> float:
+    a = np.asarray(arr)
+    return float((a > float(threshold)).mean()) if a.size else 0.0
+
+
+def _expanded_bbox_mask_from_oracle(oracle: OracleRail, lidar_grid: MetricGrid, padding_m: float) -> tuple[np.ndarray, list[float]]:
+    oracle_on_lidar = _resample_to_grid(oracle.rail, oracle.grid, lidar_grid)
+    yy, xx = np.where(oracle_on_lidar > 1e-4)
+    mask = np.ones((lidar_grid.ny, lidar_grid.nx), dtype=bool)
+    if yy.size == 0:
+        return mask, []
+    x_min = lidar_grid.xmin + float(xx.min()) * lidar_grid.resolution - float(padding_m)
+    y_min = lidar_grid.ymin + float(yy.min()) * lidar_grid.resolution - float(padding_m)
+    x_max = lidar_grid.xmin + float(xx.max() + 1) * lidar_grid.resolution + float(padding_m)
+    y_max = lidar_grid.ymin + float(yy.max() + 1) * lidar_grid.resolution + float(padding_m)
+    xs = lidar_grid.xmin + (np.arange(lidar_grid.nx, dtype=np.float64) + 0.5) * lidar_grid.resolution
+    ys = lidar_grid.ymin + (np.arange(lidar_grid.ny, dtype=np.float64) + 0.5) * lidar_grid.resolution
+    mask = (ys[:, None] >= y_min) & (ys[:, None] <= y_max) & (xs[None, :] >= x_min) & (xs[None, :] <= x_max)
+    return mask.astype(bool), [float(x_min), float(y_min), float(x_max), float(y_max)]
+
+
+def _apply_image_visibility_crop(
+    rail: np.ndarray,
+    oracle: Optional[OracleRail],
+    lidar_grid: MetricGrid,
+    crop_to_image_valid: bool,
+    crop_to_image_rail_bbox: bool,
+    image_rail_bbox_padding_m: float,
+    debug: dict[str, Any],
+) -> np.ndarray:
+    pre_ratio = _nonzero_ratio(rail)
+    crop_mask = np.ones_like(rail, dtype=bool)
+    crop_bbox: list[float] = []
+    if oracle is not None and bool(crop_to_image_valid) and oracle.valid_mask is not None:
+        valid_on_lidar = _resample_to_grid(oracle.valid_mask, oracle.grid, lidar_grid) > 1e-4
+        crop_mask &= valid_on_lidar
+    if oracle is not None and bool(crop_to_image_rail_bbox):
+        bbox_mask, crop_bbox = _expanded_bbox_mask_from_oracle(oracle, lidar_grid, float(image_rail_bbox_padding_m))
+        crop_mask &= bbox_mask
+    out = np.where(crop_mask, rail, 0.0).astype(np.float32)
+    debug.update(
+        {
+            "lidar_rail_crop_to_image_valid": bool(crop_to_image_valid and oracle is not None and oracle.valid_mask is not None),
+            "lidar_rail_crop_to_image_rail_bbox": bool(crop_to_image_rail_bbox and oracle is not None),
+            "lidar_rail_crop_bbox_padding_m": float(image_rail_bbox_padding_m),
+            "lidar_rail_pre_crop_nonzero_ratio": float(pre_ratio),
+            "lidar_rail_post_crop_nonzero_ratio": float(_nonzero_ratio(out)),
+            "metric_crop_bbox_m": crop_bbox,
+        }
+    )
+    return out
 
 
 def _write_single_channel_bev_bin(path: str, rail: np.ndarray, x0: float, y0: float, res: float) -> None:
@@ -255,30 +314,82 @@ def export_lidar_bev_rail_points(
     debug_path: Optional[str] = None,
     refined_png_path: Optional[str] = None,
     refined_bin_path: Optional[str] = None,
+    crop_to_image_valid: bool = True,
+    crop_to_image_rail_bbox: bool = True,
+    image_rail_bbox_padding_m: float = 8.0,
 ) -> int:
     z = np.load(npz_path)
     x0 = _load_scalar(z, "bev_xmin", 0.0)
     y0 = _load_scalar(z, "bev_ymin", 0.0)
     res = _load_scalar(z, "bev_resolution", 0.2)
+    oracle = _load_oracle_rail(oracle_npz_path)
     if "rail_probability_refined" in z.files:
         rail = np.asarray(z["rail_probability_refined"], dtype=np.float32)
-        debug: dict[str, Any] = {"lidar_rail_refine_source": "rail_probability_refined"}
+        raw_rail = np.asarray(z["rail_probability"], dtype=np.float32) if "rail_probability" in z.files else rail
+        lidar_grid = _grid_from_npz(z, rail, "lidar", default_res=0.2)
+        debug: dict[str, Any] = {
+            "lidar_rail_refine_source": "rail_probability_refined",
+            "lidar_rail_raw_nonzero_ratio": _nonzero_ratio(raw_rail),
+            "lidar_rail_detector_refined_nonzero_ratio": _nonzero_ratio(rail),
+            "lidar_rail_refined_nonzero_ratio": _nonzero_ratio(rail),
+            "lidar_rail_oracle_used": bool(oracle is not None),
+            "lidar_rail_refine_fallback_used": False,
+            "rail_refinement_valid": True,
+            "rail_refinement_mismatch": False,
+            "rail_refinement_empty": bool(_nonzero_ratio(rail) <= 0.0),
+            "lidar_rail_min_prob": float(min_prob),
+            "oracle_resampling_mode": "metric_cell_center",
+            "lidar_bev_xmin": float(lidar_grid.xmin),
+            "lidar_bev_ymin": float(lidar_grid.ymin),
+            "lidar_bev_resolution": float(lidar_grid.resolution),
+        }
+        if oracle is not None:
+            oracle_on_lidar = _resample_to_grid(oracle.rail, oracle.grid, lidar_grid)
+            debug.update(
+                {
+                    "image_bev_xmin": float(oracle.grid.xmin),
+                    "image_bev_ymin": float(oracle.grid.ymin),
+                    "image_bev_resolution": float(oracle.grid.resolution),
+                    "lidar_rail_oracle_nonzero_ratio": _nonzero_ratio(oracle_on_lidar),
+                    "metric_overlap_ratio": _overlap_ratio(rail >= float(min_prob), oracle_on_lidar > 1e-4),
+                    "metric_lidar_rail_bbox_m": _mask_bbox_m(rail >= float(min_prob), lidar_grid),
+                    "metric_image_rail_bbox_m": _mask_bbox_m(oracle_on_lidar > 1e-4, lidar_grid),
+                }
+            )
     elif "rail_probability" in z.files:
         debug = {"lidar_rail_refine_source": "rail_probability"}
         raw_rail = np.asarray(z["rail_probability"], dtype=np.float32)
+        lidar_grid = _grid_from_npz(z, raw_rail, "lidar", default_res=0.2)
         rail = refine_lidar_rail_probability(
             raw_rail,
             min_prob=min_prob,
-            oracle_rail=_load_oracle_rail(oracle_npz_path),
-            lidar_grid=_grid_from_npz(z, raw_rail, "lidar", default_res=0.2),
+            oracle_rail=oracle,
+            lidar_grid=lidar_grid,
             oracle_overlap_dilate_cells=oracle_overlap_dilate_cells,
             min_component_cells=min_component_cells,
             debug_out=debug,
         )
+        debug["lidar_rail_detector_refined_nonzero_ratio"] = 0.0
     else:
         return 0
     if rail.ndim != 2 or rail.size == 0:
         return 0
+
+    rail = np.nan_to_num(rail.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    rail = _apply_image_visibility_crop(
+        rail,
+        oracle,
+        lidar_grid,
+        crop_to_image_valid=crop_to_image_valid,
+        crop_to_image_rail_bbox=crop_to_image_rail_bbox,
+        image_rail_bbox_padding_m=image_rail_bbox_padding_m,
+        debug=debug,
+    )
+    debug["lidar_rail_refined_nonzero_ratio"] = _nonzero_ratio(rail)
+    debug["lidar_rail_oracle_refined_nonzero_ratio"] = _nonzero_ratio(rail)
+    if debug.get("lidar_rail_refine_source") == "rail_probability_refined":
+        debug["rail_refinement_empty"] = bool(_nonzero_ratio(rail) <= 0.0)
+        debug["rail_refinement_valid"] = bool(_nonzero_ratio(rail) > 0.0)
 
     if refined_bin_path:
         _write_single_channel_bev_bin(refined_bin_path, rail, x0, y0, res)
@@ -342,6 +453,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--debug-path", default="")
     ap.add_argument("--refined-png", default="")
     ap.add_argument("--refined-bin", default="")
+    ap.add_argument("--no-crop-to-image-valid", action="store_true")
+    ap.add_argument("--no-crop-to-image-rail-bbox", action="store_true")
+    ap.add_argument("--image-rail-bbox-padding-m", type=float, default=8.0)
     args = ap.parse_args(argv)
     n = export_lidar_bev_rail_points(
         args.npz_path,
@@ -356,6 +470,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         debug_path=args.debug_path or None,
         refined_png_path=args.refined_png or None,
         refined_bin_path=args.refined_bin or None,
+        crop_to_image_valid=not args.no_crop_to_image_valid,
+        crop_to_image_rail_bbox=not args.no_crop_to_image_rail_bbox,
+        image_rail_bbox_padding_m=args.image_rail_bbox_padding_m,
     )
     print(n)
     return 0

@@ -450,3 +450,160 @@ def test_write_invalid_calib_result_contains_skip_fields(tmp_path):
     assert "invalid_reason: rail_bev_alignment_mismatch" in text
     assert br["final_pose_valid"] == 0.0
     assert br["rail_bev_alignment_best_score"] == 0.08
+
+
+
+def test_detector_refined_rail_is_marked_valid(tmp_path):
+    npz = tmp_path / "bev_maps.npz"
+    out = tmp_path / "rail_points.txt"
+    dbg = tmp_path / "rail_debug.json"
+    refined_bin = tmp_path / "rail_refined.bin"
+    rail_raw = np.zeros((10, 10), dtype=np.float32)
+    rail_refined = np.zeros((10, 10), dtype=np.float32)
+    rail_raw[:, 1:8] = 0.2
+    rail_refined[:, 4:6] = 0.9
+    np.savez_compressed(
+        npz,
+        rail_probability=rail_raw,
+        rail_probability_refined=rail_refined,
+        bev_xmin=0.0,
+        bev_ymin=0.0,
+        bev_resolution=0.2,
+    )
+
+    n = export_lidar_bev_rail_points(
+        str(npz),
+        str(out),
+        min_prob=0.15,
+        stride_cells=1,
+        debug_path=str(dbg),
+        refined_bin_path=str(refined_bin),
+    )
+
+    obj = json.loads(dbg.read_text())
+    assert n > 0
+    assert obj["lidar_rail_refine_source"] == "rail_probability_refined"
+    assert obj["rail_refinement_valid"] is True
+    assert obj["rail_refinement_mismatch"] is False
+    assert obj["lidar_rail_refine_fallback_used"] is False
+    assert obj["rail_refinement_empty"] is False
+    assert obj["rail_sample_count_for_optimizer"] > 0
+
+
+def test_lidar_rail_crop_to_image_bbox_reduces_out_of_view_samples(tmp_path):
+    npz = tmp_path / "bev_maps.npz"
+    oracle_npz = tmp_path / "pseudo_bev.npz"
+    out = tmp_path / "rail_points.txt"
+    dbg = tmp_path / "rail_debug.json"
+    rail = np.zeros((20, 50), dtype=np.float32)
+    rail[:, 2:48] = 0.8
+    image = np.zeros((40, 100), dtype=np.float32)
+    image[:, 20:30] = 1.0
+    np.savez_compressed(npz, rail_probability_refined=rail, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=0.2)
+    np.savez_compressed(
+        oracle_npz,
+        rail_from_label_track=image,
+        bev_x_range=np.array([0.0, 10.0], dtype=np.float32),
+        bev_y_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_resolution=np.array([0.1], dtype=np.float32),
+    )
+
+    export_lidar_bev_rail_points(
+        str(npz),
+        str(out),
+        min_prob=0.15,
+        stride_cells=1,
+        oracle_npz_path=str(oracle_npz),
+        debug_path=str(dbg),
+        crop_to_image_valid=False,
+        crop_to_image_rail_bbox=True,
+        image_rail_bbox_padding_m=0.4,
+    )
+
+    obj = json.loads(dbg.read_text())
+    assert obj["lidar_rail_crop_to_image_rail_bbox"] is True
+    assert obj["lidar_rail_post_crop_nonzero_ratio"] < obj["lidar_rail_pre_crop_nonzero_ratio"]
+    assert obj["rail_sample_count_for_optimizer"] > 0
+    assert obj["metric_crop_bbox_m"]
+
+
+def test_diagnose_uses_selected_lidar_rail(tmp_path):
+    from tools.diagnose_rail_bev_alignment import diagnose
+
+    image = np.zeros((20, 20), dtype=np.float32)
+    image[:, 5:7] = 1.0
+    raw = np.zeros((20, 20), dtype=np.float32)
+    raw[:, 14:16] = 1.0
+    refined = np.zeros((20, 20), dtype=np.float32)
+    refined[:, 5:7] = 1.0
+    image_npz = tmp_path / "pseudo_bev.npz"
+    lidar_npz = tmp_path / "bev_maps.npz"
+    selected_bin = tmp_path / "selected.bin"
+    np.savez_compressed(
+        image_npz,
+        rail_from_label_track=image,
+        bev_x_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_y_range=np.array([0.0, 4.0], dtype=np.float32),
+        bev_resolution=np.array([0.2], dtype=np.float32),
+    )
+    np.savez_compressed(lidar_npz, rail_probability=raw, rail_probability_refined=refined, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=0.2)
+    from lidar_bev_rail_points import _write_single_channel_bev_bin
+    _write_single_channel_bev_bin(str(selected_bin), refined, 0.0, 0.0, 0.2)
+
+    out = diagnose(
+        str(image_npz),
+        str(lidar_npz),
+        threshold=0.1,
+        max_shift_cells=2,
+        min_overlap=0.5,
+        test_transforms=False,
+        selected_lidar_rail_bin_path=str(selected_bin),
+    )
+
+    assert out["lidar_rail_raw_nonzero_ratio"] == float((raw > 0.1).mean())
+    assert out["lidar_rail_detector_refined_nonzero_ratio"] == float((refined > 0.1).mean())
+    assert out["lidar_rail_selected_nonzero_ratio"] == float((refined > 0.1).mean())
+    assert out["selected_best_shift_score"] > 0.95
+    assert out["best_shift_score"] == out["selected_best_shift_score"]
+    assert out["selected_metric_bbox_m"] == out["metric_lidar_rail_bbox_m"]
+
+
+def test_bev_stage_regenerates_stale_refined_lidar_rail(tmp_path):
+    from pipeline.stages.bev_stage import _maybe_export_refined_lidar_rail
+
+    fid = "0000000012"
+    lidar_root = tmp_path / "lidar"
+    img_root = tmp_path / "image" / fid
+    lidar_root.mkdir()
+    img_root.mkdir(parents=True)
+    bev_npz = lidar_root / f"{fid}_bev_maps.npz"
+    pseudo_npz = img_root / "pseudo_bev.npz"
+    refined_bin = lidar_root / f"{fid}_rail_bev_refined.bin"
+    debug_path = lidar_root / f"{fid}_rail_bev_debug.json"
+    rail = np.zeros((10, 10), dtype=np.float32)
+    rail[:, 3:5] = 0.9
+    image = np.zeros((10, 10), dtype=np.float32)
+    image[:, 3:5] = 1.0
+    np.savez_compressed(bev_npz, rail_probability_refined=rail, bev_xmin=0.0, bev_ymin=0.0, bev_resolution=0.2)
+    np.savez_compressed(pseudo_npz, rail_from_label_track=image, bev_x_range=np.array([0.0, 2.0], dtype=np.float32), bev_y_range=np.array([0.0, 2.0], dtype=np.float32), bev_resolution=np.array([0.2], dtype=np.float32))
+    old = b"EDGEBEV1" + struct.pack("iii", 1, 1, 1) + struct.pack("ffff", 0.0, 0.0, 1.0, 0.0) + np.array([1.0], dtype=np.float32).tobytes()
+    refined_bin.write_bytes(old)
+    debug_path.write_text(json.dumps({"rail_refinement_valid": False, "rail_refinement_mismatch": True}), encoding="utf-8")
+    old_time = bev_npz.stat().st_mtime - 10
+    os.utime(refined_bin, (old_time, old_time))
+    os.utime(debug_path, (old_time, old_time))
+
+    selected, debug = _maybe_export_refined_lidar_rail(
+        fid,
+        str(lidar_root),
+        str(pseudo_npz),
+        {"use_refined_lidar_rail": True},
+        {"lidar_bev_rail_sample_min_prob": 0.15, "lidar_bev_rail_sample_stride_cells": 1},
+    )
+
+    assert selected == str(refined_bin)
+    assert debug["lidar_rail_refine_source"] == "rail_probability_refined"
+    assert debug["rail_refinement_valid"] is True
+    assert debug["rail_refinement_mismatch"] is False
+    assert debug["lidar_rail_refine_fallback_used"] is False
+    assert debug["rail_sample_count_for_optimizer"] > 0

@@ -59,6 +59,21 @@ def _load_image_rail(path: str) -> np.ndarray:
 
 def _load_lidar_raw_with_grid(path: str) -> tuple[np.ndarray, MetricGrid]:
     z = np.load(path)
+    if "rail_probability" in z.files:
+        arr = np.asarray(z["rail_probability"], dtype=np.float32)
+    else:
+        arr = np.zeros((1, 1), dtype=np.float32)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    return arr, _grid_for(
+        arr,
+        _load_scalar(z, "bev_xmin", 0.0),
+        _load_scalar(z, "bev_ymin", 0.0),
+        _load_scalar(z, "bev_resolution", 1.0),
+    )
+
+
+def _load_lidar_detector_refined_with_grid(path: str) -> tuple[np.ndarray, MetricGrid]:
+    z = np.load(path)
     if "rail_probability_refined" in z.files:
         arr = np.asarray(z["rail_probability_refined"], dtype=np.float32)
     elif "rail_probability" in z.files:
@@ -72,6 +87,27 @@ def _load_lidar_raw_with_grid(path: str) -> tuple[np.ndarray, MetricGrid]:
         _load_scalar(z, "bev_ymin", 0.0),
         _load_scalar(z, "bev_resolution", 1.0),
     )
+
+
+def _load_single_channel_bev_bin_with_grid(path: str | None) -> tuple[np.ndarray, MetricGrid] | None:
+    if not path or not Path(path).is_file():
+        return None
+    import struct
+
+    with open(path, "rb") as f:
+        if f.read(8) != b"EDGEBEV1":
+            return None
+        nx, ny, nch = struct.unpack("iii", f.read(12))
+        x0, y0, res, _pad = struct.unpack("ffff", f.read(16))
+        n = int(nx) * int(ny)
+        if n <= 0 or int(nch) <= 0:
+            return None
+        data = np.frombuffer(f.read(n * int(nch) * 4), dtype=np.float32)
+        if data.size < n * int(nch):
+            return None
+        arr = data[:n].reshape(int(ny), int(nx)) if int(nch) == 1 else data[(int(nch) - 1) * n : int(nch) * n].reshape(int(ny), int(nx))
+    arr = np.nan_to_num(arr.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    return arr, _grid_for(arr, float(x0), float(y0), float(res))
 
 
 def _load_lidar_raw(path: str) -> np.ndarray:
@@ -238,6 +274,7 @@ def diagnose_arrays(
     image: np.ndarray,
     lidar_raw: np.ndarray,
     lidar_refined: np.ndarray | None = None,
+    lidar_selected: np.ndarray | None = None,
     threshold: float = 1e-4,
     max_shift_cells: int = 80,
     min_overlap: float = 0.15,
@@ -248,17 +285,22 @@ def diagnose_arrays(
     refined_base = raw_base if lidar_refined is None or not np.asarray(lidar_refined).any() else np.nan_to_num(
         lidar_refined.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0
     )
+    selected_base = refined_base if lidar_selected is None or not np.asarray(lidar_selected).any() else np.nan_to_num(
+        lidar_selected.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0
+    )
     transforms = ["identity", "flip_x", "flip_y", "swap_xy", "swap_xy_flip_x", "swap_xy_flip_y"] if test_transforms else ["identity"]
     candidates = []
     for name in transforms:
         raw = _resize_like(_apply_transform(raw_base, name), image.shape)
         refined = _resize_like(_apply_transform(refined_base, name), image.shape)
-        shift, score = _best_shift(image, refined, threshold, int(max_shift_cells))
+        selected = _resize_like(_apply_transform(selected_base, name), image.shape)
+        shift, score = _best_shift(image, selected, threshold, int(max_shift_cells))
         candidates.append(
             {
                 "transform_name": name,
                 "overlap_ratio_raw": _overlap(image, raw, threshold),
                 "overlap_ratio_refined": _overlap(image, refined, threshold),
+                "selected_overlap_ratio": _overlap(image, selected, threshold),
                 "best_shift_cells": shift,
                 "best_shift_score": score,
             }
@@ -267,10 +309,15 @@ def diagnose_arrays(
     return {
         "image_rail_nonzero_ratio": float((image > threshold).mean()),
         "lidar_rail_raw_nonzero_ratio": float((_resize_like(raw_base, image.shape) > threshold).mean()),
+        "lidar_rail_detector_refined_nonzero_ratio": float((_resize_like(refined_base, image.shape) > threshold).mean()),
         "lidar_rail_refined_nonzero_ratio": float((_resize_like(refined_base, image.shape) > threshold).mean()),
+        "lidar_rail_selected_nonzero_ratio": float((_resize_like(selected_base, image.shape) > threshold).mean()),
         "overlap_ratio_raw": float(candidates[0]["overlap_ratio_raw"]) if candidates else 0.0,
         "overlap_ratio_refined": float(candidates[0]["overlap_ratio_refined"]) if candidates else 0.0,
+        "selected_overlap_ratio": float(candidates[0]["selected_overlap_ratio"]) if candidates else 0.0,
         "best_transform": best.get("transform_name", "identity"),
+        "selected_best_shift_cells": best.get("best_shift_cells", [0, 0]),
+        "selected_best_shift_score": float(best.get("best_shift_score", 0.0)),
         "best_shift_cells": best.get("best_shift_cells", [0, 0]),
         "best_shift_score": float(best.get("best_shift_score", 0.0)),
         "rail_bev_alignment_valid": bool(float(best.get("best_shift_score", 0.0)) >= float(min_overlap)),
@@ -287,24 +334,37 @@ def diagnose(
     max_shift_cells: int = 80,
     min_overlap: float = 0.15,
     test_transforms: bool = True,
+    selected_lidar_rail_bin_path: str | None = None,
 ) -> dict:
     image, image_grid = _load_image_rail_with_grid(image_pseudo_bev)
     lidar_raw, lidar_grid = _load_lidar_raw_with_grid(lidar_bev_maps)
-    lidar_refined = _load_refined_png(refined_png, lidar_raw.shape) if refined_png else None
+    lidar_detector_refined, detector_grid = _load_lidar_detector_refined_with_grid(lidar_bev_maps)
+    selected_loaded = _load_single_channel_bev_bin_with_grid(selected_lidar_rail_bin_path)
+    if selected_loaded is not None:
+        lidar_selected, selected_grid = selected_loaded
+    else:
+        lidar_selected, selected_grid = lidar_detector_refined, detector_grid
+    if refined_png:
+        lidar_refined = _load_refined_png(refined_png, lidar_detector_refined.shape)
+        refined_grid = detector_grid
+    else:
+        lidar_refined = lidar_detector_refined
+        refined_grid = detector_grid
     lidar_raw_on_image_grid = _resample_to_grid(lidar_raw, lidar_grid, image_grid)
-    lidar_refined_on_image_grid = (
-        _resample_to_grid(lidar_refined, lidar_grid, image_grid) if lidar_refined is not None else None
-    )
+    lidar_refined_on_image_grid = _resample_to_grid(lidar_refined, refined_grid, image_grid)
+    lidar_selected_on_image_grid = _resample_to_grid(lidar_selected, selected_grid, image_grid)
     out = diagnose_arrays(
         image,
         lidar_raw_on_image_grid,
         lidar_refined_on_image_grid,
+        lidar_selected_on_image_grid,
         threshold=threshold,
         max_shift_cells=max_shift_cells,
         min_overlap=min_overlap,
         test_transforms=test_transforms,
     )
-    out.update(_metric_debug_fields(image, image_grid, lidar_raw, lidar_grid, threshold))
+    out.update(_metric_debug_fields(image, image_grid, lidar_selected, selected_grid, threshold))
+    out["selected_metric_bbox_m"] = out.get("metric_lidar_rail_bbox_m", [])
     return out
 
 
@@ -313,6 +373,7 @@ def main() -> int:
     ap.add_argument("--image-pseudo-bev", required=True)
     ap.add_argument("--lidar-bev-maps", required=True)
     ap.add_argument("--lidar-rail-refined-png", default="")
+    ap.add_argument("--selected-lidar-rail-bin", default="")
     ap.add_argument("--threshold", type=float, default=1e-4)
     ap.add_argument("--max-shift-cells", type=int, default=80)
     ap.add_argument("--min-overlap", type=float, default=0.15)
@@ -327,6 +388,7 @@ def main() -> int:
         max_shift_cells=args.max_shift_cells,
         min_overlap=args.min_overlap,
         test_transforms=not args.no_axis_transforms,
+        selected_lidar_rail_bin_path=args.selected_lidar_rail_bin or None,
     )
     text = json.dumps(obj, ensure_ascii=False, indent=2)
     if args.out:

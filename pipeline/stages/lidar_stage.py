@@ -121,6 +121,23 @@ def run(context: RuntimeContext) -> None:
         extractor_env["EDGECALIB_LIDAR_RAIL_GEOM_MIN_PAIR_OVERLAP_M"] = str(
             rail_geom_cfg.get("min_pair_overlap_m", 5.0)
         )
+        extractor_env["EDGECALIB_LIDAR_RAIL_LOCAL_GROUND_WINDOW_CELLS"] = str(rail_geom_cfg.get("local_ground_window_cells", 4))
+        extractor_env["EDGECALIB_LIDAR_RAIL_GROUND_PERCENTILE"] = str(rail_geom_cfg.get("ground_percentile", 0.10))
+        extractor_env["EDGECALIB_LIDAR_RAIL_RESIDUAL_MIN_M"] = str(rail_geom_cfg.get("rail_residual_min_m", 0.03))
+        extractor_env["EDGECALIB_LIDAR_RAIL_RESIDUAL_MAX_M"] = str(rail_geom_cfg.get("rail_residual_max_m", 0.30))
+        extractor_env["EDGECALIB_LIDAR_RAIL_MAX_CANDIDATE_HEIGHT_RANGE_M"] = str(
+            rail_geom_cfg.get("max_candidate_height_range_m", 0.55)
+        )
+        extractor_env["EDGECALIB_LIDAR_RAIL_LINEARITY_WINDOW_CELLS"] = str(rail_geom_cfg.get("linearity_window_cells", 3))
+        extractor_env["EDGECALIB_LIDAR_RAIL_MORPH_OPEN_KERNEL_CELLS"] = str(rail_geom_cfg.get("morph_open_kernel_cells", 3))
+        extractor_env["EDGECALIB_LIDAR_RAIL_HOUGH_MIN_LINE_LENGTH_M"] = str(
+            rail_geom_cfg.get("hough_min_line_length_m", 8.0)
+        )
+        extractor_env["EDGECALIB_LIDAR_RAIL_HOUGH_MAX_LINE_GAP_M"] = str(rail_geom_cfg.get("hough_max_line_gap_m", 1.2))
+        extractor_env["EDGECALIB_LIDAR_RAIL_ACCEPTED_LINE_BAND_M"] = str(rail_geom_cfg.get("accepted_line_band_m", 0.35))
+        extractor_env["EDGECALIB_LIDAR_RAIL_BLOB_MAX_WIDTH_M"] = str(rail_geom_cfg.get("blob_max_width_m", 1.8))
+        extractor_env["EDGECALIB_LIDAR_RAIL_BLOB_MAX_FILL_RATIO"] = str(rail_geom_cfg.get("blob_max_fill_ratio", 0.45))
+        extractor_env["EDGECALIB_LIDAR_RAIL_BLOB_MAX_AREA_CELLS"] = str(rail_geom_cfg.get("blob_max_area_cells", 3500))
         extractor_env["EDGECALIB_LIDAR_VERT_CLUSTER_TOL"] = str(phase3_cfg.get("vert_cluster_tolerance", 0.35))
         extractor_env["EDGECALIB_LIDAR_VERT_MIN_CLUSTER"] = str(int(phase3_cfg.get("vert_min_cluster", 25)))
         if "use_legacy_range_image" in phase3_cfg:
@@ -174,5 +191,21 @@ def run(context: RuntimeContext) -> None:
 
         if phase3_enabled and phase3_cfg.get("save_bev_maps", True):
             _pack_bev_npz(output_base)
+        if phase3_enabled and phase3_cfg.get("save_object_clusters", True):
+            sem_points = output_base + "_semantic_points.txt"
+            obj_tool = os.path.join(_TOOLS, "extract_lidar_object_clusters.py")
+            if os.path.isfile(sem_points) and os.path.isfile(obj_tool):
+                subprocess.run(
+                    [
+                        sys.executable,
+                        obj_tool,
+                        sem_points,
+                        output_base + "_object_clusters.txt",
+                        "--meta-json",
+                        output_base + "_object_meta.json",
+                    ],
+                    check=True,
+                    env=extractor_env,
+                )
 
     print(f"\n[完成] LiDAR特征已保存到: {output_dir}")

@@ -64,6 +64,50 @@ void PrintProjectionStats(const char* tag,
               << " (" << oob_ratio << ")"
               << std::endl;
 }
+
+
+void NormalizeFloatMap(cv::Mat* m) {
+    if (!m || m->empty()) return;
+    if (m->type() == CV_16UC1) {
+        m->convertTo(*m, CV_32FC1, 1.0 / 65535.0);
+    } else if (m->type() == CV_8UC1) {
+        m->convertTo(*m, CV_32FC1, 1.0 / 255.0);
+    } else if (m->type() != CV_32FC1) {
+        m->convertTo(*m, CV_32FC1);
+    }
+}
+
+std::vector<PointFeature> LoadObjectClusters(const std::string& path) {
+    std::vector<PointFeature> out;
+    std::ifstream f(path);
+    if (!f.is_open()) return out;
+    std::string first;
+    while (f >> first) {
+        if (!first.empty() && first[0] == '#') {
+            std::string rest;
+            std::getline(f, rest);
+            continue;
+        }
+        double x = 0.0, y = 0.0, z = 0.0, conf = 1.0;
+        int class_id = SEM_UNKNOWN;
+        try {
+            class_id = std::stoi(first);
+        } catch (...) {
+            std::string rest;
+            std::getline(f, rest);
+            continue;
+        }
+        if (!(f >> x >> y >> z >> conf)) break;
+        PointFeature pf;
+        pf.p = Eigen::Vector3d(x, y, z);
+        pf.intensity = 0.0f;
+        pf.normal = Eigen::Vector3d(0, 0, 0);
+        pf.label = class_id;
+        pf.weight = std::max(0.0, std::min(1.0, conf));
+        if (class_id == SEM_VEHICLE_LIKE || class_id == SEM_PERSON_LIKE) out.push_back(pf);
+    }
+    return out;
+}
 }  // namespace
 
 EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(config) {
@@ -94,22 +138,18 @@ bool EdgeCalibrator::LoadData() {
     rail_weight_ = cv::imread(config_.sam_base + "_rail_weight.png", cv::IMREAD_UNCHANGED);
     rail_region_ = cv::imread(config_.sam_base + "_rail_region.png", cv::IMREAD_UNCHANGED);
     rail_centerline_ = cv::imread(config_.sam_base + "_rail_centerline.png", cv::IMREAD_UNCHANGED);
+    person_dist_ = cv::imread(config_.sam_base + "_person_dist.png", cv::IMREAD_UNCHANGED);
+    person_weight_ = cv::imread(config_.sam_base + "_person_weight.png", cv::IMREAD_UNCHANGED);
+    vehicle_dist_ = cv::imread(config_.sam_base + "_vehicle_dist.png", cv::IMREAD_UNCHANGED);
+    vehicle_weight_ = cv::imread(config_.sam_base + "_vehicle_weight.png", cv::IMREAD_UNCHANGED);
 
-    // Normalize rail dist/weight to float32 [0,1] when available.
-    if (!rail_dist_.empty()) {
-        if (rail_dist_.type() == CV_16UC1) {
-            rail_dist_.convertTo(rail_dist_, CV_32FC1, 1.0 / 65535.0);
-        } else if (rail_dist_.type() != CV_32FC1) {
-            rail_dist_.convertTo(rail_dist_, CV_32FC1);
-        }
-    }
-    if (!rail_weight_.empty()) {
-        if (rail_weight_.type() == CV_16UC1) {
-            rail_weight_.convertTo(rail_weight_, CV_32FC1, 1.0 / 65535.0);
-        } else if (rail_weight_.type() != CV_32FC1) {
-            rail_weight_.convertTo(rail_weight_, CV_32FC1);
-        }
-    }
+    // Normalize dist/weight maps to float32 [0,1] when available.
+    NormalizeFloatMap(&rail_dist_);
+    NormalizeFloatMap(&rail_weight_);
+    NormalizeFloatMap(&person_dist_);
+    NormalizeFloatMap(&person_weight_);
+    NormalizeFloatMap(&vehicle_dist_);
+    NormalizeFloatMap(&vehicle_weight_);
 
     if (edge_dist_.empty() && semantic_map_.empty()) return false;
 
@@ -121,6 +161,7 @@ bool EdgeCalibrator::LoadData() {
     if (edge_points_.empty()) edge_points_ = points_;
     IOUtils::LoadLines3D(config_.lidar_base + "_lines_3d.txt", lines3d_);
     BuildRailSamplePoints();
+    object_points_ = LoadObjectClusters(config_.lidar_base + "_object_clusters.txt");
 
     bool used_default = false;
     if (!LoadCalib(config_.calib_file, K_, R_rect_, P_rect_, &used_default)) return false;
@@ -146,7 +187,8 @@ bool EdgeCalibrator::LoadData() {
     std::cout << "[Info] Feature counts: points=" << points_.size()
               << ", edge_points=" << edge_points_.size()
               << ", lines3d=" << lines3d_.size()
-              << ", rail_sample_points=" << rail_sample_points_.size() << std::endl;
+              << ", rail_sample_points=" << rail_sample_points_.size()
+              << ", object_points=" << object_points_.size() << std::endl;
     return true;
 }
 
@@ -309,9 +351,11 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
     Eigen::Vector3d t0(t_curr_[0], t_curr_[1], t_curr_[2]);
     best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
                                                               rail_sample_points_, rail_dist_, rail_weight_,
+                                                              object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
                                                               semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
                                                               config_.semantic_js_weight, config_.histogram_weight,
-                                                              w_edge, w_rail, sem_cfg_, &last_score_breakdown_);
+                                                              w_edge, w_rail, config_.vehicle_object_weight, config_.person_object_weight,
+                                                              sem_cfg_, &last_score_breakdown_);
     PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 
     std::vector<std::array<double, 6>> candidates;
@@ -346,8 +390,10 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
         Eigen::Vector3d t_try(c[3], c[4], c[5]);
         scores[static_cast<size_t>(i)] = ComputeTotalCalibrationScoreSemanticDominant(
             edge_points_, edge_dist_, edge_weight_, lines3d_, rail_sample_points_, rail_dist_, rail_weight_,
+            object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
             semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R_try, t_try,
-            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail,
+            config_.vehicle_object_weight, config_.person_object_weight, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
     }
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
     double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
@@ -412,8 +458,10 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
         Eigen::Vector3d t_try(c[3], c[4], c[5]);
         scores[static_cast<size_t>(i)] = ComputeTotalCalibrationScoreSemanticDominant(
             edge_points_, edge_dist_, edge_weight_, lines3d_, rail_sample_points_, rail_dist_, rail_weight_,
+            object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
             semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R_try, t_try,
-            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail,
+            config_.vehicle_object_weight, config_.person_object_weight, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
     }
 
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
@@ -680,9 +728,11 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
         (void)ComputeTotalCalibrationScoreSemanticDominant(
             edge_points_, edge_dist_, edge_weight_, lines3d_,
             rail_sample_points_, rail_dist_, rail_weight_,
+            object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
             semantic_points_, semantic_probs_,
             R_rect_, P_rect_, W_, H_, R_eval, t_eval,
-            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail, sem_cfg_, &bd);
+            config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail,
+            config_.vehicle_object_weight, config_.person_object_weight, sem_cfg_, &bd);
 
         double rail_sum = 0.0, vert_sum = 0.0;
         int rail_cnt = 0, vert_cnt = 0;
@@ -737,6 +787,16 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "rail_mean_weight_visible: " << last_score_breakdown_.rail_mean_weight_visible << "\n";
     result_file << "rail_strict_mode: " << last_score_breakdown_.rail_strict_mode << "\n";
     result_file << "rail_early_reject_applied: " << last_score_breakdown_.rail_early_reject_applied << "\n";
+    result_file << "rail_penalty_applied: " << last_score_breakdown_.rail_penalty_applied << "\n";
+    result_file << "semantic_term_used: " << last_score_breakdown_.semantic_term_used << "\n";
+    result_file << "edge_term_used: " << last_score_breakdown_.edge_term_used << "\n";
+    result_file << "object_term_used: " << last_score_breakdown_.object_term_used << "\n";
+    result_file << "object_term_norm: " << last_score_breakdown_.object_score_norm << "\n";
+    result_file << "object_score: " << last_score_breakdown_.object_score << "\n";
+    result_file << "object_sample_count: " << last_score_breakdown_.object_sample_count << "\n";
+    result_file << "object_visible_count: " << last_score_breakdown_.object_visible_count << "\n";
+    result_file << "object_mean_dist_visible: " << last_score_breakdown_.object_mean_dist_visible << "\n";
+    result_file << "object_mean_weight_visible: " << last_score_breakdown_.object_mean_weight_visible << "\n";
     result_file << "semantic_points_used: " << last_score_breakdown_.semantic_points_used << "\n";
     result_file << "optimizer_candidate_count: " << last_score_breakdown_.optimizer_candidate_count << "\n";
     result_file << "optimizer_threads: " << last_score_breakdown_.optimizer_threads << "\n";

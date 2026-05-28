@@ -28,6 +28,8 @@ struct EdgeCalibratorConfig {
     double edge_weight = 1.0;
     // Phase D7 (sam_2d): rail term weight (new).
     double rail_weight = 1.2;
+    double vehicle_object_weight = 0.8;
+    double person_object_weight = 0.5;
     int lidar_semantic_max_points = 0;        // 0 means keep all points.
     bool stratified_semantic_sampling = false;
     int semantic_sample_budget_rail = 800;
@@ -95,10 +97,15 @@ private:
     cv::Mat rail_weight_;
     cv::Mat rail_region_;
     cv::Mat rail_centerline_;
+    cv::Mat person_dist_;
+    cv::Mat person_weight_;
+    cv::Mat vehicle_dist_;
+    cv::Mat vehicle_weight_;
 
     std::vector<PointFeature> edge_points_;
     std::vector<PointFeature> points_;
     std::vector<PointFeature> rail_sample_points_;
+    std::vector<PointFeature> object_points_;
     std::vector<Line3D> lines3d_;
     std::string rail_sample_source_ = "none";
 

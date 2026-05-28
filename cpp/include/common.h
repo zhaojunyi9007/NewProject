@@ -32,6 +32,7 @@ enum SemanticIdRailway {
     SEM_PLATFORM_OR_BUILDING = 4,
     SEM_VEHICLE_LIKE = 5,
     SEM_VEGETATION_LIKE = 6,
+    SEM_PERSON_LIKE = 7,
 };
 
 // --- 数据结构定义 ---
@@ -125,6 +126,16 @@ struct ScoreBreakdown {
     double semantic_hist_score = 0.0;        // typically = semantic_hist_similarity
     double edge_score = 0.0;
     double rail_score = 0.0;
+    double object_score_norm = 0.0;
+    double object_score = 0.0;
+    double object_sample_count = 0.0;
+    double object_visible_count = 0.0;
+    double object_mean_dist_visible = 0.0;
+    double object_mean_weight_visible = 0.0;
+    double semantic_term_used = 0.0;
+    double edge_term_used = 0.0;
+    double object_term_used = 0.0;
+    double rail_penalty_applied = 0.0;
 
     // Phase A3 keys (observability-related)
     double rail_confidence = 0.0;

@@ -89,7 +89,7 @@ inline void BuildLidarSemanticPriorDistribution(const SemanticPointRecord& sp,
     }
 
     // 图像语义通道 canonical 顺序（与 base.yaml 默认 semantic_classes 对齐）：
-    // [rail, ballast, pole, signal, platform, building, road, vehicle, vegetation, sky]
+    // [rail, ballast, pole, signal, platform, building, road, vehicle, person, vegetation, sky]
     // 重要：此处是“显式映射规则”，不再把 LiDAR semantic_id 当作通道索引。
     constexpr int CH_RAIL = 0;
     constexpr int CH_BALLAST = 1;
@@ -99,8 +99,9 @@ inline void BuildLidarSemanticPriorDistribution(const SemanticPointRecord& sp,
     constexpr int CH_BUILDING = 5;
     constexpr int CH_ROAD = 6;
     constexpr int CH_VEHICLE = 7;
-    constexpr int CH_VEGETATION = 8;
-    // sky(9) 不作为 LiDAR 几何点主要候选，不主动加权。
+    constexpr int CH_PERSON = 8;
+    constexpr int CH_VEGETATION = 9;
+    // sky(10) 不作为 LiDAR 几何点主要候选，不主动加权。
 
     auto add_ground = [&](double scale) {
         AddMassIfValid(out, CH_BALLAST, 0.60 * scale);
@@ -134,6 +135,11 @@ inline void BuildLidarSemanticPriorDistribution(const SemanticPointRecord& sp,
             break;
         case SEM_VEHICLE_LIKE:
             AddMassIfValid(out, CH_VEHICLE, 0.90);
+            AddMassIfValid(out, CH_ROAD, 0.10);
+            break;
+        case SEM_PERSON_LIKE:
+            AddMassIfValid(out, CH_PERSON, 0.75);
+            AddMassIfValid(out, CH_PLATFORM, 0.15);
             AddMassIfValid(out, CH_ROAD, 0.10);
             break;
         case SEM_VEGETATION_LIKE:

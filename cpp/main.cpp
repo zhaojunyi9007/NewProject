@@ -81,6 +81,8 @@ int main(int argc, char** argv) {
             else if (a == "--histogram_weight" && need(i)) config.histogram_weight = std::atof(argv[++i]);
             else if (a == "--edge_weight" && need(i)) config.edge_weight = std::atof(argv[++i]);
             else if (a == "--rail_weight" && need(i)) config.rail_weight = std::atof(argv[++i]);
+            else if (a == "--vehicle_object_weight" && need(i)) config.vehicle_object_weight = std::atof(argv[++i]);
+            else if (a == "--person_object_weight" && need(i)) config.person_object_weight = std::atof(argv[++i]);
             else if (a == "--lidar_semantic_max_points" && need(i)) config.lidar_semantic_max_points = std::atoi(argv[++i]);
             else if (a == "--stratified_semantic_sampling" && need(i)) config.stratified_semantic_sampling = (std::atoi(argv[++i]) != 0);
             else if (a == "--semantic_sample_budget_rail" && need(i)) config.semantic_sample_budget_rail = std::atoi(argv[++i]);

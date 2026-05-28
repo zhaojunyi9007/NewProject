@@ -20,6 +20,7 @@ SEM_VERTICAL_STRUCTURE = 3
 SEM_PLATFORM_OR_BUILDING = 4
 SEM_VEHICLE_LIKE = 5
 SEM_VEGETATION_LIKE = 6
+SEM_PERSON_LIKE = 7
 
 
 def _semantic_class_indices(semantic_classes, names):
@@ -47,6 +48,7 @@ def _line_class_to_railway_semantic_id(mean_probs, semantic_classes):
         SEM_VERTICAL_STRUCTURE: group_prob(["pole", "signal"]),
         SEM_PLATFORM_OR_BUILDING: group_prob(["platform", "building"]),
         SEM_VEHICLE_LIKE: group_prob(["vehicle"]),
+        SEM_PERSON_LIKE if "SEM_PERSON_LIKE" in globals() else 7: group_prob(["person"]),
         SEM_VEGETATION_LIKE: group_prob(["vegetation"]),
     }
     best_id = max(group_scores, key=group_scores.get)
@@ -85,6 +87,8 @@ def _mask_to_class_weights(mask_dict, h, w, semantic_classes):
         add("road", 1.8)
     if 0.008 < ar < 0.09 and cy > 0.42:
         add("vehicle", 1.6)
+    if 0.001 < ar < 0.025 and 0.28 < cy < 0.86 and bh > bw * 1.4:
+        add("person", 1.4)
     if 0.25 < cy < 0.72 and 0.002 < ar < 0.06:
         add("vegetation", 1.2)
     if cy < 0.36 and ar < 0.012:
@@ -117,6 +121,7 @@ def extract_semantic_probabilities(image, masks, config):
             "building",
             "road",
             "vehicle",
+            "person",
             "vegetation",
             "sky",
         ]
@@ -180,6 +185,50 @@ def _build_rail_probability_maps(semantic_probs, config):
     for i in idxs:
         rail_prob += semantic_probs[:, :, i].astype(np.float32)
     return np.clip(rail_prob, 0.0, 1.0)
+
+
+def build_object_prior_maps(semantic_probs, semantic_classes, min_prob=0.18, blur_sigma=2.0):
+    """Build person/vehicle soft masks, distance maps, and simple quality stats from semantic probabilities."""
+    probs = np.asarray(semantic_probs, dtype=np.float32)
+    h, w = probs.shape[:2]
+    classes = list(semantic_classes or [])
+    out = {}
+    for name in ("person", "vehicle"):
+        if name in classes and probs.ndim == 3 and classes.index(name) < probs.shape[2]:
+            ch = np.nan_to_num(probs[:, :, classes.index(name)], nan=0.0, posinf=1.0, neginf=0.0)
+            ch = np.clip(ch, 0.0, 1.0).astype(np.float32)
+        else:
+            ch = np.zeros((h, w), dtype=np.float32)
+        if blur_sigma > 0 and ch.size:
+            ch = cv2.GaussianBlur(ch, (0, 0), sigmaX=float(blur_sigma), sigmaY=float(blur_sigma))
+        weight = np.clip(ch, 0.0, 1.0).astype(np.float32)
+        mask = (weight >= float(min_prob)).astype(np.uint8)
+        if mask.any():
+            n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            detected_count = max(0, int(n) - 1)
+            min_area = 8 if name == "person" else 20
+            clean = np.zeros_like(mask)
+            for lab in range(1, n):
+                if int(stats[lab, cv2.CC_STAT_AREA]) >= min_area:
+                    clean[labels == lab] = 1
+            if clean.any():
+                mask = clean
+                detected_count = int(cv2.connectedComponents(mask, connectivity=8)[0] - 1)
+            inv = (mask == 0).astype(np.uint8)
+            dist_px = cv2.distanceTransform(inv, cv2.DIST_L2, 3)
+            cap = max(1.0, 0.08 * float(max(h, w)))
+            dist = np.clip(dist_px / cap, 0.0, 1.0).astype(np.float32)
+        else:
+            detected_count = 0
+            dist = np.ones((h, w), dtype=np.float32)
+        out[name] = {
+            "weight": weight,
+            "dist": dist,
+            "detected_count": int(detected_count),
+            "valid_ratio": float((weight >= float(min_prob)).mean()) if weight.size else 0.0,
+            "max_probability": float(weight.max()) if weight.size else 0.0,
+        }
+    return out
 
 
 def _normalize01(arr):
@@ -558,6 +607,14 @@ def save_image_feature_bundle(output_dir, bundle, prefix=""):
         cv2.imwrite(os.path.join(output_dir, "rail_dist.png"), bundle["rail_dist_u16"])
     if "rail_weight_u16" in bundle:
         cv2.imwrite(os.path.join(output_dir, "rail_weight.png"), bundle["rail_weight_u16"])
+    for _name in ("person", "vehicle"):
+        if f"{_name}_weight_u16" in bundle:
+            cv2.imwrite(os.path.join(output_dir, f"{_name}_weight.png"), bundle[f"{_name}_weight_u16"])
+        if f"{_name}_dist_u16" in bundle:
+            cv2.imwrite(os.path.join(output_dir, f"{_name}_dist.png"), bundle[f"{_name}_dist_u16"])
+    if "object_quality" in bundle:
+        with open(os.path.join(output_dir, "object_quality.json"), "w", encoding="utf-8") as f:
+            json.dump(bundle["object_quality"], f, ensure_ascii=False, indent=2)
     if "rail_centerlines_2d" in bundle:
         with open(os.path.join(output_dir, "rail_centerlines_2d.txt"), "w", encoding="utf-8") as f:
             f.write("# rail centerlines 2d polylines: poly_id u v\n")
@@ -867,6 +924,7 @@ class FeatureExtractor:
                 "building",
                 "road",
                 "vehicle",
+                "person",
                 "vegetation",
                 "sky",
             ],
@@ -924,6 +982,25 @@ class FeatureExtractor:
         if si >= 0:
             pole_ch += probs[:, :, si]
         pole_png = np.clip(pole_ch * 255.0, 0, 255).astype(np.uint8)
+
+        object_priors = build_object_prior_maps(
+            probs,
+            classes,
+            min_prob=float(merged.get("object_prior_min_prob", 0.18)),
+            blur_sigma=float(merged.get("object_prior_blur_sigma_px", 2.0)),
+        )
+        object_quality = {
+            name: {
+                "detected_count": int(obj["detected_count"]),
+                "valid_ratio": float(obj["valid_ratio"]),
+                "max_probability": float(obj["max_probability"]),
+            }
+            for name, obj in object_priors.items()
+        }
+        person_weight_u16 = (np.clip(object_priors["person"]["weight"], 0, 1) * 65535.0).astype(np.uint16)
+        person_dist_u16 = (np.clip(object_priors["person"]["dist"], 0, 1) * 65535.0).astype(np.uint16)
+        vehicle_weight_u16 = (np.clip(object_priors["vehicle"]["weight"], 0, 1) * 65535.0).astype(np.uint16)
+        vehicle_dist_u16 = (np.clip(object_priors["vehicle"]["dist"], 0, 1) * 65535.0).astype(np.uint16)
 
         # Phase 1 (sam_2d): rail region + centerline + dist + weight
         rail_prob = _build_rail_probability_maps(probs, merged)
@@ -1074,6 +1151,11 @@ class FeatureExtractor:
             "rail_centerline_u8": rail_centerline,
             "rail_dist_u16": rail_dist_u16,
             "rail_weight_u16": rail_weight_u16,
+            "person_weight_u16": person_weight_u16,
+            "person_dist_u16": person_dist_u16,
+            "vehicle_weight_u16": vehicle_weight_u16,
+            "vehicle_dist_u16": vehicle_dist_u16,
+            "object_quality": object_quality,
             "rail_centerlines_2d": rail_centerlines_2d,
             "label_track_centerlines_2d": label_track_polylines,
             "rail_quality": rail_quality,
@@ -1101,6 +1183,12 @@ class FeatureExtractor:
         cv2.imwrite(sam_output_base + "_rail_centerline.png", rail_centerline)
         cv2.imwrite(sam_output_base + "_rail_dist.png", rail_dist_u16)
         cv2.imwrite(sam_output_base + "_rail_weight.png", rail_weight_u16)
+        cv2.imwrite(sam_output_base + "_person_weight.png", person_weight_u16)
+        cv2.imwrite(sam_output_base + "_person_dist.png", person_dist_u16)
+        cv2.imwrite(sam_output_base + "_vehicle_weight.png", vehicle_weight_u16)
+        cv2.imwrite(sam_output_base + "_vehicle_dist.png", vehicle_dist_u16)
+        with open(sam_output_base + "_object_quality.json", "w", encoding="utf-8") as f:
+            json.dump(object_quality, f, ensure_ascii=False, indent=2)
         with open(sam_output_base + "_rail_centerlines_2d.txt", "w", encoding="utf-8") as f:
             f.write("# rail centerlines 2d polylines: poly_id u v\n")
             for pid, poly in enumerate(rail_centerlines_2d):

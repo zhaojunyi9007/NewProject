@@ -19,7 +19,7 @@ from pipeline.runner import PipelineRunner
 def main():
     parser = argparse.ArgumentParser(description="EdgeCalib v2.0 完整标定流程")
     parser.add_argument("--config", default="configs/osdar23.yaml", help="配置文件路径")
-    parser.add_argument("--stage", choices=["sam", "lidar", "calib", "visual", "all"], default="all", help="执行阶段")
+    parser.add_argument("--stage", choices=["sam", "lidar", "bev", "calib", "visual", "all"], default="all", help="执行阶段")
     parser.add_argument("--skip-sam", action="store_true", help="跳过SAM提取")
     parser.add_argument("--skip-lidar", action="store_true", help="跳过LiDAR提取")
     parser.add_argument("--skip-calib", action="store_true", help="跳过标定优化")
@@ -44,6 +44,8 @@ def main():
         runner.run_sam_extraction()
     elif args.stage == "lidar":
         runner.run_lidar_extraction()
+    elif args.stage == "bev":
+        runner.run_bev_initialization()
     elif args.stage == "calib":
         runner.run_calibration()
     elif args.stage == "visual":

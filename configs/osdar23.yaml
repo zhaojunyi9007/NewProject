@@ -127,6 +127,10 @@ bev:
 
 semantic_calib:
   rail_weight: 1.5
+  vehicle_object_weight: 0.8
+  person_object_weight: 0.5
+  allow_object_or_edge_to_pass_rail_gate: true
+  min_final_object_visible_count: 1
   oracle_rail_weight: 2.0
   oracle_rail_weight_fallback: 0.2
   semantic_js_weight: 2.0
@@ -139,6 +143,9 @@ semantic_calib:
   min_lidar_bev_rail_samples: 200
   lidar_bev_oracle_overlap_dilate_cells: 3
   lidar_bev_rail_min_component_cells: 20
+  lidar_bev_crop_to_image_valid: true
+  lidar_bev_crop_to_image_rail_bbox: true
+  lidar_bev_image_rail_bbox_padding_m: 8.0
   oracle_rail_hard_gate: true
   min_final_rail_visible_ratio: 0.08
   min_final_rail_visible_count: 50
@@ -176,6 +183,7 @@ semantic_calib:
     building: 1.2
     road: 0.6
     vehicle: 1.0
+    person: 1.0
     vegetation: 0.2
     sky: 0.0
 
@@ -247,6 +255,19 @@ lidar:
       gauge_tolerance_m: 0.45
       max_parallel_angle_deg: 5.0
       min_pair_overlap_m: 5.0
+      local_ground_window_cells: 4
+      ground_percentile: 0.10
+      rail_residual_min_m: 0.03
+      rail_residual_max_m: 0.30
+      max_candidate_height_range_m: 0.55
+      linearity_window_cells: 3
+      morph_open_kernel_cells: 1
+      hough_min_line_length_m: 8.0
+      hough_max_line_gap_m: 1.2
+      accepted_line_band_m: 0.35
+      blob_max_width_m: 1.8
+      blob_max_fill_ratio: 0.45
+      blob_max_area_cells: 3500
 
 # ========================================
 # 标定优化配置

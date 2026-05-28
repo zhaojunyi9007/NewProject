@@ -40,6 +40,9 @@ class PipelineRunner:
     def run_lidar_extraction(self):
         lidar_stage.run(self.context)
 
+    def run_bev_initialization(self):
+        bev_stage.run(self.context)
+
     def run_calibration(self):
         calib_stage.run(self.context)
 

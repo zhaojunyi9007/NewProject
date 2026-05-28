@@ -127,12 +127,22 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
     failed = visible_count < min_count or visible_ratio < min_ratio
     if failed:
         out["rail_gate_failed"] = 1.0
-        if bool(sem_cfg.get("reject_pose_on_rail_gate_fail", True)):
-            out["final_pose_valid"] = 0.0
-        out["invalid_reason"] = (
-            f"rail_visible_gate_failed(count={visible_count:.0f}<{min_count:.0f} "
-            f"or ratio={visible_ratio:.6f}<{min_ratio:.6f})"
+        object_visible = float(out.get("object_visible_count", 0.0) or 0.0)
+        edge_visible = float(out.get("edge_visible_count", 0.0) or 0.0)
+        semantic_used = float(out.get("semantic_term_used", 0.0) or 0.0) > 0.0
+        min_object = float(sem_cfg.get("min_final_object_visible_count", 1))
+        min_edge = float(sem_cfg.get("min_final_edge_visible_count", sem_cfg.get("min_edge_visible_count", 50)))
+        allow_alt = bool(sem_cfg.get("allow_object_or_edge_to_pass_rail_gate", True)) and (
+            object_visible >= min_object or edge_visible >= min_edge or semantic_used
         )
+        if bool(sem_cfg.get("reject_pose_on_rail_gate_fail", True)) and not allow_alt:
+            out["final_pose_valid"] = 0.0
+            out["invalid_reason"] = (
+                f"rail_visible_gate_failed(count={visible_count:.0f}<{min_count:.0f} "
+                f"or ratio={visible_ratio:.6f}<{min_ratio:.6f})"
+            )
+        else:
+            out["invalid_reason"] = ""
     return out
 
 
@@ -280,6 +290,9 @@ def run(context: RuntimeContext) -> None:
                             debug_path=rail_debug_path,
                             refined_png_path=rail_png_path,
                             refined_bin_path=f"{feature_base}_rail_bev_refined.bin",
+                            crop_to_image_valid=bool(sem_cfg.get("lidar_bev_crop_to_image_valid", True)),
+                            crop_to_image_rail_bbox=bool(sem_cfg.get("lidar_bev_crop_to_image_rail_bbox", True)),
+                            image_rail_bbox_padding_m=float(sem_cfg.get("lidar_bev_image_rail_bbox_padding_m", 8.0)),
                         )
                         print(f"[Info] Exported LiDAR BEV rail samples: {bev_rail_count} -> {bev_rail_points}")
                     except Exception as exc:
@@ -400,6 +413,10 @@ def run(context: RuntimeContext) -> None:
                 str(float(sem_cfg.get("edge_weight", 1.0))),
                 "--rail_weight",
                 str(effective_rail_weight),
+                "--vehicle_object_weight",
+                str(float(sem_cfg.get("vehicle_object_weight", 0.8))),
+                "--person_object_weight",
+                str(float(sem_cfg.get("person_object_weight", 0.5))),
                 "--lidar_semantic_max_points",
                 str(int(sem_cfg.get("lidar_semantic_max_points", 12000))),
                 "--stratified_semantic_sampling",

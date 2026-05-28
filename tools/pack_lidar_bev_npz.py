@@ -53,6 +53,19 @@ def pack_bev_npz(output_base: str) -> bool:
         ],
     )
     out: dict = {names[i]: arr[i] for i in range(min(len(names), nch))}
+    refined_path = output_base + "_rail_probability_refined.bin"
+    if os.path.isfile(refined_path):
+        with open(refined_path, "rb") as rf:
+            rmagic = rf.read(8)
+            if rmagic == b"EDGEBEV1":
+                rnx, rny, rnch = struct.unpack("iii", rf.read(12))
+                rf.read(16)
+                rraw = np.frombuffer(rf.read(), dtype=np.float32)
+                if rnx == nx and rny == ny and rnch == 1 and rraw.size == nx * ny:
+                    out["rail_probability_refined"] = rraw.reshape((ny, nx))
+                else:
+                    print(f"[pack_bev] Refined rail size mismatch in {refined_path}", file=sys.stderr)
+
     out["bev_xmin"] = np.float32(meta.get("xmin", 0.0))
     out["bev_ymin"] = np.float32(meta.get("ymin", 0.0))
     out["bev_resolution"] = np.float32(meta.get("resolution", 0.2))
