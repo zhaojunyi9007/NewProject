@@ -31,9 +31,15 @@ struct EdgeCalibratorConfig {
     double vehicle_object_weight = 0.8;
     double person_object_weight = 0.5;
     bool label_assist_enabled = false;
+    bool strong_label_enabled = false;
     std::string label_object_points_path;
+    std::string label_strong_features_path;
     double label_track_weight = 1.5;
     double label_static_weight = 1.0;
+    double strong_track_weight = 2.0;
+    double strong_pole_weight = 1.5;
+    double strong_switch_weight = 1.2;
+    double strong_buffer_stop_weight = 1.0;
     double label_vehicle_weight = 0.4;
     double label_person_weight = 0.2;
     int lidar_semantic_max_points = 0;        // 0 means keep all points.
@@ -121,11 +127,16 @@ private:
     std::vector<PointFeature> rail_sample_points_;
     std::vector<PointFeature> object_points_;
     std::vector<PointFeature> label_teacher_points_;
+    std::vector<StrongLabelFeature> strong_label_features_;
     std::vector<Line3D> lines3d_;
     std::string rail_sample_source_ = "none";
     int label_residual_count_ = 0;
     int label_track_residual_count_ = 0;
     int label_object_residual_count_ = 0;
+    int strong_track_residual_count_ = 0;
+    int strong_pole_residual_count_ = 0;
+    int strong_switch_residual_count_ = 0;
+    int strong_buffer_stop_residual_count_ = 0;
 
     CalibHistory history_;
 

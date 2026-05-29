@@ -402,6 +402,53 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
     out.setdefault("rail_gate_failed", 0.0)
     out.setdefault("invalid_reason", "")
     out.setdefault("final_gate_source", "rail_or_unsupervised")
+    strong_count = float(out.get("strong_label_feature_count", 0.0) or 0.0)
+    if strong_count > 0 and bool(sem_cfg.get("label_assist_requires_label_gate", True)):
+        strong_score = float(out.get("strong_label_score", 0.0) or 0.0)
+        strong_track_count = float(out.get("strong_track_residual_count", 0.0) or 0.0)
+        strong_static_count = (
+            float(out.get("strong_pole_residual_count", 0.0) or 0.0)
+            + float(out.get("strong_switch_residual_count", 0.0) or 0.0)
+            + float(out.get("strong_buffer_stop_residual_count", 0.0) or 0.0)
+        )
+        min_strong_score = float(sem_cfg.get("min_strong_label_score", 0.25))
+        min_track = float(sem_cfg.get("min_strong_track_residual_count", 50))
+        min_static = float(sem_cfg.get("min_strong_static_residual_count", 2))
+        max_pose_jump = float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))
+        max_yaw_jump = float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0))
+        pose_jump = float(out.get("pose_jump_from_initial_m", 0.0) or 0.0)
+        yaw_jump = float(out.get("yaw_jump_from_initial_deg", 0.0) or 0.0)
+        strong_ok = (
+            strong_score >= min_strong_score
+            and strong_track_count >= min_track
+            and strong_static_count >= min_static
+            and pose_jump <= max_pose_jump
+            and yaw_jump <= max_yaw_jump
+        )
+        out["strong_label_gate_used"] = 1.0
+        if strong_ok:
+            out["final_pose_valid"] = 1.0
+            out["rail_gate_failed"] = 0.0
+            out["final_gate_source"] = "strong_label_assisted"
+            out["invalid_reason"] = ""
+        else:
+            reasons = []
+            if strong_score < min_strong_score:
+                reasons.append(f"strong_label_score={strong_score:.6f}<{min_strong_score:.6f}")
+            if strong_track_count < min_track:
+                reasons.append(f"strong_track_residual_count={strong_track_count:.0f}<{min_track:.0f}")
+            if strong_static_count < min_static:
+                reasons.append(f"strong_static_residual_count={strong_static_count:.0f}<{min_static:.0f}")
+            if pose_jump > max_pose_jump:
+                reasons.append(f"pose_jump_from_initial_m={pose_jump:.6f}>{max_pose_jump:.6f}")
+            if yaw_jump > max_yaw_jump:
+                reasons.append(f"yaw_jump_from_initial_deg={yaw_jump:.6f}>{max_yaw_jump:.6f}")
+            out["final_pose_valid"] = 0.0
+            out["rail_gate_failed"] = 0.0
+            out["final_gate_source"] = "strong_label_rejected"
+            out["invalid_reason"] = ";".join(reasons)
+            out["label_gate_failed_reason"] = out["invalid_reason"]
+        return out
     if not oracle_rail or not bool(sem_cfg.get("oracle_rail_hard_gate", False)):
         out["final_gate_source"] = "no_oracle_rail_gate"
         return out
@@ -594,7 +641,13 @@ def run(context: RuntimeContext) -> None:
         bev_pose = ""
         # Only pass BEV pose to optimizer when this frame's BEV delta was accepted by the Python BEV stage.
         # This avoids silently applying pose_after_bev.txt even when rail_score was below threshold.
-        if bool(bev_cfg.get("enabled", False)) and frame_id in bev_by_frame and context.paths and context.paths.get("bev_init"):
+        if (
+            selected_init_source == "bev_accepted"
+            and bool(bev_cfg.get("enabled", False))
+            and frame_id in bev_by_frame
+            and context.paths
+            and context.paths.get("bev_init")
+        ):
             cand = os.path.join(context.paths["bev_init"], f"{frame_id:010d}", "pose_after_bev.txt")
             if os.path.isfile(cand):
                 bev_pose = cand
@@ -819,6 +872,18 @@ def run(context: RuntimeContext) -> None:
                     "1" if label_assist_for_calib else "0",
                     "--label_object_points",
                     f"{feature_base}_label_object_points.txt",
+                    "--strong_label_enabled",
+                    "1" if bool(label_cfg.get("strong_features_enabled", True)) and label_assist_for_calib else "0",
+                    "--label_strong_features",
+                    f"{feature_base}_label_strong_features.tsv",
+                    "--strong_track_weight",
+                    str(float(label_cfg.get("track_weight", 2.0))),
+                    "--strong_pole_weight",
+                    str(float(label_cfg.get("catenary_pole_weight", 1.5))),
+                    "--strong_switch_weight",
+                    str(float(label_cfg.get("switch_weight", 1.2))),
+                    "--strong_buffer_stop_weight",
+                    str(float(label_cfg.get("buffer_stop_weight", 1.0))),
                     "--label_track_weight",
                     str(float(label_cfg.get("track_weight", 1.5))),
                     "--label_static_weight",
@@ -912,13 +977,33 @@ def run(context: RuntimeContext) -> None:
                 f.write(f"rail_gate_failed: {br.get('rail_gate_failed', 0.0)}\n")
                 if br.get("invalid_reason"):
                     f.write(f"invalid_reason: {br.get('invalid_reason')}\n")
-                for _k in ("label_gate_bypass_used", "label_gate_failed_reason", "object_or_edge_rail_gate_bypass", "pose_jump_from_initial_m", "yaw_jump_from_initial_deg", "rotation_jump_from_initial_deg", "selected_init_source", "bev_candidate_rejected_by_gate", "final_gate_source", "init_label_teacher_eligible_count", "init_label_teacher_visible_ratio"):
+                for _k in ("label_gate_bypass_used", "label_gate_failed_reason", "strong_label_gate_used", "object_or_edge_rail_gate_bypass", "pose_jump_from_initial_m", "yaw_jump_from_initial_deg", "rotation_jump_from_initial_deg", "selected_init_source", "bev_candidate_rejected_by_gate", "final_gate_source", "init_label_teacher_eligible_count", "init_label_teacher_visible_ratio"):
                     if _k in br:
                         f.write(f"{_k}: {br[_k]}\n")
                 if br.get("candidate_scores"):
                     f.write("candidate_scores_json: " + json.dumps(br["candidate_scores"], ensure_ascii=False) + "\n")
                 if "refined_lidar_rail_nonzero_ratio" in br:
                     f.write(f"refined_lidar_rail_nonzero_ratio: {br['refined_lidar_rail_nonzero_ratio']}\n")
+        strong_debug = {k: br.get(k) for k in (
+            "strong_label_feature_count",
+            "strong_track_residual_count",
+            "strong_pole_residual_count",
+            "strong_switch_residual_count",
+            "strong_buffer_stop_residual_count",
+            "strong_label_score",
+            "strong_track_score",
+            "strong_pole_score",
+            "strong_switch_score",
+            "strong_buffer_stop_score",
+            "strong_label_gate_used",
+            "final_gate_source",
+            "selected_init_source",
+            "pose_jump_from_initial_m",
+            "yaw_jump_from_initial_deg",
+        ) if k in br}
+        if strong_debug:
+            with open(os.path.join(calib_dir, f"{frame_id:010d}_strong_label_debug.json"), "w", encoding="utf-8") as f:
+                json.dump(strong_debug, f, indent=2, ensure_ascii=False)
         write_unified_debug_json(
             os.path.join(calib_dir, f"{frame_id:010d}_debug_score_breakdown.json"),
             stage="calib",

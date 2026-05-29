@@ -185,3 +185,82 @@ def test_openlabel_teacher_points_are_cropped_to_visible_x_range(tmp_path):
     pts = (tmp_path / "lidar" / "0000000012_label_object_points.txt").read_text(encoding="utf-8")
     assert " 5 " not in pts
     assert " 3 " in pts
+
+
+
+def test_openlabel_label_assist_exports_strong_feature_json_and_tsv(tmp_path):
+    label_json = tmp_path / "labels.json"
+    _write_openlabel(label_json)
+    image_path = tmp_path / "image.png"
+    cv2.imwrite(str(image_path), np.zeros((64, 96, 3), dtype=np.uint8))
+
+    sam_base = str(tmp_path / "sam" / "0000000012")
+    frame_dir = str(tmp_path / "label_features" / "0000000012")
+    lidar_base = str(tmp_path / "lidar" / "0000000012")
+
+    summary = export_label_assist(
+        str(label_json),
+        12,
+        str(image_path),
+        "rgb_center",
+        sam_base,
+        frame_dir,
+        lidar_base,
+        strong_features_enabled=True,
+        max_track_samples_per_object=5,
+    )
+
+    assert summary["strong_features_enabled"] is True
+    assert summary["strong_label_feature_count"] >= 2
+    assert summary["strong_label_feature_counts"]["track"] == 1
+    assert summary["strong_label_feature_counts"]["catenary_pole"] == 1
+
+    strong_json = json.loads((tmp_path / "lidar" / "0000000012_label_strong_features.json").read_text(encoding="utf-8"))
+    classes = {f["class_type"] for f in strong_json["features"]}
+    assert {"track", "catenary_pole"}.issubset(classes)
+
+    tsv = (tmp_path / "lidar" / "0000000012_label_strong_features.tsv").read_text(encoding="utf-8")
+    assert "track\ttrk1\tpoint" in tsv
+    assert "catenary_pole\tpole1\taxis" in tsv
+
+
+def test_openlabel_strong_features_skip_unpaired_switch_and_export_buffer_stop(tmp_path):
+    label_json = tmp_path / "labels.json"
+    data = {
+        "openlabel": {
+            "objects": {
+                "sw1": {"type": "switch", "name": "switch"},
+                "buf1": {"type": "buffer_stop", "name": "buffer"},
+            },
+            "frames": {
+                "12": {
+                    "objects": {
+                        "sw1": {
+                            "object_data": {
+                                "poly2d": [{"name": "rgb_center__poly", "coordinate_system": "rgb_center", "val": [10, 40, 30, 42, 50, 45]}]
+                            }
+                        },
+                        "buf1": {
+                            "object_data": {
+                                "bbox": [{"name": "rgb_center__bbox", "coordinate_system": "rgb_center", "val": [40, 30, 20, 12]}],
+                                "cuboid": [{"name": "lidar__cuboid", "coordinate_system": "lidar", "val": [12, 0, 1, 0, 0, 0, 1, 2, 1, 2]}],
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    }
+    label_json.write_text(json.dumps(data), encoding="utf-8")
+    image_path = tmp_path / "image.png"
+    cv2.imwrite(str(image_path), np.zeros((64, 96, 3), dtype=np.uint8))
+    sam_base = str(tmp_path / "sam" / "0000000012")
+    frame_dir = str(tmp_path / "label_features" / "0000000012")
+    lidar_base = str(tmp_path / "lidar" / "0000000012")
+
+    summary = export_label_assist(str(label_json), 12, str(image_path), "rgb_center", sam_base, frame_dir, lidar_base)
+    assert summary["strong_label_feature_counts"]["switch"] == 0
+    assert summary["strong_label_feature_counts"]["buffer_stop"] == 1
+    tsv = (tmp_path / "lidar" / "0000000012_label_strong_features.tsv").read_text(encoding="utf-8")
+    assert "buffer_stop\tbuf1" in tsv
+    assert "switch\tsw1" not in tsv

@@ -321,3 +321,190 @@ struct WeightedRailEdgeCost {
     double visibility_residual_weight_;
     double oob_residual_weight_;
 };
+
+inline double ClampDouble(double v, double lo, double hi) {
+    return std::max(lo, std::min(hi, v));
+}
+
+template <typename T>
+T PointSegmentDistance2DT(const T& px, const T& py,
+                          double ax, double ay, double bx, double by) {
+    const T vx = T(bx - ax);
+    const T vy = T(by - ay);
+    const T wx = px - T(ax);
+    const T wy = py - T(ay);
+    const T denom = vx * vx + vy * vy + T(1e-9);
+    T alpha = (wx * vx + wy * vy) / denom;
+    const double a = ScalarValue(alpha);
+    if (a < 0.0) alpha = T(0.0);
+    if (a > 1.0) alpha = T(1.0);
+    const T qx = T(ax) + alpha * vx;
+    const T qy = T(ay) + alpha * vy;
+    const T dx = px - qx;
+    const T dy = py - qy;
+    return ceres::sqrt(dx * dx + dy * dy + T(1e-6));
+}
+
+template <typename T>
+T StrongProjectU(const Eigen::Vector3d& p,
+                 const Eigen::Matrix3d& R_rect,
+                 const Eigen::Matrix<double, 3, 4>& P_rect,
+                 const T* const r,
+                 const T* const t,
+                 T* v_out,
+                 bool* valid_depth) {
+    T p_raw[3] = {T(p.x()), T(p.y()), T(p.z())};
+    T p_rotated[3];
+    ceres::AngleAxisRotatePoint(r, p_raw, p_rotated);
+    Eigen::Matrix<T, 3, 1> p_cam;
+    p_cam.x() = p_rotated[0] + t[0];
+    p_cam.y() = p_rotated[1] + t[1];
+    p_cam.z() = p_rotated[2] + t[2];
+    Eigen::Matrix<T, 3, 1> p_rect = R_rect.cast<T>() * p_cam;
+    *valid_depth = ScalarValue(p_rect.z()) >= 0.1;
+    Eigen::Matrix<T, 4, 1> p_rect_h;
+    p_rect_h[0] = p_rect.x();
+    p_rect_h[1] = p_rect.y();
+    p_rect_h[2] = p_rect.z();
+    p_rect_h[3] = T(1.0);
+    Eigen::Matrix<T, 3, 1> uv = P_rect.cast<T>() * p_rect_h;
+    *v_out = uv.y() / uv.z();
+    return uv.x() / uv.z();
+}
+
+struct TrackPolylineProjectionCost {
+    TrackPolylineProjectionCost(const StrongLabelFeature& feature,
+                                const Eigen::Matrix3d& R_rect,
+                                const Eigen::Matrix<double, 3, 4>& P_rect,
+                                int W, int H,
+                                double weight)
+        : feature_(feature), R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H),
+          sqrt_weight_(std::sqrt(std::max(0.0, weight * feature.weight))) {}
+
+    template <typename T>
+    bool operator()(const T* const r, const T* const t, T* residual) const {
+        if (feature_.image_points.size() < 2) {
+            residual[0] = T(0.0);
+            return true;
+        }
+        bool valid_depth = true;
+        T v_f = T(0.0);
+        T u_f = StrongProjectU(feature_.p1, R_rect_, P_rect_, r, t, &v_f, &valid_depth);
+        if (!valid_depth) {
+            residual[0] = T(sqrt_weight_);
+            return true;
+        }
+        T best = T(1e6);
+        double best_scalar = 1e6;
+        for (size_t i = 1; i < feature_.image_points.size(); ++i) {
+            const auto& a = feature_.image_points[i - 1];
+            const auto& b = feature_.image_points[i];
+            T d = PointSegmentDistance2DT(u_f, v_f, a.x(), a.y(), b.x(), b.y());
+            const double ds = ScalarValue(d);
+            if (ds < best_scalar) {
+                best_scalar = ds;
+                best = d;
+            }
+        }
+        const T eps = T(1e-6);
+        auto smooth_hinge = [&](const T& x) -> T { return (x + ceres::sqrt(x * x + eps)) * T(0.5); };
+        T oob = (smooth_hinge(-u_f) + smooth_hinge(u_f - T(W_ - 1)) +
+                 smooth_hinge(-v_f) + smooth_hinge(v_f - T(H_ - 1))) / T(W_ + H_);
+        residual[0] = T(sqrt_weight_) * (best / T(80.0) + oob);
+        return true;
+    }
+
+    StrongLabelFeature feature_;
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
+    int W_;
+    int H_;
+    double sqrt_weight_;
+};
+
+struct PoleCenterlineProjectionCost {
+    PoleCenterlineProjectionCost(const StrongLabelFeature& feature,
+                                 const Eigen::Matrix3d& R_rect,
+                                 const Eigen::Matrix<double, 3, 4>& P_rect,
+                                 int W, int H,
+                                 double weight)
+        : feature_(feature), R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H),
+          sqrt_weight_(std::sqrt(std::max(0.0, weight * feature.weight))) {}
+
+    template <typename T>
+    bool operator()(const T* const r, const T* const t, T* residual) const {
+        if (feature_.image_points.size() < 2) {
+            residual[0] = residual[1] = residual[2] = T(0.0);
+            return true;
+        }
+        bool ok1 = true, ok2 = true;
+        T v1 = T(0.0), v2 = T(0.0);
+        T u1 = StrongProjectU(feature_.p1, R_rect_, P_rect_, r, t, &v1, &ok1);
+        T u2 = StrongProjectU(feature_.p2, R_rect_, P_rect_, r, t, &v2, &ok2);
+        const auto& a = feature_.image_points[0];
+        const auto& b = feature_.image_points[1];
+        T d1 = PointSegmentDistance2DT(u1, v1, a.x(), a.y(), b.x(), b.y());
+        T d2 = PointSegmentDistance2DT(u2, v2, a.x(), a.y(), b.x(), b.y());
+        T du = u2 - u1;
+        T dv = v2 - v1;
+        T angle = ceres::sqrt(du * du + T(1e-6)) / (ceres::sqrt(du * du + dv * dv + T(1e-6)));
+        if (!ok1) d1 = T(80.0);
+        if (!ok2) d2 = T(80.0);
+        residual[0] = T(sqrt_weight_) * d1 / T(60.0);
+        residual[1] = T(sqrt_weight_) * d2 / T(60.0);
+        residual[2] = T(sqrt_weight_) * angle;
+        return true;
+    }
+
+    StrongLabelFeature feature_;
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
+    int W_;
+    int H_;
+    double sqrt_weight_;
+};
+
+struct BufferStopBBoxProjectionCost {
+    BufferStopBBoxProjectionCost(const StrongLabelFeature& feature,
+                                 const Eigen::Matrix3d& R_rect,
+                                 const Eigen::Matrix<double, 3, 4>& P_rect,
+                                 int W, int H,
+                                 double weight)
+        : feature_(feature), R_rect_(R_rect), P_rect_(P_rect), W_(W), H_(H),
+          sqrt_weight_(std::sqrt(std::max(0.0, weight * feature.weight))) {}
+
+    template <typename T>
+    bool operator()(const T* const r, const T* const t, T* residual) const {
+        bool valid_depth = true;
+        T v = T(0.0);
+        T u = StrongProjectU(feature_.p1, R_rect_, P_rect_, r, t, &v, &valid_depth);
+        if (!valid_depth) {
+            residual[0] = T(sqrt_weight_);
+            return true;
+        }
+        const T x0 = T(feature_.bbox[0]);
+        const T y0 = T(feature_.bbox[1]);
+        const T x1 = T(feature_.bbox[2]);
+        const T y1 = T(feature_.bbox[3]);
+        const T eps = T(1e-6);
+        auto smooth_hinge = [&](const T& x) -> T { return (x + ceres::sqrt(x * x + eps)) * T(0.5); };
+        T outside = smooth_hinge(x0 - u) + smooth_hinge(u - x1) + smooth_hinge(y0 - v) + smooth_hinge(v - y1);
+        T scale = ceres::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + T(1.0));
+        if (feature_.role.find("center") != std::string::npos) {
+            const T cx = (x0 + x1) * T(0.5);
+            const T cy = (y0 + y1) * T(0.5);
+            T center_dist = ceres::sqrt((u - cx) * (u - cx) + (v - cy) * (v - cy) + T(1e-6));
+            residual[0] = T(sqrt_weight_) * (outside + T(0.35) * center_dist) / scale;
+        } else {
+            residual[0] = T(sqrt_weight_) * outside / scale;
+        }
+        return true;
+    }
+
+    StrongLabelFeature feature_;
+    Eigen::Matrix3d R_rect_;
+    Eigen::Matrix<double, 3, 4> P_rect_;
+    int W_;
+    int H_;
+    double sqrt_weight_;
+};

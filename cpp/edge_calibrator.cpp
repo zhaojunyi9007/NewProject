@@ -5,7 +5,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <numeric>
+#include <sstream>
 #include <vector>
 
 #include "/usr/include/ceres/ceres.h"
@@ -147,6 +149,155 @@ std::vector<PointFeature> LoadLabelTeacherPoints(const std::string& path) {
     }
     return out;
 }
+
+std::vector<StrongLabelFeature> LoadStrongLabelFeatures(const std::string& path) {
+    std::vector<StrongLabelFeature> out;
+    if (path.empty()) return out;
+    std::ifstream f(path);
+    if (!f.is_open()) return out;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream ss(line);
+        StrongLabelFeature sf;
+        if (!(ss >> sf.class_type >> sf.object_id >> sf.role >> sf.weight)) continue;
+        if (!(ss >> sf.p1.x() >> sf.p1.y() >> sf.p1.z() >> sf.p2.x() >> sf.p2.y() >> sf.p2.z())) continue;
+        if (!(ss >> sf.image_kind)) continue;
+        if (sf.image_kind == "polyline") {
+            int n = 0;
+            if (!(ss >> n) || n < 2) continue;
+            sf.image_points.reserve(static_cast<size_t>(n));
+            for (int i = 0; i < n; ++i) {
+                double u = 0.0, v = 0.0;
+                if (!(ss >> u >> v)) break;
+                sf.image_points.emplace_back(u, v);
+            }
+            if (static_cast<int>(sf.image_points.size()) < n) continue;
+        } else if (sf.image_kind == "centerline") {
+            double u0 = 0.0, v0 = 0.0, u1 = 0.0, v1 = 0.0;
+            if (!(ss >> u0 >> v0 >> u1 >> v1)) continue;
+            sf.image_points.emplace_back(u0, v0);
+            sf.image_points.emplace_back(u1, v1);
+        } else if (sf.image_kind == "bbox") {
+            double x0 = 0.0, y0 = 0.0, x1 = 0.0, y1 = 0.0;
+            if (!(ss >> x0 >> y0 >> x1 >> y1)) continue;
+            sf.bbox = Eigen::Vector4d(x0, y0, x1, y1);
+        } else {
+            continue;
+        }
+        out.push_back(sf);
+    }
+    return out;
+}
+
+bool ProjectDouble(const Eigen::Vector3d& p_lidar,
+                   const Eigen::Matrix3d& R_rect,
+                   const Eigen::Matrix<double, 3, 4>& P_rect,
+                   const Eigen::Matrix3d& R,
+                   const Eigen::Vector3d& t,
+                   double* u, double* v, int W, int H) {
+    Eigen::Vector3d p_cam = R * p_lidar + t;
+    Eigen::Vector3d p_rect = R_rect * p_cam;
+    if (p_rect.z() < 0.1) return false;
+    Eigen::Vector4d p_rect_h;
+    p_rect_h << p_rect.x(), p_rect.y(), p_rect.z(), 1.0;
+    Eigen::Vector3d uv = P_rect * p_rect_h;
+    *u = uv.x() / uv.z();
+    *v = uv.y() / uv.z();
+    return (*u >= 0 && *u < W && *v >= 0 && *v < H);
+}
+
+double PointSegmentDistance2D(double px, double py, const Eigen::Vector2d& a, const Eigen::Vector2d& b) {
+    Eigen::Vector2d p(px, py);
+    Eigen::Vector2d ab = b - a;
+    double denom = std::max(1e-9, ab.squaredNorm());
+    double t = std::max(0.0, std::min(1.0, (p - a).dot(ab) / denom));
+    return (p - (a + t * ab)).norm();
+}
+
+double PolylineDistance2D(double u, double v, const std::vector<Eigen::Vector2d>& pts) {
+    if (pts.size() < 2) return 1e6;
+    double best = 1e6;
+    for (size_t i = 1; i < pts.size(); ++i) {
+        best = std::min(best, PointSegmentDistance2D(u, v, pts[i - 1], pts[i]));
+    }
+    return best;
+}
+
+struct StrongLabelEvalStats {
+    double score = 0.0;
+    double track_score = 0.0;
+    double pole_score = 0.0;
+    double switch_score = 0.0;
+    double buffer_score = 0.0;
+    int track_count = 0;
+    int pole_count = 0;
+    int switch_count = 0;
+    int buffer_count = 0;
+};
+
+StrongLabelEvalStats EvaluateStrongLabelFeatures(const std::vector<StrongLabelFeature>& features,
+                                                 const Eigen::Matrix3d& R_rect,
+                                                 const Eigen::Matrix<double, 3, 4>& P_rect,
+                                                 int W,
+                                                 int H,
+                                                 const Eigen::Matrix3d& R,
+                                                 const Eigen::Vector3d& t) {
+    StrongLabelEvalStats st;
+    auto score_from_dist = [](double dist_px, double cap_px) {
+        if (!std::isfinite(dist_px)) return 0.0;
+        return 1.0 - std::min(1.0, std::max(0.0, dist_px / std::max(1.0, cap_px)));
+    };
+    double track_sum = 0.0, pole_sum = 0.0, switch_sum = 0.0, buffer_sum = 0.0;
+    for (const auto& sf : features) {
+        if (sf.class_type == "track" || sf.class_type == "switch") {
+            double u = 0.0, v = 0.0;
+            if (!ProjectDouble(sf.p1, R_rect, P_rect, R, t, &u, &v, W, H)) continue;
+            const double sc = score_from_dist(PolylineDistance2D(u, v, sf.image_points), 80.0) * sf.weight;
+            if (sf.class_type == "track") { track_sum += sc; st.track_count++; }
+            else { switch_sum += sc; st.switch_count++; }
+        } else if (sf.class_type == "catenary_pole") {
+            double u1 = 0.0, v1 = 0.0, u2 = 0.0, v2 = 0.0;
+            bool ok1 = ProjectDouble(sf.p1, R_rect, P_rect, R, t, &u1, &v1, W, H);
+            bool ok2 = sf.role.find("axis") != std::string::npos && ProjectDouble(sf.p2, R_rect, P_rect, R, t, &u2, &v2, W, H);
+            if (!ok1) continue;
+            double d = PolylineDistance2D(u1, v1, sf.image_points);
+            if (ok2) d = 0.5 * (d + PolylineDistance2D(u2, v2, sf.image_points));
+            pole_sum += score_from_dist(d, 60.0) * sf.weight;
+            st.pole_count++;
+        } else if (sf.class_type == "buffer_stop") {
+            double u = 0.0, v = 0.0;
+            if (!ProjectDouble(sf.p1, R_rect, P_rect, R, t, &u, &v, W, H)) continue;
+            const double bb_x0 = sf.bbox[0];
+            const double bb_y0 = sf.bbox[1];
+            const double bb_x1 = sf.bbox[2];
+            const double bb_y1 = sf.bbox[3];
+            double dx = std::max(std::max(bb_x0 - u, 0.0), u - bb_x1);
+            double dy = std::max(std::max(bb_y0 - v, 0.0), v - bb_y1);
+            double d = std::sqrt(dx * dx + dy * dy);
+            if (sf.role.find("center") != std::string::npos) {
+                double cx = 0.5 * (bb_x0 + bb_x1);
+                double cy = 0.5 * (bb_y0 + bb_y1);
+                d = 0.35 * std::hypot(u - cx, v - cy) + d;
+            }
+            buffer_sum += score_from_dist(d, std::hypot(bb_x1 - bb_x0, bb_y1 - bb_y0)) * sf.weight;
+            st.buffer_count++;
+        }
+    }
+    st.track_score = st.track_count > 0 ? track_sum / st.track_count : 0.0;
+    st.pole_score = st.pole_count > 0 ? pole_sum / st.pole_count : 0.0;
+    st.switch_score = st.switch_count > 0 ? switch_sum / st.switch_count : 0.0;
+    st.buffer_score = st.buffer_count > 0 ? buffer_sum / st.buffer_count : 0.0;
+    double weighted = 2.0 * st.track_score + 1.5 * st.pole_score + 1.2 * st.switch_score + st.buffer_score;
+    double denom = 0.0;
+    if (st.track_count > 0) denom += 2.0;
+    if (st.pole_count > 0) denom += 1.5;
+    if (st.switch_count > 0) denom += 1.2;
+    if (st.buffer_count > 0) denom += 1.0;
+    st.score = denom > 0.0 ? weighted / denom : 0.0;
+    return st;
+}
+
 }  // namespace
 
 EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(config) {
@@ -224,6 +375,14 @@ bool EdgeCalibrator::LoadData() {
         label_teacher_points_ = LoadLabelTeacherPoints(label_path);
         std::cout << "[Info] Label assist enabled: label_teacher_points=" << label_teacher_points_.size()
                   << ", path=" << label_path << std::endl;
+        if (config_.strong_label_enabled) {
+            const std::string strong_path = config_.label_strong_features_path.empty()
+                ? (config_.lidar_base + "_label_strong_features.tsv")
+                : config_.label_strong_features_path;
+            strong_label_features_ = LoadStrongLabelFeatures(strong_path);
+            std::cout << "[Info] Strong label features enabled: features=" << strong_label_features_.size()
+                      << ", path=" << strong_path << std::endl;
+        }
     }
 
     bool used_default = false;
@@ -252,7 +411,8 @@ bool EdgeCalibrator::LoadData() {
               << ", lines3d=" << lines3d_.size()
               << ", rail_sample_points=" << rail_sample_points_.size()
               << ", object_points=" << object_points_.size()
-              << ", label_teacher_points=" << label_teacher_points_.size() << std::endl;
+              << ", label_teacher_points=" << label_teacher_points_.size()
+              << ", strong_label_features=" << strong_label_features_.size() << std::endl;
     return true;
 }
 
@@ -892,6 +1052,22 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
         }
         bd.rail_confidence = (rail_cnt > 0) ? (rail_sum / static_cast<double>(rail_cnt)) : 0.0;
         bd.vertical_structure_confidence = (vert_cnt > 0) ? (vert_sum / static_cast<double>(vert_cnt)) : 0.0;
+
+        if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
+            StrongLabelEvalStats strong_stats = EvaluateStrongLabelFeatures(
+                strong_label_features_, R_rect_, P_rect_, W_, H_, R_eval, t_eval);
+            bd.strong_label_feature_count = static_cast<double>(strong_label_features_.size());
+            bd.strong_track_residual_count = static_cast<double>(strong_track_residual_count_ > 0 ? strong_track_residual_count_ : strong_stats.track_count);
+            bd.strong_pole_residual_count = static_cast<double>(strong_pole_residual_count_ > 0 ? strong_pole_residual_count_ : strong_stats.pole_count);
+            bd.strong_switch_residual_count = static_cast<double>(strong_switch_residual_count_ > 0 ? strong_switch_residual_count_ : strong_stats.switch_count);
+            bd.strong_buffer_stop_residual_count = static_cast<double>(strong_buffer_stop_residual_count_ > 0 ? strong_buffer_stop_residual_count_ : strong_stats.buffer_count);
+            bd.strong_track_score = strong_stats.track_score;
+            bd.strong_pole_score = strong_stats.pole_score;
+            bd.strong_switch_score = strong_stats.switch_score;
+            bd.strong_buffer_stop_score = strong_stats.buffer_score;
+            bd.strong_label_score = strong_stats.score;
+            bd.strong_label_term_used = 1.0;
+        }
         last_score_breakdown_ = bd;
     }
 
@@ -957,6 +1133,21 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "label_static_eligible_count: " << last_score_breakdown_.label_static_eligible_count << "\n";
     result_file << "label_vehicle_eligible_count: " << last_score_breakdown_.label_vehicle_eligible_count << "\n";
     result_file << "label_person_eligible_count: " << last_score_breakdown_.label_person_eligible_count << "\n";
+    result_file << "strong_label_feature_count: " << last_score_breakdown_.strong_label_feature_count << "\n";
+    result_file << "strong_track_residual_count: " << last_score_breakdown_.strong_track_residual_count << "\n";
+    result_file << "strong_pole_residual_count: " << last_score_breakdown_.strong_pole_residual_count << "\n";
+    result_file << "strong_switch_residual_count: " << last_score_breakdown_.strong_switch_residual_count << "\n";
+    result_file << "strong_buffer_stop_residual_count: " << last_score_breakdown_.strong_buffer_stop_residual_count << "\n";
+    result_file << "strong_label_score: " << last_score_breakdown_.strong_label_score << "\n";
+    result_file << "strong_track_score: " << last_score_breakdown_.strong_track_score << "\n";
+    result_file << "strong_pole_score: " << last_score_breakdown_.strong_pole_score << "\n";
+    result_file << "strong_switch_score: " << last_score_breakdown_.strong_switch_score << "\n";
+    result_file << "strong_buffer_stop_score: " << last_score_breakdown_.strong_buffer_stop_score << "\n";
+    result_file << "strong_label_score_by_class: track=" << last_score_breakdown_.strong_track_score
+                << ",pole=" << last_score_breakdown_.strong_pole_score
+                << ",switch=" << last_score_breakdown_.strong_switch_score
+                << ",buffer_stop=" << last_score_breakdown_.strong_buffer_stop_score << "\n";
+    result_file << "strong_label_term_used: " << last_score_breakdown_.strong_label_term_used << "\n";
     result_file << "label_assist_enabled: " << (config_.label_assist_enabled ? 1 : 0) << "\n";
     result_file << "label_feature_used: " << ((config_.label_assist_enabled && label_residual_count_ > 0) ? 1 : 0) << "\n";
     result_file << "unsupervised_feature_used: 1\n";

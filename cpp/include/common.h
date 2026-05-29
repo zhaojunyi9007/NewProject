@@ -154,6 +154,17 @@ struct ScoreBreakdown {
     double label_vehicle_eligible_count = 0.0;
     double label_person_eligible_count = 0.0;
     double label_term_used = 0.0;
+    double strong_label_score = 0.0;
+    double strong_track_score = 0.0;
+    double strong_pole_score = 0.0;
+    double strong_switch_score = 0.0;
+    double strong_buffer_stop_score = 0.0;
+    double strong_label_feature_count = 0.0;
+    double strong_track_residual_count = 0.0;
+    double strong_pole_residual_count = 0.0;
+    double strong_switch_residual_count = 0.0;
+    double strong_buffer_stop_residual_count = 0.0;
+    double strong_label_term_used = 0.0;
     double rail_penalty_applied = 0.0;
 
     // Phase A3 keys (observability-related)
@@ -177,6 +188,19 @@ struct ScoreBreakdown {
 };
 
 // --- 命名空间：IO工具函数声明 ---
+
+struct StrongLabelFeature {
+    std::string class_type;
+    std::string object_id;
+    std::string role;
+    std::string image_kind;
+    double weight = 1.0;
+    Eigen::Vector3d p1 = Eigen::Vector3d::Zero();
+    Eigen::Vector3d p2 = Eigen::Vector3d::Zero();
+    std::vector<Eigen::Vector2d> image_points;
+    Eigen::Vector4d bbox = Eigen::Vector4d::Zero();
+};
+
 namespace IOUtils {
     // 加载 KITTI 格式的 bin 文件
     bool LoadKittiBin(const std::string& bin_file, std::vector<PointFeature>& points);

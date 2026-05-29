@@ -71,6 +71,11 @@ def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_pa
         cmd.extend(["--teacher-image-bbox-padding-m", str(float(label_cfg.get("teacher_image_bbox_padding_m", 8.0)))])
     if bool(label_cfg.get("use_sam_refine", True)):
         cmd.append("--use-sam-refine")
+    if bool(label_cfg.get("strong_features_enabled", True)):
+        cmd.append("--strong-features-enabled")
+    cmd.extend(["--max-track-samples-per-object", str(int(label_cfg.get("max_track_samples_per_object", 800)))])
+    cmd.extend(["--max-pole-samples-per-object", str(int(label_cfg.get("max_pole_samples_per_object", 20)))])
+    cmd.extend(["--bbox-padding-px", str(int(label_cfg.get("bbox_padding_px", 12)))])
     if lidar_pcd:
         cmd.extend(["--lidar-pcd", lidar_pcd])
     subprocess.run(cmd, check=True)

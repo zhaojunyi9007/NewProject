@@ -134,10 +134,17 @@ label_assist:
   use_for_lidar_prior: true
   use_for_calib_residual: true
   export_diagnostics: true
-  track_weight: 1.5
+  strong_features_enabled: true
+  track_weight: 2.0
+  catenary_pole_weight: 1.5
+  switch_weight: 1.2
+  buffer_stop_weight: 1.0
   static_object_weight: 1.0
   vehicle_weight: 0.4
   person_weight: 0.2
+  max_track_samples_per_object: 800
+  max_pole_samples_per_object: 20
+  bbox_padding_px: 12
   label_json: ""
   teacher_visible_xmax_m: 120.0
   teacher_image_bbox_padding_m: 8.0
@@ -148,6 +155,9 @@ semantic_calib:
   vehicle_object_weight: 0.8
   person_object_weight: 0.5
   min_label_teacher_score: 0.20
+  min_strong_label_score: 0.25
+  min_strong_track_residual_count: 50
+  min_strong_static_residual_count: 2
   min_label_track_visible_count: 50
   min_label_residual_count_for_gate: 50
   label_assist_requires_label_gate: true
