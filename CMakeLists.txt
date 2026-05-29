@@ -94,6 +94,18 @@ target_link_libraries(rail_bev_extractor_synthetic_test
     Eigen3::Eigen
 )
 
+
+# --- Synthetic test: optimizer object scoring / rail fallback behavior ---
+add_executable(optimizer_object_scoring_synthetic_test
+    tests/cpp/optimizer_object_scoring_synthetic_test.cpp
+    cpp/optimizer_scoring.cpp
+    cpp/optimizer_semantic_scoring.cpp
+)
+target_link_libraries(optimizer_object_scoring_synthetic_test
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+)
+
 # --- Executable: Optimizer (Coarse-to-Fine 标定) ---
 add_executable(optimizer
     cpp/main.cpp

@@ -13,6 +13,22 @@ from pipeline.optimizer.constraint_adapter import get_optimizer_constraint_adapt
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+_OPTIMIZER_ARG_SUPPORT_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _optimizer_binary_supports_arg(optimizer_path: str, arg_name: str) -> bool:
+    key = (os.path.abspath(optimizer_path), arg_name)
+    if key in _OPTIMIZER_ARG_SUPPORT_CACHE:
+        return _OPTIMIZER_ARG_SUPPORT_CACHE[key]
+    try:
+        with open(optimizer_path, "rb") as f:
+            data = f.read()
+        supported = arg_name.encode("utf-8") in data
+    except OSError:
+        supported = True
+    _OPTIMIZER_ARG_SUPPORT_CACHE[key] = supported
+    return supported
+
 
 def _parse_calib_breakdown(path: str) -> dict:
     out: dict = {}
@@ -130,11 +146,18 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
         object_visible = float(out.get("object_visible_count", 0.0) or 0.0)
         edge_visible = float(out.get("edge_visible_count", 0.0) or 0.0)
         semantic_used = float(out.get("semantic_term_used", 0.0) or 0.0) > 0.0
+        semantic_hist = float(out.get("semantic_hist_similarity", 0.0) or 0.0)
+        semantic_js = float(out.get("semantic_js_divergence", 1.0) or 1.0)
         min_object = float(sem_cfg.get("min_final_object_visible_count", 1))
         min_edge = float(sem_cfg.get("min_final_edge_visible_count", sem_cfg.get("min_edge_visible_count", 50)))
+        min_sem_hist = float(sem_cfg.get("min_final_semantic_hist_similarity", 0.05))
+        max_sem_js = float(sem_cfg.get("max_final_semantic_js_divergence", 0.95))
+        semantic_ok = semantic_used and (semantic_hist >= min_sem_hist or semantic_js <= max_sem_js)
         allow_alt = bool(sem_cfg.get("allow_object_or_edge_to_pass_rail_gate", True)) and (
-            object_visible >= min_object or edge_visible >= min_edge or semantic_used
+            object_visible >= min_object or edge_visible >= min_edge or semantic_ok
         )
+        out["object_or_edge_rail_gate_bypass"] = 1.0 if allow_alt else 0.0
+        out["semantic_rail_gate_bypass_ok"] = 1.0 if semantic_ok else 0.0
         if bool(sem_cfg.get("reject_pose_on_rail_gate_fail", True)) and not allow_alt:
             out["final_pose_valid"] = 0.0
             out["invalid_reason"] = (
@@ -183,6 +206,8 @@ def run(context: RuntimeContext) -> None:
     bev_cfg = context.config.get("bev") or {}
     bev_by_frame = getattr(context, "bev_pose_by_frame", None) or {}
     sem_cfg = context.config.get("semantic_calib") or {}
+    label_cfg = context.config.get("label_assist") or {}
+    label_assist_for_calib = bool(label_cfg.get("enabled", False)) and bool(label_cfg.get("use_for_calib_residual", True))
     sem_enabled = bool(sem_cfg.get("enabled", False))
     allow_legacy_fallback = bool(sem_cfg.get("allow_legacy_fallback", False))
     img_cfg = context.config.get("image_features") or {}
@@ -379,8 +404,9 @@ def run(context: RuntimeContext) -> None:
                 except (OSError, ValueError, json.JSONDecodeError):
                     print(f"[Warning] 读取 rail_meta 失败，忽略: {rail_meta_path}")
 
+            optimizer_bin = os.path.join(_REPO_ROOT, "build", "optimizer")
             cmd = [
-                os.path.join(_REPO_ROOT, "build", "optimizer"),
+                optimizer_bin,
                 "--lidar_feature_base",
                 feature_base,
                 "--sam_feature_base",
@@ -413,10 +439,6 @@ def run(context: RuntimeContext) -> None:
                 str(float(sem_cfg.get("edge_weight", 1.0))),
                 "--rail_weight",
                 str(effective_rail_weight),
-                "--vehicle_object_weight",
-                str(float(sem_cfg.get("vehicle_object_weight", 0.8))),
-                "--person_object_weight",
-                str(float(sem_cfg.get("person_object_weight", 0.5))),
                 "--lidar_semantic_max_points",
                 str(int(sem_cfg.get("lidar_semantic_max_points", 12000))),
                 "--stratified_semantic_sampling",
@@ -450,6 +472,38 @@ def run(context: RuntimeContext) -> None:
                 "--pyramid_scales",
                 pyramid_scales_s,
             ]
+            if _optimizer_binary_supports_arg(optimizer_bin, "--vehicle_object_weight"):
+                cmd.extend([
+                    "--vehicle_object_weight",
+                    str(float(sem_cfg.get("vehicle_object_weight", 0.8))),
+                    "--person_object_weight",
+                    str(float(sem_cfg.get("person_object_weight", 0.5))),
+                ])
+            else:
+                print(
+                    "[Warning] build/optimizer does not support object-weight arguments; "
+                    "please rebuild optimizer to enable person/vehicle object scoring."
+                )
+            if _optimizer_binary_supports_arg(optimizer_bin, "--label_assist_enabled"):
+                cmd.extend([
+                    "--label_assist_enabled",
+                    "1" if label_assist_for_calib else "0",
+                    "--label_object_points",
+                    f"{feature_base}_label_object_points.txt",
+                    "--label_track_weight",
+                    str(float(label_cfg.get("track_weight", 1.5))),
+                    "--label_static_weight",
+                    str(float(label_cfg.get("static_object_weight", 1.0))),
+                    "--label_vehicle_weight",
+                    str(float(label_cfg.get("vehicle_weight", 0.4))),
+                    "--label_person_weight",
+                    str(float(label_cfg.get("person_weight", 0.2))),
+                ])
+            elif label_assist_for_calib:
+                print(
+                    "[Warning] build/optimizer does not support label-assisted arguments; "
+                    "please rebuild optimizer to enable label teacher residuals."
+                )
             if class_weights_s:
                 cmd.extend(["--class_weights", class_weights_s])
             mode = str(sem_cfg.get("optimize_mode", "full_calib") or "full_calib")
@@ -485,6 +539,7 @@ def run(context: RuntimeContext) -> None:
         br = _parse_calib_breakdown(output_file)
         rail_debug = _load_json_dict(f"{feature_base}_rail_bev_debug.json")
         edge_debug = _load_json_dict(f"{feature_base}_edge_meta.json")
+        label_debug = _load_json_dict(f"{feature_base}_debug_label_assist.json")
         if rail_debug:
             if "lidar_rail_refined_nonzero_ratio" in rail_debug:
                 br["refined_lidar_rail_nonzero_ratio"] = rail_debug["lidar_rail_refined_nonzero_ratio"]
@@ -494,6 +549,17 @@ def run(context: RuntimeContext) -> None:
             for k in ("edge_raw_count", "edge_kept_count", "edge_range_gt_50_count", "edge_near_track_count"):
                 if k in edge_debug:
                     br[k] = edge_debug[k]
+        if label_debug:
+            for k in (
+                "label_assist_enabled",
+                "label_feature_used",
+                "unsupervised_feature_used",
+                "image_track_vs_label_score",
+                "sam_vehicle_vs_label_iou",
+                "sam_person_vs_label_iou",
+            ):
+                if k in label_debug:
+                    br[k] = label_debug[k]
         br = _apply_final_rail_hard_gate(br, sem_cfg, bool(locals().get("oracle_rail", False)))
         if output_file and os.path.isfile(output_file):
             with open(output_file, "a", encoding="utf-8") as f:

@@ -260,6 +260,20 @@ bev:
 # ========================================
 # 语义概率场标定（默认关闭）
 # ========================================
+
+label_assist:
+  enabled: false
+  mode: simulation_teacher
+  use_for_image_prior: true
+  use_for_lidar_prior: true
+  use_for_calib_residual: true
+  export_diagnostics: true
+  track_weight: 1.5
+  static_object_weight: 1.0
+  vehicle_weight: 0.4
+  person_weight: 0.2
+  label_json: ""
+
 semantic_calib:
   enabled: true
   # 语义链路启用时默认不允许静默回退 legacy，避免“看似成功但 breakdown 全 0”。
@@ -273,6 +287,8 @@ semantic_calib:
   person_object_weight: 0.5
   allow_object_or_edge_to_pass_rail_gate: true
   min_final_object_visible_count: 1
+  min_final_semantic_hist_similarity: 0.05
+  max_final_semantic_js_divergence: 0.95
   min_image_rail_quality: 0.45
   low_image_rail_quality_weight: 0.0
   lidar_bev_crop_to_image_valid: true

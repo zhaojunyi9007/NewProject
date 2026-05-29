@@ -26,6 +26,7 @@ data:
   calib_output_dir: "result_osdar23/calibration"
   visual_output_dir: "result_osdar23/visualization"
   image_features_output_dir: "result_osdar23/image_features"
+  label_features_output_dir: "result_osdar23/label_features"
   bev_init_output_dir: "result_osdar23/bev_init"
   refinement_output_dir: "result_osdar23/refinement"
 
@@ -125,12 +126,28 @@ bev:
   chamfer_distance_cap_m: 2.5
   min_lidar_rail_weight_sum: 20.0
 
+
+label_assist:
+  enabled: true
+  mode: simulation_teacher
+  use_for_image_prior: true
+  use_for_lidar_prior: true
+  use_for_calib_residual: true
+  export_diagnostics: true
+  track_weight: 1.5
+  static_object_weight: 1.0
+  vehicle_weight: 0.4
+  person_weight: 0.2
+  label_json: ""
+
 semantic_calib:
   rail_weight: 1.5
   vehicle_object_weight: 0.8
   person_object_weight: 0.5
   allow_object_or_edge_to_pass_rail_gate: true
   min_final_object_visible_count: 1
+  min_final_semantic_hist_similarity: 0.05
+  max_final_semantic_js_divergence: 0.95
   oracle_rail_weight: 2.0
   oracle_rail_weight_fallback: 0.2
   semantic_js_weight: 2.0

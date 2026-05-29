@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from typing import Any, Dict
 
@@ -19,6 +20,52 @@ if _TOOLS not in sys.path:
     sys.path.insert(0, _TOOLS)
 
 from sam_extractor import FeatureExtractor  # noqa: E402
+
+
+
+def _resolve_label_json(cfg: Dict[str, Any]) -> str:
+    label_cfg = cfg.get("label_assist") or {}
+    explicit = str(label_cfg.get("label_json", "") or "").strip()
+    if explicit:
+        return explicit if os.path.isabs(explicit) else os.path.join(_REPO_ROOT, explicit)
+    root = str(cfg.get("data", {}).get("osdar_sequence_root", "") or "").strip()
+    if root:
+        tagged = os.path.basename(root.rstrip(os.sep))
+        candidates = [
+            os.path.join(root, f"{tagged}_labels.json"),
+            os.path.join(root, "1_calibration_1.1_labels.json"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+    fallback = os.path.join(_REPO_ROOT, "1_calibration_1.1_labels.json")
+    return fallback if os.path.isfile(fallback) else ""
+
+
+def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_path: str, frame_dir: str, sam_base: str, lidar_base: str) -> None:
+    label_cfg = cfg.get("label_assist") or {}
+    if not bool(label_cfg.get("enabled", False)):
+        return
+    label_json = _resolve_label_json(cfg)
+    if not label_json or not os.path.isfile(label_json):
+        print("[Warning] label_assist.enabled=true but label JSON was not found; continuing unsupervised path")
+        return
+    tool = os.path.join(_TOOLS, "openlabel_label_assist.py")
+    if not os.path.isfile(tool):
+        print(f"[Warning] Missing label assist exporter: {tool}")
+        return
+    cmd = [
+        sys.executable,
+        tool,
+        "--label-json", label_json,
+        "--frame-id", str(frame_id),
+        "--image", image_path,
+        "--image-sensor", str(cfg.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center"),
+        "--sam-base", sam_base,
+        "--frame-dir", frame_dir,
+        "--lidar-base", lidar_base,
+    ]
+    subprocess.run(cmd, check=True)
 
 
 def run(context: RuntimeContext) -> None:
@@ -37,6 +84,7 @@ def run(context: RuntimeContext) -> None:
     paths = context.paths or {}
     out_root = paths.get("image_features") or cfg.get("data", {}).get("image_features_output_dir", "")
     sam_root = paths.get("sam") or cfg.get("data", {}).get("sam_output_dir", "")
+    label_root = paths.get("label_features") or cfg.get("data", {}).get("label_features_output_dir", "")
     if not out_root:
         print("[Error] 缺少 image_features 输出路径")
         return
@@ -46,6 +94,8 @@ def run(context: RuntimeContext) -> None:
 
     os.makedirs(out_root, exist_ok=True)
     os.makedirs(sam_root, exist_ok=True)
+    if label_root:
+        os.makedirs(label_root, exist_ok=True)
 
     ckpt = str(sam_cfg.get("checkpoint_path", "") or "").strip()
     if not ckpt or not os.path.isfile(ckpt):
@@ -120,5 +170,9 @@ def run(context: RuntimeContext) -> None:
         )
         if not ok:
             print(f"[Warning] 帧 {frame_id:010d} 特征提取失败")
+        else:
+            lidar_base = os.path.join(lidar_root, f"{frame_id:010d}") if lidar_root else ""
+            label_frame_dir = os.path.join(label_root, f"{frame_id:010d}") if label_root else frame_dir
+            _export_label_assist_if_enabled(cfg, frame_id, img_path, label_frame_dir, sam_base, lidar_base)
 
     print(f"\n[完成] 图像语义特征已保存到: {out_root}")

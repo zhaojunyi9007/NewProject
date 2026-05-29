@@ -108,6 +108,45 @@ std::vector<PointFeature> LoadObjectClusters(const std::string& path) {
     }
     return out;
 }
+
+
+std::vector<PointFeature> LoadLabelTeacherPoints(const std::string& path) {
+    std::vector<PointFeature> out;
+    if (path.empty()) return out;
+    std::ifstream f(path);
+    if (!f.is_open()) return out;
+    std::string first;
+    while (f >> first) {
+        if (!first.empty() && first[0] == '#') {
+            std::string rest;
+            std::getline(f, rest);
+            continue;
+        }
+        double x = 0.0, y = 0.0, z = 0.0, weight = 1.0;
+        int class_id = SEM_UNKNOWN;
+        try {
+            x = std::stod(first);
+        } catch (...) {
+            std::string rest;
+            std::getline(f, rest);
+            continue;
+        }
+        if (!(f >> y >> z >> class_id >> weight)) break;
+        std::string rest;
+        std::getline(f, rest);
+        PointFeature pf;
+        pf.p = Eigen::Vector3d(x, y, z);
+        pf.intensity = 0.0f;
+        pf.normal = Eigen::Vector3d(0, 0, 0);
+        pf.label = class_id;
+        pf.weight = std::max(0.0, std::min(1.0, weight));
+        if (class_id == SEM_RAIL_LIKE || class_id == SEM_VERTICAL_STRUCTURE ||
+            class_id == SEM_VEHICLE_LIKE || class_id == SEM_PERSON_LIKE) {
+            out.push_back(pf);
+        }
+    }
+    return out;
+}
 }  // namespace
 
 EdgeCalibrator::EdgeCalibrator(const EdgeCalibratorConfig& config) : config_(config) {
@@ -142,6 +181,14 @@ bool EdgeCalibrator::LoadData() {
     person_weight_ = cv::imread(config_.sam_base + "_person_weight.png", cv::IMREAD_UNCHANGED);
     vehicle_dist_ = cv::imread(config_.sam_base + "_vehicle_dist.png", cv::IMREAD_UNCHANGED);
     vehicle_weight_ = cv::imread(config_.sam_base + "_vehicle_weight.png", cv::IMREAD_UNCHANGED);
+    label_track_dist_ = cv::imread(config_.sam_base + "_label_track_dist.png", cv::IMREAD_UNCHANGED);
+    label_track_weight_ = cv::imread(config_.sam_base + "_label_track_weight.png", cv::IMREAD_UNCHANGED);
+    label_static_dist_ = cv::imread(config_.sam_base + "_label_static_dist.png", cv::IMREAD_UNCHANGED);
+    label_static_weight_ = cv::imread(config_.sam_base + "_label_static_weight.png", cv::IMREAD_UNCHANGED);
+    label_vehicle_dist_ = cv::imread(config_.sam_base + "_label_vehicle_dist.png", cv::IMREAD_UNCHANGED);
+    label_vehicle_weight_ = cv::imread(config_.sam_base + "_label_vehicle_weight.png", cv::IMREAD_UNCHANGED);
+    label_person_dist_ = cv::imread(config_.sam_base + "_label_person_dist.png", cv::IMREAD_UNCHANGED);
+    label_person_weight_ = cv::imread(config_.sam_base + "_label_person_weight.png", cv::IMREAD_UNCHANGED);
 
     // Normalize dist/weight maps to float32 [0,1] when available.
     NormalizeFloatMap(&rail_dist_);
@@ -150,6 +197,14 @@ bool EdgeCalibrator::LoadData() {
     NormalizeFloatMap(&person_weight_);
     NormalizeFloatMap(&vehicle_dist_);
     NormalizeFloatMap(&vehicle_weight_);
+    NormalizeFloatMap(&label_track_dist_);
+    NormalizeFloatMap(&label_track_weight_);
+    NormalizeFloatMap(&label_static_dist_);
+    NormalizeFloatMap(&label_static_weight_);
+    NormalizeFloatMap(&label_vehicle_dist_);
+    NormalizeFloatMap(&label_vehicle_weight_);
+    NormalizeFloatMap(&label_person_dist_);
+    NormalizeFloatMap(&label_person_weight_);
 
     if (edge_dist_.empty() && semantic_map_.empty()) return false;
 
@@ -162,6 +217,14 @@ bool EdgeCalibrator::LoadData() {
     IOUtils::LoadLines3D(config_.lidar_base + "_lines_3d.txt", lines3d_);
     BuildRailSamplePoints();
     object_points_ = LoadObjectClusters(config_.lidar_base + "_object_clusters.txt");
+    if (config_.label_assist_enabled) {
+        const std::string label_path = config_.label_object_points_path.empty()
+            ? (config_.lidar_base + "_label_object_points.txt")
+            : config_.label_object_points_path;
+        label_teacher_points_ = LoadLabelTeacherPoints(label_path);
+        std::cout << "[Info] Label assist enabled: label_teacher_points=" << label_teacher_points_.size()
+                  << ", path=" << label_path << std::endl;
+    }
 
     bool used_default = false;
     if (!LoadCalib(config_.calib_file, K_, R_rect_, P_rect_, &used_default)) return false;
@@ -188,7 +251,8 @@ bool EdgeCalibrator::LoadData() {
               << ", edge_points=" << edge_points_.size()
               << ", lines3d=" << lines3d_.size()
               << ", rail_sample_points=" << rail_sample_points_.size()
-              << ", object_points=" << object_points_.size() << std::endl;
+              << ", object_points=" << object_points_.size()
+              << ", label_teacher_points=" << label_teacher_points_.size() << std::endl;
     return true;
 }
 
@@ -640,6 +704,61 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
         std::cout << "[Debug][Fine] Skip rail residuals (rail_sample_points or rail_dist empty)." << std::endl;
     }
 
+    label_residual_count_ = 0;
+    label_track_residual_count_ = 0;
+    label_object_residual_count_ = 0;
+    if (config_.label_assist_enabled) {
+        auto add_teacher_residual = [&](const PointFeature& src,
+                                        const cv::Mat* dist,
+                                        const cv::Mat* weight_map,
+                                        double class_weight,
+                                        int* counter) {
+            if (!dist || dist->empty() || class_weight <= 0.0 || src.weight <= 0.0) return;
+            PointFeature pt = src;
+            pt.weight = std::max(0.0, std::min(1.0, static_cast<double>(pt.weight))) * class_weight;
+            auto* cost = new WeightedRailEdgeCost(
+                pt,
+                dist,
+                (weight_map && !weight_map->empty()) ? weight_map : nullptr,
+                R_rect_, P_rect_, W_, H_,
+                0.05,
+                0.08);
+            problem.AddResidualBlock(new ceres::AutoDiffCostFunction<WeightedRailEdgeCost, 1, 3, 3>(cost),
+                                     new ceres::HuberLoss(0.05), r_curr_, t_curr_);
+            ++label_residual_count_;
+            if (counter) ++(*counter);
+        };
+
+        if (!rail_sample_points_.empty() && !label_track_dist_.empty() && config_.label_track_weight > 0.0) {
+            const int label_rail_stride = std::max<int>(1, static_cast<int>(rail_sample_points_.size() / 3000));
+            for (size_t i = 0; i < rail_sample_points_.size(); i += label_rail_stride) {
+                PointFeature pt = rail_sample_points_[i];
+                pt.label = SEM_RAIL_LIKE;
+                add_teacher_residual(pt, &label_track_dist_, &label_track_weight_, config_.label_track_weight,
+                                     &label_track_residual_count_);
+            }
+        }
+
+        for (const auto& pt : label_teacher_points_) {
+            if (pt.label == SEM_VERTICAL_STRUCTURE) {
+                add_teacher_residual(pt, &label_static_dist_, &label_static_weight_, config_.label_static_weight,
+                                     &label_object_residual_count_);
+            } else if (pt.label == SEM_VEHICLE_LIKE) {
+                add_teacher_residual(pt, &label_vehicle_dist_, &label_vehicle_weight_, config_.label_vehicle_weight,
+                                     &label_object_residual_count_);
+            } else if (pt.label == SEM_PERSON_LIKE) {
+                add_teacher_residual(pt, &label_person_dist_, &label_person_weight_, config_.label_person_weight,
+                                     &label_object_residual_count_);
+            } else if (pt.label == SEM_RAIL_LIKE) {
+                add_teacher_residual(pt, &label_track_dist_, &label_track_weight_, config_.label_track_weight,
+                                     &label_track_residual_count_);
+            }
+        }
+        std::cout << "[Debug][Fine] Added label teacher residuals: total=" << label_residual_count_
+                  << ", track=" << label_track_residual_count_
+                  << ", object=" << label_object_residual_count_ << std::endl;
+    }
+
     // Translation Prior (防止由于单目深度不可观测导致平移量飞掉)
     double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 5.0);
     const double t_prior_disable_inimage = GetEnvDouble("EDGECALIB_T_PRIOR_DISABLE_INIMAGE_THRESH", 0.03);
@@ -797,6 +916,13 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "object_visible_count: " << last_score_breakdown_.object_visible_count << "\n";
     result_file << "object_mean_dist_visible: " << last_score_breakdown_.object_mean_dist_visible << "\n";
     result_file << "object_mean_weight_visible: " << last_score_breakdown_.object_mean_weight_visible << "\n";
+    result_file << "label_assist_enabled: " << (config_.label_assist_enabled ? 1 : 0) << "\n";
+    result_file << "label_feature_used: " << ((config_.label_assist_enabled && label_residual_count_ > 0) ? 1 : 0) << "\n";
+    result_file << "unsupervised_feature_used: 1\n";
+    result_file << "label_teacher_point_count: " << label_teacher_points_.size() << "\n";
+    result_file << "label_residual_count: " << label_residual_count_ << "\n";
+    result_file << "label_track_residual_count: " << label_track_residual_count_ << "\n";
+    result_file << "label_object_residual_count: " << label_object_residual_count_ << "\n";
     result_file << "semantic_points_used: " << last_score_breakdown_.semantic_points_used << "\n";
     result_file << "optimizer_candidate_count: " << last_score_breakdown_.optimizer_candidate_count << "\n";
     result_file << "optimizer_threads: " << last_score_breakdown_.optimizer_threads << "\n";

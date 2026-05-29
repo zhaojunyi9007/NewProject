@@ -48,7 +48,7 @@ def _line_class_to_railway_semantic_id(mean_probs, semantic_classes):
         SEM_VERTICAL_STRUCTURE: group_prob(["pole", "signal"]),
         SEM_PLATFORM_OR_BUILDING: group_prob(["platform", "building"]),
         SEM_VEHICLE_LIKE: group_prob(["vehicle"]),
-        SEM_PERSON_LIKE if "SEM_PERSON_LIKE" in globals() else 7: group_prob(["person"]),
+        SEM_PERSON_LIKE: group_prob(["person"]),
         SEM_VEGETATION_LIKE: group_prob(["vegetation"]),
     }
     best_id = max(group_scores, key=group_scores.get)

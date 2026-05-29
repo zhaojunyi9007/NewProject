@@ -328,6 +328,7 @@ struct ObjectAttractionStats {
     int visible_count = 0;
     double mean_dist = 0.0;
     double mean_weight = 0.0;
+    double weighted_score = 0.0;
 };
 
 double ObjectAttractionScoreNorm(const std::vector<PointFeature>& points,
@@ -341,6 +342,8 @@ double ObjectAttractionScoreNorm(const std::vector<PointFeature>& points,
                                  int H,
                                  const Eigen::Matrix3d& R,
                                  const Eigen::Vector3d& t,
+                                 double vehicle_object_weight,
+                                 double person_object_weight,
                                  ObjectAttractionStats* stats) {
     ObjectAttractionStats st;
     if (points.empty()) {
@@ -352,8 +355,12 @@ double ObjectAttractionScoreNorm(const std::vector<PointFeature>& points,
     double weight_sum = 0.0;
     for (const auto& pt : points) {
         const bool is_person = (pt.label == SEM_PERSON_LIKE);
+        const bool is_vehicle = (pt.label == SEM_VEHICLE_LIKE);
+        if (!is_person && !is_vehicle) continue;
         const cv::Mat& dist_map = is_person ? person_dist : vehicle_dist;
         const cv::Mat& weight_map = is_person ? person_weight : vehicle_weight;
+        const double class_weight = std::max(0.0, is_person ? person_object_weight : vehicle_object_weight);
+        if (class_weight <= 0.0) continue;
         if (dist_map.empty() || weight_map.empty()) continue;
         int u = 0, v = 0;
         if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) continue;
@@ -364,7 +371,9 @@ double ObjectAttractionScoreNorm(const std::vector<PointFeature>& points,
         dist_value = std::min(std::max(dist_value, 0.0f), 1.0f);
         image_weight = std::min(std::max(image_weight, 0.0f), 1.0f);
         if (image_weight <= 1e-4f) continue;
-        total += (1.0 - static_cast<double>(dist_value)) * static_cast<double>(image_weight) * pt.weight;
+        const double evidence = (1.0 - static_cast<double>(dist_value)) * static_cast<double>(image_weight) * pt.weight;
+        total += evidence;
+        st.weighted_score += class_weight * evidence;
         dist_sum += static_cast<double>(dist_value);
         weight_sum += static_cast<double>(image_weight);
         st.visible_count++;
@@ -372,6 +381,7 @@ double ObjectAttractionScoreNorm(const std::vector<PointFeature>& points,
     const double n = static_cast<double>(std::max<size_t>(1, points.size()));
     st.mean_dist = st.visible_count > 0 ? dist_sum / static_cast<double>(st.visible_count) : 1.0;
     st.mean_weight = st.visible_count > 0 ? weight_sum / static_cast<double>(st.visible_count) : 0.0;
+    st.weighted_score /= n;
     if (stats) *stats = st;
     return total / n;
 }
@@ -409,8 +419,8 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
     TotalScoreBreakdown bd;
     bd.semantic_points_used = static_cast<double>(lidar_semantic_points.size());
 
-    // Rail is the hard oracle cue. Score it first so obviously bad candidates can
-    // skip the expensive full semantic distribution pass.
+    // Rail is still scored first for diagnostics, but low rail visibility no longer
+    // short-circuits semantic, edge, or object scoring.
     bd.rail_score_norm = 0.0;
     if (!rail_dist.empty() && !rail_points.empty()) {
         RailAttractionStats rail_stats;
@@ -467,17 +477,17 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
         ObjectAttractionStats obj_stats;
         bd.object_score_norm = ObjectAttractionScoreNorm(
             object_points, person_dist, person_weight, vehicle_dist, vehicle_weight,
-            R_rect, P_rect, W, H, R, t, &obj_stats);
+            R_rect, P_rect, W, H, R, t, w_vehicle_object, w_person_object, &obj_stats);
         bd.object_sample_count = static_cast<double>(object_points.size());
         bd.object_visible_count = static_cast<double>(obj_stats.visible_count);
         bd.object_mean_dist_visible = obj_stats.mean_dist;
         bd.object_mean_weight_visible = obj_stats.mean_weight;
         bd.object_term_used = (!person_dist.empty() || !vehicle_dist.empty()) ? 1.0 : 0.0;
+        bd.object_score = obj_stats.weighted_score;
     }
 
     bd.edge_score = w_edge * bd.edge_score_norm;
-    const double obj_w = std::max(0.0, w_vehicle_object) + std::max(0.0, w_person_object);
-    bd.object_score = obj_w * bd.object_score_norm;
+    bd.object_score = bd.object_term_used > 0.0 ? bd.object_score : 0.0;
     bd.total_score = w_semantic_js * bd.semantic_js_score +
                      w_semantic_hist * bd.semantic_hist_score +
                      bd.edge_score + bd.rail_score + bd.object_score;

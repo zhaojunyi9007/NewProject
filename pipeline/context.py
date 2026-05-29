@@ -179,6 +179,7 @@ def apply_cli_semantic_overrides(config: Dict[str, Any], result_dir: str | None,
             "calib_output_dir": "calibration",
             "visual_output_dir": "visualization",
             "image_features_output_dir": "image_features",
+            "label_features_output_dir": "label_features",
             "bev_init_output_dir": "bev_init",
             "refinement_output_dir": "refinement",
         }
@@ -209,6 +210,7 @@ def resolve_stage_paths(config: Dict[str, Any]) -> Dict[str, str]:
         "calib": _abs("calib_output_dir", "calibration"),
         "visual": _abs("visual_output_dir", "visualization"),
         "image_features": _abs("image_features_output_dir", "image_features"),
+        "label_features": _abs("label_features_output_dir", "label_features"),
         "bev_init": _abs("bev_init_output_dir", "bev_init"),
         "refinement": _abs("refinement_output_dir", "refinement"),
     }

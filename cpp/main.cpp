@@ -18,6 +18,8 @@ int main(int argc, char** argv) {
                "[--output_file P] [--history_file P]\n"
             << "            [--semantic_probs P] [--lidar_semantic_points P] [--init_pose_from_bev P]\n"
             << "            [--semantic_js_weight X] [--histogram_weight X] [--edge_weight X] [--rail_weight X]\n"
+            << "            [--label_assist_enabled 0|1] [--label_object_points P]\n"
+            << "            [--label_track_weight X] [--label_static_weight X] [--label_vehicle_weight X] [--label_person_weight X]\n"
             << "            [--lidar_semantic_max_points N]\n"
             << "            [--rail_low_visible_policy zero|penalty] [--min_rail_visible_count N]\n"
             << "            [--min_rail_visible_ratio X] [--rail_low_visible_penalty X]\n"
@@ -83,6 +85,12 @@ int main(int argc, char** argv) {
             else if (a == "--rail_weight" && need(i)) config.rail_weight = std::atof(argv[++i]);
             else if (a == "--vehicle_object_weight" && need(i)) config.vehicle_object_weight = std::atof(argv[++i]);
             else if (a == "--person_object_weight" && need(i)) config.person_object_weight = std::atof(argv[++i]);
+            else if (a == "--label_assist_enabled" && need(i)) config.label_assist_enabled = (std::atoi(argv[++i]) != 0);
+            else if (a == "--label_object_points" && need(i)) config.label_object_points_path = argv[++i];
+            else if (a == "--label_track_weight" && need(i)) config.label_track_weight = std::atof(argv[++i]);
+            else if (a == "--label_static_weight" && need(i)) config.label_static_weight = std::atof(argv[++i]);
+            else if (a == "--label_vehicle_weight" && need(i)) config.label_vehicle_weight = std::atof(argv[++i]);
+            else if (a == "--label_person_weight" && need(i)) config.label_person_weight = std::atof(argv[++i]);
             else if (a == "--lidar_semantic_max_points" && need(i)) config.lidar_semantic_max_points = std::atoi(argv[++i]);
             else if (a == "--stratified_semantic_sampling" && need(i)) config.stratified_semantic_sampling = (std::atoi(argv[++i]) != 0);
             else if (a == "--semantic_sample_budget_rail" && need(i)) config.semantic_sample_budget_rail = std::atoi(argv[++i]);
