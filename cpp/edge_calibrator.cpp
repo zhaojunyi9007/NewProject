@@ -416,9 +416,15 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
     best_score_ = ComputeTotalCalibrationScoreSemanticDominant(edge_points_, edge_dist_, edge_weight_, lines3d_,
                                                               rail_sample_points_, rail_dist_, rail_weight_,
                                                               object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
+                                                              label_teacher_points_, label_track_dist_, label_track_weight_,
+                                                              label_static_dist_, label_static_weight_,
+                                                              label_vehicle_dist_, label_vehicle_weight_,
+                                                              label_person_dist_, label_person_weight_,
                                                               semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R0, t0,
                                                               config_.semantic_js_weight, config_.histogram_weight,
                                                               w_edge, w_rail, config_.vehicle_object_weight, config_.person_object_weight,
+                                                              config_.label_track_weight, config_.label_static_weight,
+                                                              config_.label_vehicle_weight, config_.label_person_weight,
                                                               sem_cfg_, &last_score_breakdown_);
     PrintProjectionStats("initial", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 
@@ -455,9 +461,15 @@ void EdgeCalibrator::PerformSemanticCoarseOptimizationIfEnabled() {
         scores[static_cast<size_t>(i)] = ComputeTotalCalibrationScoreSemanticDominant(
             edge_points_, edge_dist_, edge_weight_, lines3d_, rail_sample_points_, rail_dist_, rail_weight_,
             object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
+            label_teacher_points_, label_track_dist_, label_track_weight_,
+            label_static_dist_, label_static_weight_,
+            label_vehicle_dist_, label_vehicle_weight_,
+            label_person_dist_, label_person_weight_,
             semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R_try, t_try,
             config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail,
-            config_.vehicle_object_weight, config_.person_object_weight, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
+            config_.vehicle_object_weight, config_.person_object_weight,
+            config_.label_track_weight, config_.label_static_weight,
+            config_.label_vehicle_weight, config_.label_person_weight, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
     }
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
     double best_t[3] = {t_curr_[0], t_curr_[1], t_curr_[2]};
@@ -523,9 +535,15 @@ void EdgeCalibrator::PerformSemanticFineOptimizationIfEnabled() {
         scores[static_cast<size_t>(i)] = ComputeTotalCalibrationScoreSemanticDominant(
             edge_points_, edge_dist_, edge_weight_, lines3d_, rail_sample_points_, rail_dist_, rail_weight_,
             object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
+            label_teacher_points_, label_track_dist_, label_track_weight_,
+            label_static_dist_, label_static_weight_,
+            label_vehicle_dist_, label_vehicle_weight_,
+            label_person_dist_, label_person_weight_,
             semantic_points_, semantic_probs_, R_rect_, P_rect_, W_, H_, R_try, t_try,
             config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail,
-            config_.vehicle_object_weight, config_.person_object_weight, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
+            config_.vehicle_object_weight, config_.person_object_weight,
+            config_.label_track_weight, config_.label_static_weight,
+            config_.label_vehicle_weight, config_.label_person_weight, sem_cfg_, &breakdowns[static_cast<size_t>(i)]);
     }
 
     double best_r[3] = {r_curr_[0], r_curr_[1], r_curr_[2]};
@@ -848,10 +866,16 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
             edge_points_, edge_dist_, edge_weight_, lines3d_,
             rail_sample_points_, rail_dist_, rail_weight_,
             object_points_, person_dist_, person_weight_, vehicle_dist_, vehicle_weight_,
+            label_teacher_points_, label_track_dist_, label_track_weight_,
+            label_static_dist_, label_static_weight_,
+            label_vehicle_dist_, label_vehicle_weight_,
+            label_person_dist_, label_person_weight_,
             semantic_points_, semantic_probs_,
             R_rect_, P_rect_, W_, H_, R_eval, t_eval,
             config_.semantic_js_weight, config_.histogram_weight, w_edge, w_rail,
-            config_.vehicle_object_weight, config_.person_object_weight, sem_cfg_, &bd);
+            config_.vehicle_object_weight, config_.person_object_weight,
+            config_.label_track_weight, config_.label_static_weight,
+            config_.label_vehicle_weight, config_.label_person_weight, sem_cfg_, &bd);
 
         double rail_sum = 0.0, vert_sum = 0.0;
         int rail_cnt = 0, vert_cnt = 0;
@@ -916,6 +940,23 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "object_visible_count: " << last_score_breakdown_.object_visible_count << "\n";
     result_file << "object_mean_dist_visible: " << last_score_breakdown_.object_mean_dist_visible << "\n";
     result_file << "object_mean_weight_visible: " << last_score_breakdown_.object_mean_weight_visible << "\n";
+    result_file << "label_teacher_score: " << last_score_breakdown_.label_teacher_score << "\n";
+    result_file << "label_teacher_score_norm: " << last_score_breakdown_.label_teacher_score_norm << "\n";
+    result_file << "label_track_score_norm: " << last_score_breakdown_.label_track_score_norm << "\n";
+    result_file << "label_static_score_norm: " << last_score_breakdown_.label_static_score_norm << "\n";
+    result_file << "label_vehicle_score_norm: " << last_score_breakdown_.label_vehicle_score_norm << "\n";
+    result_file << "label_person_score_norm: " << last_score_breakdown_.label_person_score_norm << "\n";
+    result_file << "label_track_visible_count: " << last_score_breakdown_.label_track_visible_count << "\n";
+    result_file << "label_static_visible_count: " << last_score_breakdown_.label_static_visible_count << "\n";
+    result_file << "label_vehicle_visible_count: " << last_score_breakdown_.label_vehicle_visible_count << "\n";
+    result_file << "label_person_visible_count: " << last_score_breakdown_.label_person_visible_count << "\n";
+    result_file << "label_teacher_eligible_count: " << last_score_breakdown_.label_teacher_eligible_count << "\n";
+    result_file << "label_teacher_visible_count: " << last_score_breakdown_.label_teacher_visible_count << "\n";
+    result_file << "label_teacher_visible_ratio: " << last_score_breakdown_.label_teacher_visible_ratio << "\n";
+    result_file << "label_track_eligible_count: " << last_score_breakdown_.label_track_eligible_count << "\n";
+    result_file << "label_static_eligible_count: " << last_score_breakdown_.label_static_eligible_count << "\n";
+    result_file << "label_vehicle_eligible_count: " << last_score_breakdown_.label_vehicle_eligible_count << "\n";
+    result_file << "label_person_eligible_count: " << last_score_breakdown_.label_person_eligible_count << "\n";
     result_file << "label_assist_enabled: " << (config_.label_assist_enabled ? 1 : 0) << "\n";
     result_file << "label_feature_used: " << ((config_.label_assist_enabled && label_residual_count_ > 0) ? 1 : 0) << "\n";
     result_file << "unsupervised_feature_used: 1\n";

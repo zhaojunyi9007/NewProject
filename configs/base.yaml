@@ -273,6 +273,9 @@ label_assist:
   vehicle_weight: 0.4
   person_weight: 0.2
   label_json: ""
+  teacher_visible_xmax_m: 120.0
+  teacher_image_bbox_padding_m: 8.0
+  use_sam_refine: true
 
 semantic_calib:
   enabled: true
@@ -285,6 +288,14 @@ semantic_calib:
   rail_weight: 1.2
   vehicle_object_weight: 0.8
   person_object_weight: 0.5
+  min_label_teacher_score: 0.20
+  min_label_track_visible_count: 50
+  min_label_residual_count_for_gate: 50
+  label_assist_requires_label_gate: true
+  use_rejected_bev_as_label_candidate: false
+  enable_init_candidate_scoring: true
+  max_label_assisted_pose_jump_m: 1.0
+  max_label_assisted_yaw_jump_deg: 3.0
   allow_object_or_edge_to_pass_rail_gate: true
   min_final_object_visible_count: 1
   min_final_semantic_hist_similarity: 0.05

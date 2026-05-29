@@ -135,6 +135,25 @@ struct ScoreBreakdown {
     double semantic_term_used = 0.0;
     double edge_term_used = 0.0;
     double object_term_used = 0.0;
+    double label_teacher_score_norm = 0.0;
+    double label_teacher_score = 0.0;
+    double label_track_score_norm = 0.0;
+    double label_static_score_norm = 0.0;
+    double label_vehicle_score_norm = 0.0;
+    double label_person_score_norm = 0.0;
+    double label_track_visible_count = 0.0;
+    double label_static_visible_count = 0.0;
+    double label_vehicle_visible_count = 0.0;
+    double label_person_visible_count = 0.0;
+    double label_teacher_point_count = 0.0;
+    double label_teacher_eligible_count = 0.0;
+    double label_teacher_visible_count = 0.0;
+    double label_teacher_visible_ratio = 0.0;
+    double label_track_eligible_count = 0.0;
+    double label_static_eligible_count = 0.0;
+    double label_vehicle_eligible_count = 0.0;
+    double label_person_eligible_count = 0.0;
+    double label_term_used = 0.0;
     double rail_penalty_applied = 0.0;
 
     // Phase A3 keys (observability-related)

@@ -269,6 +269,8 @@ def run(context: RuntimeContext) -> None:
 
     last_pose = None
     context.bev_pose_by_frame.clear()
+    if hasattr(context, "bev_candidate_by_frame"):
+        context.bev_candidate_by_frame.clear()
     for frame_id in context.frame_ids:
         fid = f"{frame_id:010d}"
         frame_dir = os.path.join(out_root, fid)
@@ -357,6 +359,7 @@ def run(context: RuntimeContext) -> None:
                 pass
         if os.path.isfile(after_path):
             parsed = _parse_pose_after_bev(after_path)
+            parsed_candidate = parsed
             min_rail_score = float(
                 bev_cfg.get("oracle_min_rail_score_to_apply", bev_cfg.get("min_rail_score_to_apply", 0.01))
                 if oracle_rail
@@ -388,6 +391,8 @@ def run(context: RuntimeContext) -> None:
             if parsed:
                 last_pose = parsed
                 context.bev_pose_by_frame[frame_id] = parsed
+                if hasattr(context, "bev_candidate_by_frame"):
+                    context.bev_candidate_by_frame[frame_id] = {"pose": parsed, "source": "bev_accepted", "path": after_path, "reject_reason": ""}
                 breakdown["delta_applied"] = True
                 breakdown["reject_reason"] = ""
                 print(f"  [BEV] 帧 {fid} BEV delta 已应用：rail_score={actual_rail_score:.4f} >= {min_rail_score}")
@@ -398,6 +403,8 @@ def run(context: RuntimeContext) -> None:
                     f"  [BEV] 帧 {fid} BEV delta 被拒绝：reason={reject_reason}, "
                     f"rail_score={actual_rail_score:.6f}, min_rail_score_to_apply={min_rail_score}，保留原始 init_pose"
                 )
+                if parsed_candidate and hasattr(context, "bev_candidate_by_frame"):
+                    context.bev_candidate_by_frame[frame_id] = {"pose": parsed_candidate, "source": "bev_raw_rejected", "path": after_path, "reject_reason": reject_reason}
                 breakdown["delta_applied"] = False
                 breakdown["reject_reason"] = reject_reason
             breakdown.update(export_dbg)

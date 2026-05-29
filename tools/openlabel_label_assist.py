@@ -128,21 +128,99 @@ def _type_group(typ: str):
     return "other"
 
 
+def _quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    n = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    if n <= 1e-9:
+        return np.eye(3, dtype=np.float64)
+    qx, qy, qz, qw = qx/n, qy/n, qz/n, qw/n
+    return np.asarray([
+        [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw), 2*(qx*qz + qy*qw)],
+        [2*(qx*qy + qz*qw), 1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw)],
+        [2*(qx*qz - qy*qw), 2*(qy*qz + qx*qw), 1 - 2*(qx*qx + qy*qy)],
+    ], dtype=np.float64)
+
+
 def _cuboid_samples(cuboid_val):
     if not cuboid_val or len(cuboid_val) < 10:
         return []
-    x,y,z = [float(v) for v in cuboid_val[:3]]
-    sx,sy,sz = [abs(float(v)) for v in cuboid_val[7:10]]
-    # OSDaR calibration labels in this sequence use identity-like rotations for relevant objects.
-    # Use axis-aligned samples as robust teacher points; exact box orientation is not required for attraction residuals.
-    samples=[(x,y,z)]
-    for dx in (-0.5,0.5):
-        for dy in (-0.5,0.5):
-            for dz in (-0.5,0.5):
-                samples.append((x+dx*sx, y+dy*sy, z+dz*sz))
-    samples.append((x,y,z+0.5*sz))
-    samples.append((x,y,z-0.5*sz))
+    center = np.asarray([float(v) for v in cuboid_val[:3]], dtype=np.float64)
+    qx, qy, qz, qw = [float(v) for v in cuboid_val[3:7]]
+    sx, sy, sz = [abs(float(v)) for v in cuboid_val[7:10]]
+    rot = _quat_to_rot(qx, qy, qz, qw)
+    local = [np.zeros(3, dtype=np.float64)]
+    for dx in (-0.5, 0.5):
+        for dy in (-0.5, 0.5):
+            for dz in (-0.5, 0.5):
+                local.append(np.asarray([dx*sx, dy*sy, dz*sz], dtype=np.float64))
+    local.append(np.asarray([0.0, 0.0, 0.5*sz], dtype=np.float64))
+    local.append(np.asarray([0.0, 0.0, -0.5*sz], dtype=np.float64))
+    samples = []
+    for offset in local:
+        p = center + rot @ offset
+        samples.append((float(p[0]), float(p[1]), float(p[2])))
     return samples
+
+
+def _load_pcd_xyz(path: str | None):
+    if not path or not os.path.isfile(path):
+        return None
+    points=[]
+    data=False
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                line=line.strip()
+                if not data:
+                    if line.lower().startswith('data'):
+                        data=True
+                    continue
+                if not line:
+                    continue
+                parts=line.split()
+                if len(parts) < 3:
+                    continue
+                points.append((float(parts[0]), float(parts[1]), float(parts[2])))
+    except Exception:
+        return None
+    return points
+
+
+def _vec_samples_from_indices(vec_val, pcd_xyz, max_points: int = 1200):
+    if pcd_xyz is None or not vec_val:
+        return []
+    out=[]
+    step=max(1, int(math.ceil(len(vec_val)/max(1,max_points))))
+    for raw in vec_val[::step]:
+        try:
+            idx=int(raw)
+        except Exception:
+            continue
+        if 0 <= idx < len(pcd_xyz):
+            out.append(pcd_xyz[idx])
+    return out
+
+
+def _vec_samples(vec_val, step_m: float = 0.5):
+    if not vec_val or len(vec_val) < 4:
+        return []
+    vals = [float(v) for v in vec_val]
+    pts = []
+    if len(vals) >= 6:
+        a = np.asarray(vals[:3], dtype=np.float64)
+        b = np.asarray(vals[3:6], dtype=np.float64)
+    else:
+        a = np.asarray([vals[0], vals[1], 0.0], dtype=np.float64)
+        b = np.asarray([vals[2], vals[3], 0.0], dtype=np.float64)
+    d = b - a
+    length = float(np.linalg.norm(d))
+    if length <= 1e-9:
+        return [(float(a[0]), float(a[1]), float(a[2]))]
+    n = max(2, int(math.floor(length / max(1e-3, step_m))) + 1)
+    for i in range(n):
+        alpha = 0.0 if n <= 1 else i / float(n - 1)
+        p = a + alpha * d
+        pts.append((float(p[0]), float(p[1]), float(p[2])))
+    return pts
 
 
 def _iou(a: np.ndarray, b: np.ndarray):
@@ -151,7 +229,7 @@ def _iou(a: np.ndarray, b: np.ndarray):
     return inter/uni if uni>0 else 0.0
 
 
-def export_label_assist(label_json: str, frame_id: int, image_path: str, image_sensor: str, sam_base: str, frame_dir: str, lidar_base: str|None=None):
+def export_label_assist(label_json: str, frame_id: int, image_path: str, image_sensor: str, sam_base: str, frame_dir: str, lidar_base: str|None=None, lidar_pcd_path: str|None=None, teacher_visible_xmax_m: float = 120.0, teacher_image_bbox_padding_m: float = 8.0, use_sam_refine: bool = False):
     image=cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"Cannot read image: {image_path}")
@@ -159,11 +237,30 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
     data=json.loads(Path(label_json).read_text(encoding="utf-8"))
     openlabel=data.get("openlabel", data)
     rows=_extract_frame(openlabel, frame_id, image_sensor)
+    pcd_xyz=_load_pcd_xyz(lidar_pcd_path)
     masks={k:np.zeros((h,w), dtype=np.uint8) for k in ["person","vehicle","track","static"]}
     paired_counts={k:0 for k in ["person","vehicle","track","static"]}
     bbox_counts={k:0 for k in ["person","vehicle","track","static"]}
     poly_counts={k:0 for k in ["person","vehicle","track","static"]}
     point_lines=["# x y z class_id weight object_id geometry_role\n"]
+    point_counts={k:0 for k in ["track","static","vehicle","person"]}
+    raw_point_counts={k:0 for k in ["track","static","vehicle","person"]}
+    teacher_visible_xmax_m = float(teacher_visible_xmax_m)
+    teacher_image_bbox_padding_m = float(teacher_image_bbox_padding_m)
+
+    def add_teacher_point(group: str, x: float, y: float, z: float, cid: int, weight: float, object_id: str, role: str) -> None:
+        if group in raw_point_counts:
+            raw_point_counts[group] += 1
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+            return
+        if x < 0.0:
+            return
+        if teacher_visible_xmax_m > 0.0 and x > teacher_visible_xmax_m:
+            return
+        point_lines.append(f"{x:.6f} {y:.6f} {z:.6f} {cid} {weight:.6f} {object_id} {role}\n")
+        if group in point_counts:
+            point_counts[group]+=1
+
     label_objects=[]
     for rec in rows:
         group=_type_group(rec["type"])
@@ -190,7 +287,12 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
             weight={"track":1.0,"static":0.9,"vehicle":0.45,"person":0.35}.get(group,0.5)
             for ci,c in enumerate(rec.get("lidar_cuboid", [])):
                 for si,(x,y,z) in enumerate(_cuboid_samples(c.get("val"))):
-                    point_lines.append(f"{x:.6f} {y:.6f} {z:.6f} {cid} {weight:.6f} {rec['object_id']} {group}_cuboid{ci}_sample{si}\n")
+                    add_teacher_point(group, x, y, z, cid, weight, rec['object_id'], f"{group}_cuboid{ci}_sample{si}")
+            if group == "track":
+                for vi,v in enumerate(rec.get("lidar_vec", [])):
+                    samples = _vec_samples_from_indices(v.get("val"), pcd_xyz) if pcd_xyz is not None else _vec_samples(v.get("val"))
+                    for si,(x,y,z) in enumerate(samples):
+                        add_teacher_point(group, x, y, z, cid, weight, rec['object_id'], f"{group}_vec{vi}_sample{si}")
         label_objects.append(rec)
     os.makedirs(os.path.dirname(sam_base), exist_ok=True)
     os.makedirs(frame_dir, exist_ok=True)
@@ -207,7 +309,29 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
         "poly_counts": poly_counts,
         "label_feature_used": True,
         "unsupervised_feature_used": True,
+        "label_track_point_count": point_counts["track"],
+        "label_static_point_count": point_counts["static"],
+        "label_vehicle_point_count": point_counts["vehicle"],
+        "label_person_point_count": point_counts["person"],
+        "label_teacher_raw_point_counts": raw_point_counts,
+        "label_teacher_eligible_point_counts": point_counts,
+        "label_teacher_eligible_count": int(sum(point_counts.values())),
+        "label_teacher_visible_xmax_m": teacher_visible_xmax_m,
+        "label_teacher_image_bbox_padding_m": teacher_image_bbox_padding_m,
+        "label_sam_refine_requested": bool(use_sam_refine),
     }
+    coords=[]
+    for line in point_lines[1:]:
+        parts=line.split()
+        if len(parts) >= 3:
+            coords.append((float(parts[0]), float(parts[1]), float(parts[2])))
+    if coords:
+        arr=np.asarray(coords, dtype=np.float64)
+        summary["label_teacher_bbox_lidar_m"]={
+            "xmin": float(arr[:,0].min()), "xmax": float(arr[:,0].max()),
+            "ymin": float(arr[:,1].min()), "ymax": float(arr[:,1].max()),
+            "zmin": float(arr[:,2].min()), "zmax": float(arr[:,2].max()),
+        }
     for group,mask in masks.items():
         weight=(mask.astype(np.float32)/255.0)
         if group in ("person","vehicle"):
@@ -257,8 +381,12 @@ def main():
     ap.add_argument("--sam-base", required=True)
     ap.add_argument("--frame-dir", required=True)
     ap.add_argument("--lidar-base", default="")
+    ap.add_argument("--lidar-pcd", default="")
+    ap.add_argument("--teacher-visible-xmax-m", type=float, default=120.0)
+    ap.add_argument("--teacher-image-bbox-padding-m", type=float, default=8.0)
+    ap.add_argument("--use-sam-refine", action="store_true")
     args=ap.parse_args()
-    summary=export_label_assist(args.label_json,args.frame_id,args.image,args.image_sensor,args.sam_base,args.frame_dir,args.lidar_base or None)
+    summary=export_label_assist(args.label_json,args.frame_id,args.image,args.image_sensor,args.sam_base,args.frame_dir,args.lidar_base or None,args.lidar_pcd or None,args.teacher_visible_xmax_m,args.teacher_image_bbox_padding_m,args.use_sam_refine)
     print(json.dumps(summary, ensure_ascii=False))
 
 if __name__ == "__main__":

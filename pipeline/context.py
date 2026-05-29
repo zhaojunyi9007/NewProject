@@ -26,6 +26,7 @@ class RuntimeContext:
     current_pose_init: Any = None
     current_pose_bev: Any = None
     bev_pose_by_frame: Dict[int, Any] = field(default_factory=dict)
+    bev_candidate_by_frame: Dict[int, Any] = field(default_factory=dict)
     current_pose_semantic: Any = None
     current_pose_refined: Any = None
     frame_bundle_ids: Optional[List[int]] = None

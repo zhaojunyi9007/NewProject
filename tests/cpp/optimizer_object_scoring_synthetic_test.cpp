@@ -46,6 +46,8 @@ int main() {
     std::vector<Line3D> lines;
     std::vector<SemanticPointRecord> semantic_points;
     SemanticProbMaps semantic_probs;
+    std::vector<PointFeature> empty_points;
+    cv::Mat empty_map;
 
     SemanticScoringConfig cfg;
     cfg.rail_early_reject_enabled = true;
@@ -60,15 +62,17 @@ int main() {
     const double good_score = ComputeTotalCalibrationScoreSemanticDominant(
         edge_points, edge_dist, edge_weight, lines, rail_points, rail_dist, rail_weight,
         object_points, cv::Mat{}, cv::Mat{}, vehicle_dist, vehicle_weight,
+        empty_points, empty_map, empty_map, empty_map, empty_map, empty_map, empty_map, empty_map, empty_map,
         semantic_points, semantic_probs, R_rect, P, W, H, R, Eigen::Vector3d(0, 0, 0),
-        1.0, 1.0, 0.1, 0.1, 0.8, 0.5, cfg, &good);
+        1.0, 1.0, 0.1, 0.1, 0.8, 0.5, 0.0, 0.0, 0.0, 0.0, cfg, &good);
 
     TotalScoreBreakdown bad;
     const double bad_score = ComputeTotalCalibrationScoreSemanticDominant(
         edge_points, edge_dist, edge_weight, lines, rail_points, rail_dist, rail_weight,
         object_points, cv::Mat{}, cv::Mat{}, vehicle_dist, vehicle_weight,
+        empty_points, empty_map, empty_map, empty_map, empty_map, empty_map, empty_map, empty_map, empty_map,
         semantic_points, semantic_probs, R_rect, P, W, H, R, Eigen::Vector3d(10, 0, 0),
-        1.0, 1.0, 0.1, 0.1, 0.8, 0.5, cfg, &bad);
+        1.0, 1.0, 0.1, 0.1, 0.8, 0.5, 0.0, 0.0, 0.0, 0.0, cfg, &bad);
 
     assert(good.rail_early_reject_applied == 1.0);
     assert(good.object_term_used == 1.0);

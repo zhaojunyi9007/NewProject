@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -77,6 +78,25 @@ def _parse_calib_pose(path: str):
     return {"rvec": r, "tvec": t}
 
 
+def _angle_axis_delta_deg(a: list[float], b: list[float]) -> float:
+    # Conservative approximation; sufficient as a gate/debug jump metric for small pose deltas.
+    if len(a) != 3 or len(b) != 3:
+        return 0.0
+    return math.sqrt(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3))) * 180.0 / math.pi
+
+
+def _add_pose_jump_debug(breakdown: dict, pose_out: dict | None, init_r: list[float], init_t: list[float]) -> None:
+    if not pose_out:
+        return
+    r = pose_out.get("rvec") or []
+    t = pose_out.get("tvec") or []
+    if len(r) == 3 and len(init_r) == 3:
+        breakdown["rotation_jump_from_initial_deg"] = _angle_axis_delta_deg(r, init_r)
+        breakdown["yaw_jump_from_initial_deg"] = abs(float(r[2]) - float(init_r[2])) * 180.0 / math.pi
+    if len(t) == 3 and len(init_t) == 3:
+        breakdown["pose_jump_from_initial_m"] = math.sqrt(sum((float(t[i]) - float(init_t[i])) ** 2 for i in range(3)))
+
+
 def _load_json_dict(path: str) -> dict:
     if not path or not os.path.isfile(path):
         return {}
@@ -86,6 +106,253 @@ def _load_json_dict(path: str) -> dict:
         return obj if isinstance(obj, dict) else {}
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def _read_label_teacher_points(path: str, xmax_m: float = 0.0) -> list[tuple[float, float, float, int, float]]:
+    out: list[tuple[float, float, float, int, float]] = []
+    if not path or not os.path.isfile(path):
+        return out
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 5:
+                continue
+            try:
+                x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                cls = int(parts[3])
+                weight = float(parts[4])
+            except ValueError:
+                continue
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+                continue
+            if x < 0.0:
+                continue
+            if xmax_m > 0.0 and x > xmax_m:
+                continue
+            out.append((x, y, z, cls, max(0.0, min(1.0, weight))))
+    return out
+
+
+def _read_xyz_points(path: str, limit: int = 4000) -> list[tuple[float, float, float]]:
+    pts: list[tuple[float, float, float]] = []
+    if not path or not os.path.isfile(path):
+        return pts
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 3:
+                continue
+            try:
+                pts.append((float(parts[0]), float(parts[1]), float(parts[2])))
+            except ValueError:
+                continue
+            if len(pts) >= limit:
+                break
+    return pts
+
+
+def _load_u16_float_map(path: str):
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    m = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if m is None:
+        return None
+    m = m.astype(np.float32)
+    if m.max() > 1.5:
+        m /= 65535.0
+    return np.clip(m, 0.0, 1.0)
+
+
+def _project_xyz(p: tuple[float, float, float], rvec: list[float], tvec: list[float], R_rect, P_rect, width: int, height: int):
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    r = np.asarray(rvec, dtype=np.float64).reshape(3, 1)
+    R, _ = cv2.Rodrigues(r)
+    t = np.asarray(tvec, dtype=np.float64).reshape(3)
+    xyz = np.asarray(p, dtype=np.float64).reshape(3)
+    pc = R @ xyz + t
+    pr = R_rect @ pc
+    if pr[2] <= 1e-6:
+        return None
+    uvw = P_rect @ np.array([pr[0], pr[1], pr[2], 1.0], dtype=np.float64)
+    if abs(uvw[2]) <= 1e-9:
+        return None
+    u = int(round(float(uvw[0] / uvw[2])))
+    v = int(round(float(uvw[1] / uvw[2])))
+    if u < 0 or v < 0 or u >= width or v >= height:
+        return None
+    return u, v
+
+
+def _pose_jump_values(rvec: list[float], tvec: list[float], init_r: list[float], init_t: list[float]) -> tuple[float, float]:
+    pose_jump = math.sqrt(sum((float(tvec[i]) - float(init_t[i])) ** 2 for i in range(3))) if len(tvec) == 3 and len(init_t) == 3 else 0.0
+    yaw_jump = abs(float(rvec[2]) - float(init_r[2])) * 180.0 / math.pi if len(rvec) == 3 and len(init_r) == 3 else 0.0
+    return pose_jump, yaw_jump
+
+
+def _clip_pose_to_label_gate(pose: dict, init_r: list[float], init_t: list[float], sem_cfg: dict) -> dict | None:
+    r = list(pose.get("rvec") or [])
+    t = list(pose.get("tvec") or [])
+    if len(r) != 3 or len(t) != 3:
+        return None
+    max_t = float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))
+    max_yaw = float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0)) * math.pi / 180.0
+    dt = [float(t[i]) - float(init_t[i]) for i in range(3)]
+    norm = math.sqrt(sum(x * x for x in dt))
+    if max_t > 0.0 and norm > max_t:
+        scale = max_t / max(norm, 1e-9)
+        t = [float(init_t[i]) + dt[i] * scale for i in range(3)]
+    r = [float(x) for x in r]
+    dyaw = r[2] - float(init_r[2])
+    if max_yaw > 0.0 and abs(dyaw) > max_yaw:
+        r[2] = float(init_r[2]) + math.copysign(max_yaw, dyaw)
+    return {"rvec": r, "tvec": t}
+
+
+def _score_initial_pose_candidate(name: str, pose: dict, init_r: list[float], init_t: list[float], feature_base: str, sam_base: str, ds, sem_cfg: dict, label_cfg: dict) -> dict:
+    r = list(pose.get("rvec") or [])
+    t = list(pose.get("tvec") or [])
+    out = {"source": name, "label_teacher_score": 0.0, "label_track_visible_count": 0, "label_teacher_visible_ratio": 0.0, "edge_in_image_ratio": 0.0, "selection_score": -1e9}
+    if len(r) != 3 or len(t) != 3:
+        out["invalid"] = "bad_pose"
+        return out
+    pose_jump, yaw_jump = _pose_jump_values(r, t, init_r, init_t)
+    out["pose_jump_m"] = pose_jump
+    out["yaw_jump_deg"] = yaw_jump
+    try:
+        R_rect, P_rect = None, None
+        K, R_rect, P_rect = ds.load_intrinsics()
+        del K
+    except Exception as e:
+        out["invalid"] = f"intrinsics:{e}"
+        return out
+    maps = {
+        1: (_load_u16_float_map(sam_base + "_label_track_dist.png"), _load_u16_float_map(sam_base + "_label_track_weight.png")),
+        3: (_load_u16_float_map(sam_base + "_label_static_dist.png"), _load_u16_float_map(sam_base + "_label_static_weight.png")),
+        5: (_load_u16_float_map(sam_base + "_label_vehicle_dist.png"), _load_u16_float_map(sam_base + "_label_vehicle_weight.png")),
+        7: (_load_u16_float_map(sam_base + "_label_person_dist.png"), _load_u16_float_map(sam_base + "_label_person_weight.png")),
+    }
+    first_map = next((m for pair in maps.values() for m in pair if m is not None), None)
+    if first_map is None:
+        out["invalid"] = "missing_label_maps"
+        return out
+    height, width = first_map.shape[:2]
+    xmax = float(label_cfg.get("teacher_visible_xmax_m", 120.0))
+    label_pts = _read_label_teacher_points(feature_base + "_label_object_points.txt", xmax)
+    class_scores = {"track": 0.0, "static": 0.0, "vehicle": 0.0, "person": 0.0}
+    class_visible = {"track": 0, "static": 0, "vehicle": 0, "person": 0}
+    class_total = {"track": 0, "static": 0, "vehicle": 0, "person": 0}
+    class_name = {1: "track", 3: "static", 5: "vehicle", 7: "person"}
+    for x, y, z, cls, weight in label_pts:
+        cname = class_name.get(cls)
+        if not cname:
+            continue
+        class_total[cname] += 1
+        proj = _project_xyz((x, y, z), r, t, R_rect, P_rect, width, height)
+        if proj is None:
+            continue
+        dist, wmap = maps.get(cls, (None, None))
+        if dist is None:
+            continue
+        u, v = proj
+        img_w = float(wmap[v, u]) if wmap is not None else 1.0
+        if img_w <= 1e-4:
+            continue
+        class_visible[cname] += 1
+        class_scores[cname] += max(0.0, 1.0 - float(dist[v, u])) * img_w * weight
+    norm_scores = {k: (class_scores[k] / max(1, class_total[k])) for k in class_scores}
+    weights = {
+        "track": float(label_cfg.get("track_weight", 1.5)),
+        "static": float(label_cfg.get("static_object_weight", 1.0)),
+        "vehicle": float(label_cfg.get("vehicle_weight", 0.4)),
+        "person": float(label_cfg.get("person_weight", 0.2)),
+    }
+    denom = max(1e-9, sum(weights.values()))
+    label_score = sum(weights[k] * norm_scores[k] for k in norm_scores) / denom
+    visible_total = sum(class_visible.values())
+    eligible_total = sum(class_total.values())
+    edge_pts = _read_xyz_points(feature_base + "_edge_points.txt", 3500)
+    edge_in = 0
+    for pt in edge_pts:
+        if _project_xyz(pt, r, t, R_rect, P_rect, width, height) is not None:
+            edge_in += 1
+    edge_ratio = edge_in / max(1, len(edge_pts))
+    max_pose_jump = float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))
+    max_yaw_jump = float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0))
+    jump_penalty = 0.0
+    if pose_jump > max_pose_jump:
+        jump_penalty += (pose_jump - max_pose_jump) * 0.25
+    if yaw_jump > max_yaw_jump:
+        jump_penalty += (yaw_jump - max_yaw_jump) * 0.05
+    selection_score = label_score + 0.25 * min(edge_ratio / 0.20, 1.0) - jump_penalty
+    out.update({
+        "label_teacher_score": label_score,
+        "label_teacher_eligible_count": eligible_total,
+        "label_teacher_visible_count": visible_total,
+        "label_teacher_visible_ratio": visible_total / max(1, eligible_total),
+        "label_track_visible_count": class_visible["track"],
+        "edge_in_image_ratio": edge_ratio,
+        "selection_score": selection_score,
+        "label_teacher_score_by_class": norm_scores,
+    })
+    return out
+
+
+def _select_initial_pose_candidate(frame_id: int, init_r: list[float], init_t: list[float], feature_base: str, sam_base: str, ds, sem_cfg: dict, label_cfg: dict, bev_by_frame: dict, bev_candidates_by_frame: dict, label_assist_for_calib: bool) -> tuple[list[float], list[float], str, bool, list[dict]]:
+    if not label_assist_for_calib or not bool(sem_cfg.get("enable_init_candidate_scoring", False)):
+        if frame_id in bev_by_frame:
+            pose = bev_by_frame[frame_id]
+            return list(pose["rvec"]), list(pose["tvec"]), "bev_accepted", False, []
+        return list(init_r), list(init_t), "original", False, []
+    candidates: list[dict] = [{"source": "original_init", "pose": {"rvec": list(init_r), "tvec": list(init_t)}, "rejected": False}]
+    if frame_id in bev_by_frame:
+        candidates.append({"source": "bev_accepted", "pose": bev_by_frame[frame_id], "rejected": False})
+    if frame_id in bev_candidates_by_frame:
+        cand = bev_candidates_by_frame[frame_id]
+        pose = cand.get("pose", {}) if isinstance(cand, dict) else {}
+        if pose.get("rvec") and pose.get("tvec"):
+            rejected = str(cand.get("source", "bev_raw_rejected")) != "bev_accepted"
+            candidates.append({"source": str(cand.get("source", "bev_raw_rejected")), "pose": pose, "rejected": rejected})
+            clipped = _clip_pose_to_label_gate(pose, init_r, init_t, sem_cfg)
+            if clipped:
+                candidates.append({"source": "clipped_bev_candidate", "pose": clipped, "rejected": rejected})
+    scored: list[dict] = []
+    for cand in candidates:
+        score = _score_initial_pose_candidate(cand["source"], cand["pose"], init_r, init_t, feature_base, sam_base, ds, sem_cfg, label_cfg)
+        score["bev_candidate_rejected_by_gate"] = bool(cand.get("rejected", False))
+        scored.append(score)
+    original_score = next((x for x in scored if x.get("source") == "original_init"), None)
+    selectable = []
+    max_pose_jump = float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))
+    max_yaw_jump = float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0))
+    for cand, score in zip(candidates, scored):
+        if score.get("invalid"):
+            continue
+        if cand["source"] == "original_init" or cand["source"] == "bev_accepted":
+            selectable.append((cand, score))
+            continue
+        if score.get("pose_jump_m", 0.0) <= max_pose_jump and score.get("yaw_jump_deg", 0.0) <= max_yaw_jump:
+            if not original_score or score.get("selection_score", -1e9) >= original_score.get("selection_score", -1e9):
+                selectable.append((cand, score))
+    if not selectable:
+        return list(init_r), list(init_t), "original_init", False, scored
+    selected_cand, _ = max(selectable, key=lambda item: float(item[1].get("selection_score", -1e9)))
+    pose = selected_cand["pose"]
+    return list(pose["rvec"]), list(pose["tvec"]), str(selected_cand["source"]), bool(selected_cand.get("rejected", False)), scored
 
 
 
@@ -134,7 +401,9 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
     out.setdefault("final_pose_valid", 1.0)
     out.setdefault("rail_gate_failed", 0.0)
     out.setdefault("invalid_reason", "")
+    out.setdefault("final_gate_source", "rail_or_unsupervised")
     if not oracle_rail or not bool(sem_cfg.get("oracle_rail_hard_gate", False)):
+        out["final_gate_source"] = "no_oracle_rail_gate"
         return out
     min_count = float(sem_cfg.get("min_final_rail_visible_count", sem_cfg.get("min_rail_visible_count", 50)))
     min_ratio = float(sem_cfg.get("min_final_rail_visible_ratio", sem_cfg.get("min_rail_visible_ratio", 0.08)))
@@ -153,11 +422,55 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
         min_sem_hist = float(sem_cfg.get("min_final_semantic_hist_similarity", 0.05))
         max_sem_js = float(sem_cfg.get("max_final_semantic_js_divergence", 0.95))
         semantic_ok = semantic_used and (semantic_hist >= min_sem_hist or semantic_js <= max_sem_js)
-        allow_alt = bool(sem_cfg.get("allow_object_or_edge_to_pass_rail_gate", True)) and (
+        label_score = float(out.get("label_teacher_score", 0.0) or 0.0)
+        label_track_visible = float(out.get("label_track_visible_count", 0.0) or 0.0)
+        label_static_visible = float(out.get("label_static_visible_count", 0.0) or 0.0)
+        label_residual_count = float(out.get("label_residual_count", 0.0) or 0.0)
+        min_label_score = float(sem_cfg.get("min_label_teacher_score", 0.25))
+        min_label_track_visible = float(sem_cfg.get("min_label_track_visible_count", 20))
+        min_label_residual = float(sem_cfg.get("min_label_residual_count_for_gate", 50))
+        max_pose_jump = float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))
+        max_yaw_jump = float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0))
+        pose_jump = float(out.get("pose_jump_from_initial_m", 0.0) or 0.0)
+        yaw_jump = float(out.get("yaw_jump_from_initial_deg", 0.0) or 0.0)
+        label_ok = (
+            label_residual_count >= min_label_residual
+            and label_track_visible >= min_label_track_visible
+            and label_score >= min_label_score
+            and pose_jump <= max_pose_jump
+            and yaw_jump <= max_yaw_jump
+        )
+        allow_unsupervised_alt = bool(sem_cfg.get("allow_object_or_edge_to_pass_rail_gate", True)) and (
             object_visible >= min_object or edge_visible >= min_edge or semantic_ok
         )
-        out["object_or_edge_rail_gate_bypass"] = 1.0 if allow_alt else 0.0
+        if bool(sem_cfg.get("label_assist_requires_label_gate", True)) and label_residual_count > 0:
+            allow_alt = label_ok
+        else:
+            allow_alt = allow_unsupervised_alt or label_ok
+        out["object_or_edge_rail_gate_bypass"] = 1.0 if allow_unsupervised_alt else 0.0
         out["semantic_rail_gate_bypass_ok"] = 1.0 if semantic_ok else 0.0
+        out["label_gate_bypass_used"] = 1.0 if label_ok and allow_alt else 0.0
+        if label_ok and allow_alt:
+            out["final_gate_source"] = "label_assisted"
+        elif label_residual_count > 0:
+            out["final_gate_source"] = "label_rejected"
+        elif allow_unsupervised_alt:
+            out["final_gate_source"] = "unsupervised_auxiliary"
+        if not label_ok:
+            reasons = []
+            if label_residual_count < min_label_residual:
+                reasons.append(f"label_residual_count={label_residual_count:.0f}<{min_label_residual:.0f}")
+            if label_track_visible < min_label_track_visible:
+                reasons.append(f"label_track_visible_count={label_track_visible:.0f}<{min_label_track_visible:.0f}")
+            if label_score < min_label_score:
+                reasons.append(f"label_teacher_score={label_score:.6f}<{min_label_score:.6f}")
+            if pose_jump > max_pose_jump:
+                reasons.append(f"pose_jump_from_initial_m={pose_jump:.6f}>{max_pose_jump:.6f}")
+            if yaw_jump > max_yaw_jump:
+                reasons.append(f"yaw_jump_from_initial_deg={yaw_jump:.6f}>{max_yaw_jump:.6f}")
+            out["label_gate_failed_reason"] = ";".join(reasons)
+        else:
+            out["label_gate_failed_reason"] = ""
         if bool(sem_cfg.get("reject_pose_on_rail_gate_fail", True)) and not allow_alt:
             out["final_pose_valid"] = 0.0
             out["invalid_reason"] = (
@@ -165,6 +478,8 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
                 f"or ratio={visible_ratio:.6f}<{min_ratio:.6f})"
             )
         else:
+            if not out.get("final_gate_source") or out.get("final_gate_source") == "label_rejected":
+                out["final_gate_source"] = "rail_or_auxiliary_pass"
             out["invalid_reason"] = ""
     return out
 
@@ -205,6 +520,7 @@ def run(context: RuntimeContext) -> None:
 
     bev_cfg = context.config.get("bev") or {}
     bev_by_frame = getattr(context, "bev_pose_by_frame", None) or {}
+    bev_candidates_by_frame = getattr(context, "bev_candidate_by_frame", None) or {}
     sem_cfg = context.config.get("semantic_calib") or {}
     label_cfg = context.config.get("label_assist") or {}
     label_assist_for_calib = bool(label_cfg.get("enabled", False)) and bool(label_cfg.get("use_for_calib_residual", True))
@@ -251,12 +567,25 @@ def run(context: RuntimeContext) -> None:
         print(f"  feature_base={feature_base}")
         print(f"  image_features_dir={frame_dir}")
         print(f"  optimizer_base={sam_base}")
-        r_use, t_use = list(init_r), list(init_t)
-        if bool(bev_cfg.get("enabled", False)) and frame_id in bev_by_frame:
-            pose_bev = bev_by_frame[frame_id]
-            r_use = pose_bev["rvec"]
-            t_use = pose_bev["tvec"]
-            print("[Info] 本帧使用 BEV 粗初始化位姿作为 optimizer 初值")
+        r_use, t_use, selected_init_source, bev_candidate_rejected_by_gate, candidate_scores = _select_initial_pose_candidate(
+            frame_id,
+            list(init_r),
+            list(init_t),
+            feature_base,
+            sam_base,
+            ds,
+            sem_cfg,
+            label_cfg,
+            bev_by_frame,
+            bev_candidates_by_frame,
+            label_assist_for_calib,
+        )
+        if selected_init_source == "bev_accepted":
+            print("[Info] ???? BEV accepted candidate ?? optimizer ??")
+        elif selected_init_source in {"bev_raw_rejected", "clipped_bev_candidate"}:
+            print(f"[Info] label_assist candidate scoring ?? BEV ????: source={selected_init_source}")
+        else:
+            print(f"[Info] ??????/label-scored ??: source={selected_init_source}")
 
         # Phase B6: pass semantic inputs (probabilities + semantic points + BEV init pose) to optimizer CLI.
         sem_npy = os.path.join(frame_dir, "semantic_probs.npy")
@@ -549,6 +878,15 @@ def run(context: RuntimeContext) -> None:
             for k in ("edge_raw_count", "edge_kept_count", "edge_range_gt_50_count", "edge_near_track_count"):
                 if k in edge_debug:
                     br[k] = edge_debug[k]
+        br["selected_init_source"] = selected_init_source
+        br["bev_candidate_rejected_by_gate"] = 1.0 if bev_candidate_rejected_by_gate else 0.0
+        br["candidate_scores"] = candidate_scores
+        if candidate_scores:
+            selected_score = next((x for x in candidate_scores if x.get("source") == selected_init_source), {})
+            for _k in ("label_teacher_eligible_count", "label_teacher_visible_ratio"):
+                if _k in selected_score:
+                    br[f"init_{_k}"] = selected_score[_k]
+        _add_pose_jump_debug(br, pose_out, list(init_r), list(init_t))
         if label_debug:
             for k in (
                 "label_assist_enabled",
@@ -557,6 +895,13 @@ def run(context: RuntimeContext) -> None:
                 "image_track_vs_label_score",
                 "sam_vehicle_vs_label_iou",
                 "sam_person_vs_label_iou",
+                "label_track_point_count",
+                "label_static_point_count",
+                "label_vehicle_point_count",
+                "label_person_point_count",
+                "label_teacher_eligible_count",
+                "label_teacher_visible_xmax_m",
+                "label_teacher_image_bbox_padding_m",
             ):
                 if k in label_debug:
                     br[k] = label_debug[k]
@@ -567,6 +912,11 @@ def run(context: RuntimeContext) -> None:
                 f.write(f"rail_gate_failed: {br.get('rail_gate_failed', 0.0)}\n")
                 if br.get("invalid_reason"):
                     f.write(f"invalid_reason: {br.get('invalid_reason')}\n")
+                for _k in ("label_gate_bypass_used", "label_gate_failed_reason", "object_or_edge_rail_gate_bypass", "pose_jump_from_initial_m", "yaw_jump_from_initial_deg", "rotation_jump_from_initial_deg", "selected_init_source", "bev_candidate_rejected_by_gate", "final_gate_source", "init_label_teacher_eligible_count", "init_label_teacher_visible_ratio"):
+                    if _k in br:
+                        f.write(f"{_k}: {br[_k]}\n")
+                if br.get("candidate_scores"):
+                    f.write("candidate_scores_json: " + json.dumps(br["candidate_scores"], ensure_ascii=False) + "\n")
                 if "refined_lidar_rail_nonzero_ratio" in br:
                     f.write(f"refined_lidar_rail_nonzero_ratio: {br['refined_lidar_rail_nonzero_ratio']}\n")
         write_unified_debug_json(

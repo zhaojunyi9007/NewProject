@@ -42,7 +42,7 @@ def _resolve_label_json(cfg: Dict[str, Any]) -> str:
     return fallback if os.path.isfile(fallback) else ""
 
 
-def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_path: str, frame_dir: str, sam_base: str, lidar_base: str) -> None:
+def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_path: str, frame_dir: str, sam_base: str, lidar_base: str, lidar_pcd: str = "") -> None:
     label_cfg = cfg.get("label_assist") or {}
     if not bool(label_cfg.get("enabled", False)):
         return
@@ -65,6 +65,14 @@ def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_pa
         "--frame-dir", frame_dir,
         "--lidar-base", lidar_base,
     ]
+    if "teacher_visible_xmax_m" in label_cfg:
+        cmd.extend(["--teacher-visible-xmax-m", str(float(label_cfg.get("teacher_visible_xmax_m", 120.0)))])
+    if "teacher_image_bbox_padding_m" in label_cfg:
+        cmd.extend(["--teacher-image-bbox-padding-m", str(float(label_cfg.get("teacher_image_bbox_padding_m", 8.0)))])
+    if bool(label_cfg.get("use_sam_refine", True)):
+        cmd.append("--use-sam-refine")
+    if lidar_pcd:
+        cmd.extend(["--lidar-pcd", lidar_pcd])
     subprocess.run(cmd, check=True)
 
 
@@ -173,6 +181,7 @@ def run(context: RuntimeContext) -> None:
         else:
             lidar_base = os.path.join(lidar_root, f"{frame_id:010d}") if lidar_root else ""
             label_frame_dir = os.path.join(label_root, f"{frame_id:010d}") if label_root else frame_dir
-            _export_label_assist_if_enabled(cfg, frame_id, img_path, label_frame_dir, sam_base, lidar_base)
+            lidar_pcd = adapter.resolve_lidar(frame_id) if hasattr(adapter, "resolve_lidar") else ""
+            _export_label_assist_if_enabled(cfg, frame_id, img_path, label_frame_dir, sam_base, lidar_base, lidar_pcd or "")
 
     print(f"\n[完成] 图像语义特征已保存到: {out_root}")

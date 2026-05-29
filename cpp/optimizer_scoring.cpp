@@ -385,6 +385,91 @@ double ObjectAttractionScoreNorm(const std::vector<PointFeature>& points,
     if (stats) *stats = st;
     return total / n;
 }
+
+
+struct LabelTeacherStats {
+    int visible_track = 0;
+    int visible_static = 0;
+    int visible_vehicle = 0;
+    int visible_person = 0;
+    int eligible_track = 0;
+    int eligible_static = 0;
+    int eligible_vehicle = 0;
+    int eligible_person = 0;
+    double score_track = 0.0;
+    double score_static = 0.0;
+    double score_vehicle = 0.0;
+    double score_person = 0.0;
+};
+
+void AccumulateLabelTeacherClass(const std::vector<PointFeature>& points,
+                                 int class_id,
+                                 const cv::Mat& dist_map,
+                                 const cv::Mat& weight_map,
+                                 const Eigen::Matrix3d& R_rect,
+                                 const Eigen::Matrix<double, 3, 4>& P_rect,
+                                 int W,
+                                 int H,
+                                 const Eigen::Matrix3d& R,
+                                 const Eigen::Vector3d& t,
+                                 double* score,
+                                 int* visible_count,
+                                 int* eligible_count) {
+    if (!score || !visible_count || !eligible_count || dist_map.empty()) return;
+    double total = 0.0;
+    int visible = 0;
+    int eligible = 0;
+    for (const auto& pt : points) {
+        if (pt.label != class_id || pt.weight <= 0.0) continue;
+        ++eligible;
+        int u = 0, v = 0;
+        if (!Project(pt.p, R_rect, P_rect, R, t, u, v, W, H)) continue;
+        float dist_value = GetDistanceValue(dist_map, u, v);
+        if (!std::isfinite(dist_value)) dist_value = 1.0f;
+        dist_value = std::min(std::max(dist_value, 0.0f), 1.0f);
+        float image_weight = 1.0f;
+        if (!weight_map.empty()) {
+            image_weight = GetDistanceValue(weight_map, u, v);
+            if (!std::isfinite(image_weight)) image_weight = 0.0f;
+            image_weight = std::min(std::max(image_weight, 0.0f), 1.0f);
+            if (image_weight <= 1e-4f) continue;
+        }
+        total += (1.0 - static_cast<double>(dist_value)) * static_cast<double>(image_weight) * pt.weight;
+        ++visible;
+    }
+    const double n = static_cast<double>(std::max(1, eligible));
+    *score = total / n;
+    *visible_count = visible;
+    *eligible_count = eligible;
+}
+
+LabelTeacherStats LabelTeacherScoreNorm(const std::vector<PointFeature>& label_points,
+                                         const cv::Mat& label_track_dist,
+                                         const cv::Mat& label_track_weight,
+                                         const cv::Mat& label_static_dist,
+                                         const cv::Mat& label_static_weight,
+                                         const cv::Mat& label_vehicle_dist,
+                                         const cv::Mat& label_vehicle_weight,
+                                         const cv::Mat& label_person_dist,
+                                         const cv::Mat& label_person_weight,
+                                         const Eigen::Matrix3d& R_rect,
+                                         const Eigen::Matrix<double, 3, 4>& P_rect,
+                                         int W,
+                                         int H,
+                                         const Eigen::Matrix3d& R,
+                                         const Eigen::Vector3d& t) {
+    LabelTeacherStats st;
+    if (label_points.empty()) return st;
+    AccumulateLabelTeacherClass(label_points, SEM_RAIL_LIKE, label_track_dist, label_track_weight,
+                                R_rect, P_rect, W, H, R, t, &st.score_track, &st.visible_track, &st.eligible_track);
+    AccumulateLabelTeacherClass(label_points, SEM_VERTICAL_STRUCTURE, label_static_dist, label_static_weight,
+                                R_rect, P_rect, W, H, R, t, &st.score_static, &st.visible_static, &st.eligible_static);
+    AccumulateLabelTeacherClass(label_points, SEM_VEHICLE_LIKE, label_vehicle_dist, label_vehicle_weight,
+                                R_rect, P_rect, W, H, R, t, &st.score_vehicle, &st.visible_vehicle, &st.eligible_vehicle);
+    AccumulateLabelTeacherClass(label_points, SEM_PERSON_LIKE, label_person_dist, label_person_weight,
+                                R_rect, P_rect, W, H, R, t, &st.score_person, &st.visible_person, &st.eligible_person);
+    return st;
+}
 }  // namespace
 
 double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeature>& edge_points,
@@ -399,6 +484,15 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
                                                     const cv::Mat& person_weight,
                                                     const cv::Mat& vehicle_dist,
                                                     const cv::Mat& vehicle_weight,
+                                                    const std::vector<PointFeature>& label_teacher_points,
+                                                    const cv::Mat& label_track_dist,
+                                                    const cv::Mat& label_track_weight,
+                                                    const cv::Mat& label_static_dist,
+                                                    const cv::Mat& label_static_weight,
+                                                    const cv::Mat& label_vehicle_dist,
+                                                    const cv::Mat& label_vehicle_weight,
+                                                    const cv::Mat& label_person_dist,
+                                                    const cv::Mat& label_person_weight,
                                                     const std::vector<SemanticPointRecord>& lidar_semantic_points,
                                                     const SemanticProbMaps& image_semantic_probs,
                                                     const Eigen::Matrix3d& R_rect,
@@ -413,6 +507,10 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
                                                     double w_rail,
                                                     double w_vehicle_object,
                                                     double w_person_object,
+                                                    double w_label_track,
+                                                    double w_label_static,
+                                                    double w_label_vehicle,
+                                                    double w_label_person,
                                                     const SemanticScoringConfig& sem_cfg,
                                                     TotalScoreBreakdown* breakdown) {
     (void)lines3d;
@@ -486,11 +584,44 @@ double ComputeTotalCalibrationScoreSemanticDominant(const std::vector<PointFeatu
         bd.object_score = obj_stats.weighted_score;
     }
 
+    if (!label_teacher_points.empty()) {
+        LabelTeacherStats label_stats = LabelTeacherScoreNorm(
+            label_teacher_points,
+            label_track_dist, label_track_weight,
+            label_static_dist, label_static_weight,
+            label_vehicle_dist, label_vehicle_weight,
+            label_person_dist, label_person_weight,
+            R_rect, P_rect, W, H, R, t);
+        bd.label_teacher_point_count = static_cast<double>(label_teacher_points.size());
+        bd.label_track_eligible_count = static_cast<double>(label_stats.eligible_track);
+        bd.label_static_eligible_count = static_cast<double>(label_stats.eligible_static);
+        bd.label_vehicle_eligible_count = static_cast<double>(label_stats.eligible_vehicle);
+        bd.label_person_eligible_count = static_cast<double>(label_stats.eligible_person);
+        bd.label_teacher_eligible_count = bd.label_track_eligible_count + bd.label_static_eligible_count + bd.label_vehicle_eligible_count + bd.label_person_eligible_count;
+        bd.label_track_score_norm = label_stats.score_track;
+        bd.label_static_score_norm = label_stats.score_static;
+        bd.label_vehicle_score_norm = label_stats.score_vehicle;
+        bd.label_person_score_norm = label_stats.score_person;
+        bd.label_track_visible_count = static_cast<double>(label_stats.visible_track);
+        bd.label_static_visible_count = static_cast<double>(label_stats.visible_static);
+        bd.label_vehicle_visible_count = static_cast<double>(label_stats.visible_vehicle);
+        bd.label_person_visible_count = static_cast<double>(label_stats.visible_person);
+        bd.label_teacher_visible_count = bd.label_track_visible_count + bd.label_static_visible_count + bd.label_vehicle_visible_count + bd.label_person_visible_count;
+        bd.label_teacher_visible_ratio = bd.label_teacher_visible_count / std::max(1.0, bd.label_teacher_eligible_count);
+        bd.label_teacher_score = w_label_track * bd.label_track_score_norm +
+                                 w_label_static * bd.label_static_score_norm +
+                                 w_label_vehicle * bd.label_vehicle_score_norm +
+                                 w_label_person * bd.label_person_score_norm;
+        bd.label_teacher_score_norm = bd.label_teacher_score /
+            std::max(1e-9, w_label_track + w_label_static + w_label_vehicle + w_label_person);
+        bd.label_term_used = 1.0;
+    }
+
     bd.edge_score = w_edge * bd.edge_score_norm;
     bd.object_score = bd.object_term_used > 0.0 ? bd.object_score : 0.0;
     bd.total_score = w_semantic_js * bd.semantic_js_score +
                      w_semantic_hist * bd.semantic_hist_score +
-                     bd.edge_score + bd.rail_score + bd.object_score;
+                     bd.edge_score + bd.rail_score + bd.object_score + bd.label_teacher_score;
 
     if (breakdown) *breakdown = bd;
     return bd.total_score;
