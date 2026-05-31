@@ -22,6 +22,19 @@ if _TOOLS not in sys.path:
 from sam_extractor import FeatureExtractor  # noqa: E402
 
 
+def _load_stage_extrinsic(adapter, cfg: Dict[str, Any]):
+    label_cfg = cfg.get("label_assist") or {}
+    if bool(label_cfg.get("enabled", False)) and bool(label_cfg.get("use_openlabel_extrinsic", True)):
+        loader = getattr(adapter, "load_label_assist_extrinsic", None)
+        if callable(loader):
+            ext = loader()
+            if ext:
+                return ext, "openlabel_coordinate_systems"
+            if not bool(label_cfg.get("openlabel_extrinsic_fallback_to_calibration", True)):
+                return None, "openlabel_coordinate_systems_missing"
+    loader = getattr(adapter, "load_initial_extrinsic", None)
+    return (loader(), "calibration_txt") if callable(loader) else (None, "config_initial_extrinsic")
+
 
 def _resolve_label_json(cfg: Dict[str, Any]) -> str:
     label_cfg = cfg.get("label_assist") or {}
@@ -65,8 +78,9 @@ def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_pa
         "--frame-dir", frame_dir,
         "--lidar-base", lidar_base,
     ]
+    teacher_visible_xmax_m = float(label_cfg.get("teacher_visible_xmax_m", 120.0))
     if "teacher_visible_xmax_m" in label_cfg:
-        cmd.extend(["--teacher-visible-xmax-m", str(float(label_cfg.get("teacher_visible_xmax_m", 120.0)))])
+        cmd.extend(["--teacher-visible-xmax-m", str(teacher_visible_xmax_m)])
     if "teacher_image_bbox_padding_m" in label_cfg:
         cmd.extend(["--teacher-image-bbox-padding-m", str(float(label_cfg.get("teacher_image_bbox_padding_m", 8.0)))])
     if bool(label_cfg.get("use_sam_refine", True)):
@@ -76,6 +90,10 @@ def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_pa
     cmd.extend(["--max-track-samples-per-object", str(int(label_cfg.get("max_track_samples_per_object", 800)))])
     cmd.extend(["--max-pole-samples-per-object", str(int(label_cfg.get("max_pole_samples_per_object", 20)))])
     cmd.extend(["--bbox-padding-px", str(int(label_cfg.get("bbox_padding_px", 12)))])
+    cmd.extend(["--track-visible-xmax-m", str(float(label_cfg.get("track_visible_xmax_m", teacher_visible_xmax_m)))])
+    cmd.extend(["--switch-visible-xmax-m", str(float(label_cfg.get("switch_visible_xmax_m", teacher_visible_xmax_m)))])
+    cmd.extend(["--catenary-pole-visible-xmax-m", str(float(label_cfg.get("catenary_pole_visible_xmax_m", 160.0)))])
+    cmd.extend(["--buffer-stop-visible-xmax-m", str(float(label_cfg.get("buffer_stop_visible_xmax_m", 240.0)))])
     if lidar_pcd:
         cmd.extend(["--lidar-pcd", lidar_pcd])
     subprocess.run(cmd, check=True)
@@ -130,10 +148,11 @@ def run(context: RuntimeContext) -> None:
 
     adapter = get_adapter(cfg)
     K, _, _ = adapter.load_intrinsics()
-    ext = adapter.load_initial_extrinsic()
+    ext, extrinsic_source = _load_stage_extrinsic(adapter, cfg)
     if ext:
         rvec = np.asarray(ext[0], dtype=np.float64).reshape(3)
         tvec = np.asarray(ext[1], dtype=np.float64).reshape(3)
+        print(f"  [image_features] extrinsic_source={extrinsic_source}")
     else:
         ie = cfg.get("calibration", {}).get("initial_extrinsic", {})
         rvec = np.asarray(ie.get("rotation", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(3)

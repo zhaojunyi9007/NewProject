@@ -42,7 +42,13 @@ def _calib_meta_valid(kv: dict[str, str]) -> bool:
 
 def _initial_pose_from_context(context: RuntimeContext, adapter):
     ext = None
-    if hasattr(adapter, "load_initial_extrinsic"):
+    label_cfg = context.config.get("label_assist") or {}
+    if bool(label_cfg.get("enabled", False)) and bool(label_cfg.get("use_openlabel_extrinsic", True)) and hasattr(adapter, "load_label_assist_extrinsic"):
+        try:
+            ext = adapter.load_label_assist_extrinsic()
+        except Exception:
+            ext = None
+    if ext is None and hasattr(adapter, "load_initial_extrinsic"):
         try:
             ext = adapter.load_initial_extrinsic()
         except Exception:

@@ -40,6 +40,8 @@ struct EdgeCalibratorConfig {
     double strong_pole_weight = 1.5;
     double strong_switch_weight = 1.2;
     double strong_buffer_stop_weight = 1.0;
+    double strong_label_min_translation_prior_weight = 5.0;
+    double strong_label_rotation_prior_weight = 0.5;
     double label_vehicle_weight = 0.4;
     double label_person_weight = 0.2;
     int lidar_semantic_max_points = 0;        // 0 means keep all points.
@@ -137,6 +139,10 @@ private:
     int strong_pole_residual_count_ = 0;
     int strong_switch_residual_count_ = 0;
     int strong_buffer_stop_residual_count_ = 0;
+    int strong_label_optimizer_residual_count_ = 0;
+    bool strong_residuals_added_to_optimizer_ = false;
+    double strong_label_score_before_optimization_ = 0.0;
+    double strong_label_score_after_optimization_ = 0.0;
 
     CalibHistory history_;
 

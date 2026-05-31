@@ -21,6 +21,7 @@ int main(int argc, char** argv) {
             << "            [--label_assist_enabled 0|1] [--label_object_points P] [--label_strong_features P]\n"
             << "            [--strong_label_enabled 0|1] [--strong_track_weight X] [--strong_pole_weight X]\n"
             << "            [--strong_switch_weight X] [--strong_buffer_stop_weight X]\n"
+            << "            [--strong_label_min_translation_prior_weight X] [--strong_label_rotation_prior_weight X]\n"
             << "            [--label_track_weight X] [--label_static_weight X] [--label_vehicle_weight X] [--label_person_weight X]\n"
             << "            [--lidar_semantic_max_points N]\n"
             << "            [--rail_low_visible_policy zero|penalty] [--min_rail_visible_count N]\n"
@@ -95,6 +96,8 @@ int main(int argc, char** argv) {
             else if (a == "--strong_pole_weight" && need(i)) config.strong_pole_weight = std::atof(argv[++i]);
             else if (a == "--strong_switch_weight" && need(i)) config.strong_switch_weight = std::atof(argv[++i]);
             else if (a == "--strong_buffer_stop_weight" && need(i)) config.strong_buffer_stop_weight = std::atof(argv[++i]);
+            else if (a == "--strong_label_min_translation_prior_weight" && need(i)) config.strong_label_min_translation_prior_weight = std::atof(argv[++i]);
+            else if (a == "--strong_label_rotation_prior_weight" && need(i)) config.strong_label_rotation_prior_weight = std::atof(argv[++i]);
             else if (a == "--label_track_weight" && need(i)) config.label_track_weight = std::atof(argv[++i]);
             else if (a == "--label_static_weight" && need(i)) config.label_static_weight = std::atof(argv[++i]);
             else if (a == "--label_vehicle_weight" && need(i)) config.label_vehicle_weight = std::atof(argv[++i]);

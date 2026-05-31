@@ -40,6 +40,22 @@ struct TranslationPriorCost {
     double sqrt_weight_;
 };
 
+struct RotationPriorCost {
+    RotationPriorCost(const Eigen::Vector3d& r_ref, double weight)
+        : r_ref_(r_ref), sqrt_weight_(std::sqrt(std::max(0.0, weight))) {}
+
+    template <typename T>
+    bool operator()(const T* const r, T* residual) const {
+        residual[0] = T(sqrt_weight_) * (r[0] - T(r_ref_.x()));
+        residual[1] = T(sqrt_weight_) * (r[1] - T(r_ref_.y()));
+        residual[2] = T(sqrt_weight_) * (r[2] - T(r_ref_.z()));
+        return true;
+    }
+
+    Eigen::Vector3d r_ref_;
+    double sqrt_weight_;
+};
+
 struct EdgeConsistencyCost {
     EdgeConsistencyCost(const std::vector<PointFeature>* points,
                         const std::vector<int>* indices,
@@ -440,14 +456,22 @@ struct PoleCenterlineProjectionCost {
         bool ok1 = true, ok2 = true;
         T v1 = T(0.0), v2 = T(0.0);
         T u1 = StrongProjectU(feature_.p1, R_rect_, P_rect_, r, t, &v1, &ok1);
-        T u2 = StrongProjectU(feature_.p2, R_rect_, P_rect_, r, t, &v2, &ok2);
+        const bool use_axis = feature_.role.find("axis") != std::string::npos;
+        T u2 = use_axis ? StrongProjectU(feature_.p2, R_rect_, P_rect_, r, t, &v2, &ok2) : u1;
+        if (!use_axis) {
+            v2 = v1;
+            ok2 = ok1;
+        }
         const auto& a = feature_.image_points[0];
         const auto& b = feature_.image_points[1];
         T d1 = PointSegmentDistance2DT(u1, v1, a.x(), a.y(), b.x(), b.y());
-        T d2 = PointSegmentDistance2DT(u2, v2, a.x(), a.y(), b.x(), b.y());
-        T du = u2 - u1;
-        T dv = v2 - v1;
-        T angle = ceres::sqrt(du * du + T(1e-6)) / (ceres::sqrt(du * du + dv * dv + T(1e-6)));
+        T d2 = use_axis ? PointSegmentDistance2DT(u2, v2, a.x(), a.y(), b.x(), b.y()) : d1;
+        T angle = T(0.0);
+        if (use_axis) {
+            T du = u2 - u1;
+            T dv = v2 - v1;
+            angle = ceres::sqrt(du * du + T(1e-6)) / (ceres::sqrt(du * du + dv * dv + T(1e-6)));
+        }
         if (!ok1) d1 = T(80.0);
         if (!ok2) d2 = T(80.0);
         residual[0] = T(sqrt_weight_) * d1 / T(60.0);

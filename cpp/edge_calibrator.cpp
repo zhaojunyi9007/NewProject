@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -885,6 +886,14 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     label_residual_count_ = 0;
     label_track_residual_count_ = 0;
     label_object_residual_count_ = 0;
+    strong_track_residual_count_ = 0;
+    strong_pole_residual_count_ = 0;
+    strong_switch_residual_count_ = 0;
+    strong_buffer_stop_residual_count_ = 0;
+    strong_label_optimizer_residual_count_ = 0;
+    strong_residuals_added_to_optimizer_ = false;
+    strong_label_score_before_optimization_ = 0.0;
+    strong_label_score_after_optimization_ = 0.0;
     if (config_.label_assist_enabled) {
         auto add_teacher_residual = [&](const PointFeature& src,
                                         const cv::Mat* dist,
@@ -937,6 +946,49 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
                   << ", object=" << label_object_residual_count_ << std::endl;
     }
 
+    if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
+        Eigen::Matrix3d R_before;
+        ceres::AngleAxisToRotationMatrix(r_curr_, R_before.data());
+        strong_label_score_before_optimization_ = EvaluateStrongLabelFeatures(
+            strong_label_features_, R_rect_, P_rect_, W_, H_, R_before,
+            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2])).score;
+
+        for (const auto& sf : strong_label_features_) {
+            if (sf.class_type == "track") {
+                if (sf.image_points.size() < 2) continue;
+                auto* cost = new TrackPolylineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_track_weight);
+                problem.AddResidualBlock(new ceres::AutoDiffCostFunction<TrackPolylineProjectionCost, 1, 3, 3>(cost),
+                                         new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                ++strong_track_residual_count_;
+            } else if (sf.class_type == "switch") {
+                if (sf.image_points.size() < 2) continue;
+                auto* cost = new TrackPolylineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_switch_weight);
+                problem.AddResidualBlock(new ceres::AutoDiffCostFunction<TrackPolylineProjectionCost, 1, 3, 3>(cost),
+                                         new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                ++strong_switch_residual_count_;
+            } else if (sf.class_type == "catenary_pole") {
+                if (sf.image_points.size() < 2) continue;
+                auto* cost = new PoleCenterlineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_pole_weight);
+                problem.AddResidualBlock(new ceres::AutoDiffCostFunction<PoleCenterlineProjectionCost, 3, 3, 3>(cost),
+                                         new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                ++strong_pole_residual_count_;
+            } else if (sf.class_type == "buffer_stop") {
+                auto* cost = new BufferStopBBoxProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_buffer_stop_weight);
+                problem.AddResidualBlock(new ceres::AutoDiffCostFunction<BufferStopBBoxProjectionCost, 1, 3, 3>(cost),
+                                         new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                ++strong_buffer_stop_residual_count_;
+            }
+        }
+        strong_label_optimizer_residual_count_ = strong_track_residual_count_ + strong_pole_residual_count_ +
+                                                 strong_switch_residual_count_ + strong_buffer_stop_residual_count_;
+        strong_residuals_added_to_optimizer_ = strong_label_optimizer_residual_count_ > 0;
+        std::cout << "[Debug][Fine] Added strong label residuals: total=" << strong_label_optimizer_residual_count_
+                  << ", track=" << strong_track_residual_count_
+                  << ", pole=" << strong_pole_residual_count_
+                  << ", switch=" << strong_switch_residual_count_
+                  << ", buffer_stop=" << strong_buffer_stop_residual_count_ << std::endl;
+    }
+
     // Translation Prior (防止由于单目深度不可观测导致平移量飞掉)
     double t_prior_weight = GetEnvDouble("EDGECALIB_T_PRIOR_WEIGHT", 5.0);
     const double t_prior_disable_inimage = GetEnvDouble("EDGECALIB_T_PRIOR_DISABLE_INIMAGE_THRESH", 0.03);
@@ -951,24 +1003,34 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     const double t_prior_weaken_oob = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_OOB_THRESH", 0.35);
     const double t_prior_weaken_oob_factor = GetEnvDouble("EDGECALIB_T_PRIOR_WEAKEN_OOB_FACTOR", 0.1);
 
-    if (fine_in_image_ratio < t_prior_disable_inimage) {
-        t_prior_weight = 0.0;
-        std::cout << "[Debug][Fine] In-image ratio too low on fine_points (" << fine_in_image_ratio
-                  << "), disable translation prior for basin escape (th=" << t_prior_disable_inimage << ")." << std::endl;
-    } else if (fine_oob_ratio > t_prior_disable_oob) {
-        t_prior_weight = 0.0;
-        std::cout << "[Debug][Fine] OOB ratio high on fine_points (" << fine_oob_ratio
-                  << "), disable translation prior for basin escape (th=" << t_prior_disable_oob << ")." << std::endl;
-    } else if (fine_oob_ratio > t_prior_weaken_oob) {
-        t_prior_weight *= t_prior_weaken_oob_factor;
-        std::cout << "[Debug][Fine] OOB ratio moderate on fine_points (" << fine_oob_ratio
-                  << "), weaken translation prior by factor " << t_prior_weaken_oob_factor
-                  << " (th=" << t_prior_weaken_oob << "). New weight=" << t_prior_weight << std::endl;
-    } else if (fine_in_image_ratio < t_prior_weaken_inimage) {
-        t_prior_weight *= t_prior_weaken_factor;
-        std::cout << "[Debug][Fine] Low in-image ratio on fine_points (" << fine_in_image_ratio
-                  << "), weaken translation prior by factor " << t_prior_weaken_factor
-                  << " (th=" << t_prior_weaken_inimage << "). New weight=" << t_prior_weight << std::endl;
+    const bool strong_label_active = config_.label_assist_enabled && config_.strong_label_enabled &&
+                                     strong_label_optimizer_residual_count_ > 0;
+    if (!strong_label_active) {
+        if (fine_in_image_ratio < t_prior_disable_inimage) {
+            t_prior_weight = 0.0;
+            std::cout << "[Debug][Fine] In-image ratio too low on fine_points (" << fine_in_image_ratio
+                      << "), disable translation prior for basin escape (th=" << t_prior_disable_inimage << ")." << std::endl;
+        } else if (fine_oob_ratio > t_prior_disable_oob) {
+            t_prior_weight = 0.0;
+            std::cout << "[Debug][Fine] OOB ratio high on fine_points (" << fine_oob_ratio
+                      << "), disable translation prior for basin escape (th=" << t_prior_disable_oob << ")." << std::endl;
+        } else if (fine_oob_ratio > t_prior_weaken_oob) {
+            t_prior_weight *= t_prior_weaken_oob_factor;
+            std::cout << "[Debug][Fine] OOB ratio moderate on fine_points (" << fine_oob_ratio
+                      << "), weaken translation prior by factor " << t_prior_weaken_oob_factor
+                      << " (th=" << t_prior_weaken_oob << "). New weight=" << t_prior_weight << std::endl;
+        } else if (fine_in_image_ratio < t_prior_weaken_inimage) {
+            t_prior_weight *= t_prior_weaken_factor;
+            std::cout << "[Debug][Fine] Low in-image ratio on fine_points (" << fine_in_image_ratio
+                      << "), weaken translation prior by factor " << t_prior_weaken_factor
+                      << " (th=" << t_prior_weaken_inimage << "). New weight=" << t_prior_weight << std::endl;
+        }
+    } else {
+        const double floored = std::max(t_prior_weight, config_.strong_label_min_translation_prior_weight);
+        if (floored > t_prior_weight) {
+            std::cout << "[Debug][Fine] Strong label active; floor translation prior weight to " << floored << std::endl;
+        }
+        t_prior_weight = floored;
     }
     if (t_prior_weight > 0.0) {
         // 使用 config 里的初始平移量作为先验锚点
@@ -977,6 +1039,13 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
             new ceres::AutoDiffCostFunction<TranslationPriorCost, 3, 3>(
                 new TranslationPriorCost(t_init_prior, t_prior_weight)),
             nullptr, t_curr_);
+    }
+    if (strong_label_active && config_.strong_label_rotation_prior_weight > 0.0) {
+        Eigen::Vector3d r_init_prior(config_.init_r[0], config_.init_r[1], config_.init_r[2]);
+        problem.AddResidualBlock(
+            new ceres::AutoDiffCostFunction<RotationPriorCost, 3, 3>(
+                new RotationPriorCost(r_init_prior, config_.strong_label_rotation_prior_weight)),
+            nullptr, r_curr_);
     }
     
     ceres::Solver::Options options;
@@ -990,6 +1059,13 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     std::cout << summary.BriefReport() << std::endl;
+    if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
+        Eigen::Matrix3d R_after;
+        ceres::AngleAxisToRotationMatrix(r_curr_, R_after.data());
+        strong_label_score_after_optimization_ = EvaluateStrongLabelFeatures(
+            strong_label_features_, R_rect_, P_rect_, W_, H_, R_after,
+            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2])).score;
+    }
     PrintProjectionStats("after_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 }
 
@@ -1056,7 +1132,15 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
         if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
             StrongLabelEvalStats strong_stats = EvaluateStrongLabelFeatures(
                 strong_label_features_, R_rect_, P_rect_, W_, H_, R_eval, t_eval);
+            std::set<std::string> strong_object_ids;
+            for (const auto& sf : strong_label_features_) strong_object_ids.insert(sf.object_id);
             bd.strong_label_feature_count = static_cast<double>(strong_label_features_.size());
+            bd.strong_label_object_count = static_cast<double>(strong_object_ids.size());
+            bd.strong_label_residual_count = static_cast<double>(strong_stats.track_count + strong_stats.pole_count + strong_stats.switch_count + strong_stats.buffer_count);
+            bd.strong_residuals_added_to_optimizer = strong_residuals_added_to_optimizer_ ? 1.0 : 0.0;
+            bd.strong_label_optimizer_residual_count = static_cast<double>(strong_label_optimizer_residual_count_);
+            bd.strong_label_score_before_optimization = strong_label_score_before_optimization_;
+            bd.strong_label_score_after_optimization = strong_label_score_after_optimization_ > 0.0 ? strong_label_score_after_optimization_ : strong_stats.score;
             bd.strong_track_residual_count = static_cast<double>(strong_track_residual_count_ > 0 ? strong_track_residual_count_ : strong_stats.track_count);
             bd.strong_pole_residual_count = static_cast<double>(strong_pole_residual_count_ > 0 ? strong_pole_residual_count_ : strong_stats.pole_count);
             bd.strong_switch_residual_count = static_cast<double>(strong_switch_residual_count_ > 0 ? strong_switch_residual_count_ : strong_stats.switch_count);
@@ -1134,6 +1218,12 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "label_vehicle_eligible_count: " << last_score_breakdown_.label_vehicle_eligible_count << "\n";
     result_file << "label_person_eligible_count: " << last_score_breakdown_.label_person_eligible_count << "\n";
     result_file << "strong_label_feature_count: " << last_score_breakdown_.strong_label_feature_count << "\n";
+    result_file << "strong_label_object_count: " << last_score_breakdown_.strong_label_object_count << "\n";
+    result_file << "strong_label_residual_count: " << last_score_breakdown_.strong_label_residual_count << "\n";
+    result_file << "strong_residuals_added_to_optimizer: " << last_score_breakdown_.strong_residuals_added_to_optimizer << "\n";
+    result_file << "strong_label_optimizer_residual_count: " << last_score_breakdown_.strong_label_optimizer_residual_count << "\n";
+    result_file << "strong_label_score_before_optimization: " << last_score_breakdown_.strong_label_score_before_optimization << "\n";
+    result_file << "strong_label_score_after_optimization: " << last_score_breakdown_.strong_label_score_after_optimization << "\n";
     result_file << "strong_track_residual_count: " << last_score_breakdown_.strong_track_residual_count << "\n";
     result_file << "strong_pole_residual_count: " << last_score_breakdown_.strong_pole_residual_count << "\n";
     result_file << "strong_switch_residual_count: " << last_score_breakdown_.strong_switch_residual_count << "\n";

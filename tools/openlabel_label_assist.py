@@ -296,7 +296,131 @@ def _iou(a: np.ndarray, b: np.ndarray):
     return inter/uni if uni>0 else 0.0
 
 
-def export_label_assist(label_json: str, frame_id: int, image_path: str, image_sensor: str, sam_base: str, frame_dir: str, lidar_base: str|None=None, lidar_pcd_path: str|None=None, teacher_visible_xmax_m: float = 120.0, teacher_image_bbox_padding_m: float = 8.0, use_sam_refine: bool = False, strong_features_enabled: bool = True, max_track_samples_per_object: int = 800, max_pole_samples_per_object: int = 20, bbox_padding_px: int = 12):
+def _fixed_body_to_optical() -> np.ndarray:
+    return np.asarray([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]], dtype=np.float64)
+
+
+def _openlabel_camera_matrix(openlabel: Dict[str, Any], image_sensor: str):
+    stream = (openlabel.get("streams") or {}).get(image_sensor) or {}
+    intr = ((stream.get("stream_properties") or {}).get("intrinsics_pinhole") or {})
+    mat = intr.get("camera_matrix") or []
+    if len(mat) >= 12:
+        return np.asarray([float(mat[0]), float(mat[1]), float(mat[2]), float(mat[4]), float(mat[5]), float(mat[6]), float(mat[8]), float(mat[9]), float(mat[10])], dtype=np.float64).reshape(3, 3)
+    if len(mat) >= 9:
+        return np.asarray([float(v) for v in mat[:9]], dtype=np.float64).reshape(3, 3)
+    return None
+
+
+def _openlabel_lidar_to_optical(openlabel: Dict[str, Any], image_sensor: str):
+    cs = (openlabel.get("coordinate_systems") or {}).get(image_sensor) or {}
+    pose = cs.get("pose_wrt_parent") or {}
+    trans = pose.get("translation") or [0.0, 0.0, 0.0]
+    quat = pose.get("quaternion") or [0.0, 0.0, 0.0, 1.0]
+    if len(trans) < 3 or len(quat) < 4:
+        return None
+    T_sensor_to_lidar = np.eye(4, dtype=np.float64)
+    T_sensor_to_lidar[:3, :3] = _quat_to_rot(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]))
+    T_sensor_to_lidar[:3, 3] = np.asarray([float(v) for v in trans[:3]], dtype=np.float64)
+    T_lidar_to_body = np.linalg.inv(T_sensor_to_lidar)
+    T_body_to_optical = np.eye(4, dtype=np.float64)
+    T_body_to_optical[:3, :3] = _fixed_body_to_optical()
+    return T_body_to_optical @ T_lidar_to_body
+
+
+def _project_point(K: np.ndarray, T: np.ndarray, p3):
+    p = np.asarray([float(p3[0]), float(p3[1]), float(p3[2]), 1.0], dtype=np.float64)
+    q = T @ p
+    if q[2] <= 1e-6:
+        return None
+    uvw = K @ q[:3]
+    return float(uvw[0] / uvw[2]), float(uvw[1] / uvw[2])
+
+
+def _point_segment_dist(px, py, ax, ay, bx, by):
+    vx, vy = bx - ax, by - ay
+    wx, wy = px - ax, py - ay
+    den = vx * vx + vy * vy
+    t = 0.0 if den <= 1e-9 else max(0.0, min(1.0, (wx * vx + wy * vy) / den))
+    cx, cy = ax + t * vx, ay + t * vy
+    return math.hypot(px - cx, py - cy)
+
+
+def _polyline_dist(px, py, vals):
+    n = int(float(vals[0])) if vals else 0
+    coords = [float(v) for v in vals[1:1 + 2 * n]]
+    if n < 2 or len(coords) < 4:
+        return 1e6
+    best = 1e6
+    for i in range(n - 1):
+        ax, ay = coords[2 * i], coords[2 * i + 1]
+        bx, by = coords[2 * i + 2], coords[2 * i + 3]
+        best = min(best, _point_segment_dist(px, py, ax, ay, bx, by))
+    return best
+
+
+def _bbox_dist(px, py, vals):
+    if len(vals) < 4:
+        return 1e6
+    x0, y0, x1, y1 = [float(v) for v in vals[:4]]
+    dx = max(x0 - px, 0.0, px - x1)
+    dy = max(y0 - py, 0.0, py - y1)
+    return math.hypot(dx, dy)
+
+
+def _centerline_dist(px, py, vals):
+    if len(vals) < 4:
+        return 1e6
+    return _point_segment_dist(px, py, float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
+
+
+def _score_strong_rows_with_openlabel_pose(openlabel: Dict[str, Any], image_sensor: str, strong_rows: List[str], width: int, height: int):
+    K = _openlabel_camera_matrix(openlabel, image_sensor)
+    T = _openlabel_lidar_to_optical(openlabel, image_sensor)
+    if K is None or T is None:
+        return {}, {}, {}, False
+    stats: Dict[str, Dict[str, float]] = {}
+    for line in strong_rows:
+        if not line or line.startswith("#"):
+            continue
+        parts = line.strip().split("	")
+        if len(parts) < 12:
+            continue
+        cls = parts[0]
+        p3 = [float(parts[4]), float(parts[5]), float(parts[6])]
+        image_kind = parts[10]
+        vals = parts[11:]
+        uv = _project_point(K, T, p3)
+        st = stats.setdefault(cls, {"total": 0.0, "in_image": 0.0, "dist_sum": 0.0, "score_sum": 0.0})
+        st["total"] += 1.0
+        if uv is None:
+            st["dist_sum"] += 1000.0
+            continue
+        u, v = uv
+        if 0.0 <= u < float(width) and 0.0 <= v < float(height):
+            st["in_image"] += 1.0
+        if image_kind in ("polyline", "polygon"):
+            d = _polyline_dist(u, v, vals)
+        elif image_kind == "centerline":
+            d = _centerline_dist(u, v, vals)
+        elif image_kind == "bbox":
+            d = _bbox_dist(u, v, vals)
+        else:
+            d = 1000.0
+        st["dist_sum"] += d
+        st["score_sum"] += math.exp(-(d * d) / (64.0 * 64.0))
+    scores, mean_dists, ratios = {}, {}, {}
+    valid = True
+    for cls, st in stats.items():
+        total = max(1.0, st["total"])
+        scores[cls] = float(st["score_sum"] / total)
+        mean_dists[cls] = float(st["dist_sum"] / total)
+        ratios[cls] = float(st["in_image"] / total)
+        if cls in {"buffer_stop", "catenary_pole"} and (scores[cls] < 0.2 or ratios[cls] < 0.5):
+            valid = False
+    return scores, mean_dists, ratios, valid
+
+
+def export_label_assist(label_json: str, frame_id: int, image_path: str, image_sensor: str, sam_base: str, frame_dir: str, lidar_base: str|None=None, lidar_pcd_path: str|None=None, teacher_visible_xmax_m: float = 120.0, teacher_image_bbox_padding_m: float = 8.0, use_sam_refine: bool = False, strong_features_enabled: bool = True, max_track_samples_per_object: int = 800, max_pole_samples_per_object: int = 20, bbox_padding_px: int = 12, track_visible_xmax_m: float = 120.0, switch_visible_xmax_m: float = 120.0, catenary_pole_visible_xmax_m: float = 160.0, buffer_stop_visible_xmax_m: float = 240.0):
     image=cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"Cannot read image: {image_path}")
@@ -316,8 +440,18 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
     strong_tsv_lines=["# class_type object_id role weight x1 y1 z1 x2 y2 z2 image_kind image_values...\n"]
     strong_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
     strong_residual_point_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
+    strong_raw_object_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
+    strong_filtered_by_range_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
+    strong_missing_rgb_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
+    strong_missing_lidar_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
     teacher_visible_xmax_m = float(teacher_visible_xmax_m)
     teacher_image_bbox_padding_m = float(teacher_image_bbox_padding_m)
+    strong_visible_xmax_m = {
+        "track": float(track_visible_xmax_m),
+        "switch": float(switch_visible_xmax_m),
+        "catenary_pole": float(catenary_pole_visible_xmax_m),
+        "buffer_stop": float(buffer_stop_visible_xmax_m),
+    }
 
     def add_teacher_point(group: str, x: float, y: float, z: float, cid: int, weight: float, object_id: str, role: str) -> None:
         if group in raw_point_counts:
@@ -331,6 +465,14 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
         point_lines.append(f"{x:.6f} {y:.6f} {z:.6f} {cid} {weight:.6f} {object_id} {role}\n")
         if group in point_counts:
             point_counts[group]+=1
+
+    def _strong_xmax(class_type: str) -> float:
+        return float(strong_visible_xmax_m.get(class_type, teacher_visible_xmax_m))
+
+    def _buffer_stop_effective_weight(pt, base_weight: float = 1.0) -> float:
+        x = float(pt[0]) if pt is not None else 0.0
+        decay = 1.0 - max(0.0, x - 120.0) / 160.0
+        return float(base_weight) * max(0.35, min(1.0, decay))
 
     label_objects=[]
     for rec in rows:
@@ -364,120 +506,143 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
                     samples = _vec_samples_from_indices(v.get("val"), pcd_xyz) if pcd_xyz is not None else _vec_samples(v.get("val"))
                     for si,(x,y,z) in enumerate(samples):
                         add_teacher_point(group, x, y, z, cid, weight, rec['object_id'], f"{group}_vec{vi}_sample{si}")
-        if strong_features_enabled and rec["type"] in STRONG_TYPES and rec.get("paired"):
-            image_polys = []
-            for p in rec.get("rgb_poly2d", []):
-                pts = _poly_points(p.get("val"), w, h)
-                if pts is not None:
-                    image_polys.append([[float(x), float(y)] for x, y in pts.reshape(-1, 2).tolist()])
-            image_rects = []
-            for b in rec.get("rgb_bbox", []):
-                rect = _bbox_to_rect(b.get("val"), w, h)
-                if rect:
-                    image_rects.append(rect)
+        if strong_features_enabled and rec["type"] in STRONG_TYPES:
+            class_type = rec["type"]
+            strong_raw_object_counts[class_type] += 1
+            has_rgb = bool(rec.get("rgb_bbox")) or bool(rec.get("rgb_poly2d"))
+            has_lidar = bool(rec.get("lidar_cuboid")) or bool(rec.get("lidar_vec"))
+            if not has_rgb:
+                strong_missing_rgb_counts[class_type] += 1
+            if not has_lidar or not rec.get("paired"):
+                strong_missing_lidar_counts[class_type] += 1
+            before_feature_count = len(strong_features)
 
-            def append_feature(feature, rows):
-                strong_features.append(feature)
-                strong_counts[feature["class_type"]] += 1
-                strong_tsv_lines.extend(rows)
+            if rec.get("paired") and has_rgb and has_lidar:
+                image_polys = []
+                for p in rec.get("rgb_poly2d", []):
+                    pts = _poly_points(p.get("val"), w, h)
+                    if pts is not None:
+                        image_polys.append([[float(x), float(y)] for x, y in pts.reshape(-1, 2).tolist()])
+                image_rects = []
+                for b in rec.get("rgb_bbox", []):
+                    rect = _bbox_to_rect(b.get("val"), w, h)
+                    if rect:
+                        image_rects.append(rect)
 
-            if rec["type"] == "track" and image_polys:
-                for vi, v in enumerate(rec.get("lidar_vec", [])):
-                    samples = _vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=max_track_samples_per_object) if pcd_xyz is not None else _vec_samples(v.get("val"))
-                    samples = _downsample_points(_filter_visible_points(samples, teacher_visible_xmax_m), max_track_samples_per_object)
-                    if not samples:
-                        continue
-                    poly = image_polys[min(vi, len(image_polys) - 1)]
+                def append_feature(feature, rows):
+                    strong_features.append(feature)
+                    strong_counts[feature["class_type"]] += 1
+                    strong_tsv_lines.extend(rows)
+
+                if class_type == "track" and image_polys:
+                    xmax_m = _strong_xmax("track")
+                    for vi, v in enumerate(rec.get("lidar_vec", [])):
+                        raw_samples = _vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=max_track_samples_per_object) if pcd_xyz is not None else _vec_samples(v.get("val"))
+                        visible_samples = _filter_visible_points(raw_samples, xmax_m)
+                        strong_filtered_by_range_counts["track"] += max(0, len(raw_samples) - len(visible_samples))
+                        samples = _downsample_points(visible_samples, max_track_samples_per_object)
+                        if not samples:
+                            continue
+                        poly = image_polys[min(vi, len(image_polys) - 1)]
+                        image_vals = [len(poly)] + [coord for pt in poly for coord in pt]
+                        rows = [_tsv_row("track", rec["object_id"], f"point{si}", 1.0, pt, (0, 0, 0), "polyline", image_vals) for si, pt in enumerate(samples)]
+                        strong_residual_point_counts["track"] += len(samples)
+                        append_feature({
+                            "object_id": rec["object_id"], "class_type": "track", "weight": 1.0, "paired": True,
+                            "visible_x_range_m": [0.0, xmax_m],
+                            "image_geometry": {"kind": "polyline", "points": poly},
+                            "lidar_geometry": {"kind": "sample_points", "points": [list(map(float, p)) for p in samples]},
+                        }, rows)
+
+                elif class_type == "switch" and image_polys:
+                    xmax_m = _strong_xmax("switch")
+                    switch_points = []
+                    for v in rec.get("lidar_vec", []):
+                        switch_points.extend(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=400) if pcd_xyz is not None else _vec_samples(v.get("val")))
+                    for c in rec.get("lidar_cuboid", []):
+                        switch_points.extend(_cuboid_samples(c.get("val")))
+                    raw_switch_points = switch_points
+                    visible_switch_points = _filter_visible_points(raw_switch_points, xmax_m)
+                    strong_filtered_by_range_counts["switch"] += max(0, len(raw_switch_points) - len(visible_switch_points))
+                    switch_points = _downsample_points(visible_switch_points, 400)
+                    if switch_points:
+                        poly = image_polys[0]
+                        image_vals = [len(poly)] + [coord for pt in poly for coord in pt]
+                        rows = [_tsv_row("switch", rec["object_id"], f"point{si}", 1.2, pt, (0, 0, 0), "polyline", image_vals) for si, pt in enumerate(switch_points)]
+                        strong_residual_point_counts["switch"] += len(switch_points)
+                        append_feature({
+                            "object_id": rec["object_id"], "class_type": "switch", "weight": 1.2, "paired": True,
+                            "visible_x_range_m": [0.0, xmax_m],
+                            "image_geometry": {"kind": "polygon", "points": poly},
+                            "lidar_geometry": {"kind": "sample_points", "points": [list(map(float, p)) for p in switch_points]},
+                        }, rows)
+
+                elif class_type == "catenary_pole" and image_rects:
+                    xmax_m = _strong_xmax("catenary_pole")
+                    rect = image_rects[0]
+                    centerline = _bbox_centerline_from_rect(rect)
+                    image_vals = [centerline[0][0], centerline[0][1], centerline[1][0], centerline[1][1]]
                     rows = []
-                    image_vals = [len(poly)] + [coord for pt in poly for coord in pt]
-                    for si, pt in enumerate(samples):
-                        rows.append(_tsv_row("track", rec["object_id"], f"point{si}", 1.0, pt, (0, 0, 0), "polyline", image_vals))
-                    strong_residual_point_counts["track"] += len(samples)
-                    append_feature({
-                        "object_id": rec["object_id"], "class_type": "track", "weight": 1.0, "paired": True,
-                        "visible_x_range_m": [0.0, teacher_visible_xmax_m],
-                        "image_geometry": {"kind": "polyline", "points": poly},
-                        "lidar_geometry": {"kind": "sample_points", "points": [list(map(float, p)) for p in samples]},
-                    }, rows)
+                    axes = []
+                    sample_points = []
+                    for ci, c in enumerate(rec.get("lidar_cuboid", [])):
+                        geom = _cuboid_geometry(c.get("val"))
+                        if geom and _is_visible_lidar_point(geom["axis"][0], xmax_m) and _is_visible_lidar_point(geom["axis"][1], xmax_m):
+                            axes.append(geom["axis"])
+                            rows.append(_tsv_row("catenary_pole", rec["object_id"], f"axis{ci}", 1.5, geom["axis"][0], geom["axis"][1], "centerline", image_vals))
+                    for v in rec.get("lidar_vec", []):
+                        sample_points.extend(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=max_pole_samples_per_object) if pcd_xyz is not None else _vec_samples(v.get("val")))
+                    sample_points = _downsample_points(_filter_visible_points(sample_points, xmax_m), max_pole_samples_per_object)
+                    for si, pt in enumerate(sample_points):
+                        rows.append(_tsv_row("catenary_pole", rec["object_id"], f"point{si}", 1.5, pt, (0, 0, 0), "centerline", image_vals))
+                    if rows:
+                        strong_residual_point_counts["catenary_pole"] += len(rows)
+                        append_feature({
+                            "object_id": rec["object_id"], "class_type": "catenary_pole", "weight": 1.5, "paired": True,
+                            "visible_x_range_m": [0.0, xmax_m],
+                            "image_geometry": {"kind": "bbox_centerline", "points": centerline, "bbox": list(map(float, rect))},
+                            "lidar_geometry": {"kind": "cuboid_axis", "axes": axes, "sample_points": [list(map(float, p)) for p in sample_points]},
+                        }, rows)
 
-            elif rec["type"] == "switch" and image_polys:
-                switch_points = []
-                for v in rec.get("lidar_vec", []):
-                    switch_points.extend(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=400) if pcd_xyz is not None else _vec_samples(v.get("val")))
-                for c in rec.get("lidar_cuboid", []):
-                    switch_points.extend(_cuboid_samples(c.get("val")))
-                switch_points = _downsample_points(_filter_visible_points(switch_points, teacher_visible_xmax_m), 400)
-                if switch_points:
-                    poly = image_polys[0]
-                    image_vals = [len(poly)] + [coord for pt in poly for coord in pt]
-                    rows = [_tsv_row("switch", rec["object_id"], f"point{si}", 1.2, pt, (0, 0, 0), "polyline", image_vals) for si, pt in enumerate(switch_points)]
-                    strong_residual_point_counts["switch"] += len(switch_points)
-                    append_feature({
-                        "object_id": rec["object_id"], "class_type": "switch", "weight": 1.2, "paired": True,
-                        "visible_x_range_m": [0.0, teacher_visible_xmax_m],
-                        "image_geometry": {"kind": "polygon", "points": poly},
-                        "lidar_geometry": {"kind": "sample_points", "points": [list(map(float, p)) for p in switch_points]},
-                    }, rows)
+                elif class_type == "buffer_stop" and image_rects:
+                    xmax_m = _strong_xmax("buffer_stop")
+                    rect = image_rects[0]
+                    x0, y0, x1, y1 = rect
+                    x0 = max(0, x0 - int(bbox_padding_px)); y0 = max(0, y0 - int(bbox_padding_px))
+                    x1 = min(w - 1, x1 + int(bbox_padding_px)); y1 = min(h - 1, y1 + int(bbox_padding_px))
+                    image_vals = [x0, y0, x1, y1]
+                    rows = []
+                    geoms = []
+                    for ci, c in enumerate(rec.get("lidar_cuboid", [])):
+                        geom = _cuboid_geometry(c.get("val"))
+                        if not geom:
+                            continue
+                        geoms.append(geom)
+                        pts = [("center", geom["center"])] + [("corner", p) for p in geom["corners"]]
+                        for role, pt in pts:
+                            if _is_visible_lidar_point(pt, xmax_m):
+                                rows.append(_tsv_row("buffer_stop", rec["object_id"], f"{role}{ci}", _buffer_stop_effective_weight(pt, 1.0), pt, (0, 0, 0), "bbox", image_vals))
+                    for v in rec.get("lidar_vec", []):
+                        vec_samples = _vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=80) if pcd_xyz is not None else _vec_samples(v.get("val"))
+                        for si, pt in enumerate(_downsample_points(_filter_visible_points(vec_samples, xmax_m), 80)):
+                            rows.append(_tsv_row("buffer_stop", rec["object_id"], f"point{si}", _buffer_stop_effective_weight(pt, 1.0), pt, (0, 0, 0), "bbox", image_vals))
+                    if rows:
+                        strong_residual_point_counts["buffer_stop"] += len(rows)
+                        append_feature({
+                            "object_id": rec["object_id"], "class_type": "buffer_stop", "weight": 1.0, "paired": True,
+                            "visible_x_range_m": [0.0, xmax_m],
+                            "image_geometry": {"kind": "bbox", "bbox": [float(x0), float(y0), float(x1), float(y1)]},
+                            "lidar_geometry": {"kind": "cuboid_corners", "cuboids": geoms},
+                        }, rows)
 
-            elif rec["type"] == "catenary_pole" and image_rects:
-                rect = image_rects[0]
-                centerline = _bbox_centerline_from_rect(rect)
-                image_vals = [centerline[0][0], centerline[0][1], centerline[1][0], centerline[1][1]]
-                rows = []
-                axes = []
-                sample_points = []
-                for ci, c in enumerate(rec.get("lidar_cuboid", [])):
-                    geom = _cuboid_geometry(c.get("val"))
-                    if geom and _is_visible_lidar_point(geom["axis"][0], teacher_visible_xmax_m) and _is_visible_lidar_point(geom["axis"][1], teacher_visible_xmax_m):
-                        axes.append(geom["axis"])
-                        rows.append(_tsv_row("catenary_pole", rec["object_id"], f"axis{ci}", 1.5, geom["axis"][0], geom["axis"][1], "centerline", image_vals))
-                for v in rec.get("lidar_vec", []):
-                    sample_points.extend(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=max_pole_samples_per_object) if pcd_xyz is not None else _vec_samples(v.get("val")))
-                sample_points = _downsample_points(_filter_visible_points(sample_points, teacher_visible_xmax_m), max_pole_samples_per_object)
-                for si, pt in enumerate(sample_points):
-                    rows.append(_tsv_row("catenary_pole", rec["object_id"], f"point{si}", 1.5, pt, (0, 0, 0), "centerline", image_vals))
-                if rows:
-                    strong_residual_point_counts["catenary_pole"] += len(rows)
-                    append_feature({
-                        "object_id": rec["object_id"], "class_type": "catenary_pole", "weight": 1.5, "paired": True,
-                        "visible_x_range_m": [0.0, teacher_visible_xmax_m],
-                        "image_geometry": {"kind": "bbox_centerline", "points": centerline, "bbox": list(map(float, rect))},
-                        "lidar_geometry": {"kind": "cuboid_axis", "axes": axes, "sample_points": [list(map(float, p)) for p in sample_points]},
-                    }, rows)
-
-            elif rec["type"] == "buffer_stop" and image_rects:
-                rect = image_rects[0]
-                x0, y0, x1, y1 = rect
-                x0 = max(0, x0 - int(bbox_padding_px)); y0 = max(0, y0 - int(bbox_padding_px))
-                x1 = min(w - 1, x1 + int(bbox_padding_px)); y1 = min(h - 1, y1 + int(bbox_padding_px))
-                image_vals = [x0, y0, x1, y1]
-                rows = []
-                geoms = []
-                for ci, c in enumerate(rec.get("lidar_cuboid", [])):
-                    geom = _cuboid_geometry(c.get("val"))
-                    if not geom:
-                        continue
-                    geoms.append(geom)
-                    pts = [("center", geom["center"])] + [("corner", p) for p in geom["corners"]]
-                    for role, pt in pts:
-                        if _is_visible_lidar_point(pt, teacher_visible_xmax_m):
-                            rows.append(_tsv_row("buffer_stop", rec["object_id"], f"{role}{ci}", 1.0, pt, (0, 0, 0), "bbox", image_vals))
-                for v in rec.get("lidar_vec", []):
-                    for si, pt in enumerate(_downsample_points(_filter_visible_points(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=80) if pcd_xyz is not None else _vec_samples(v.get("val")), teacher_visible_xmax_m), 80)):
-                        rows.append(_tsv_row("buffer_stop", rec["object_id"], f"point{si}", 1.0, pt, (0, 0, 0), "bbox", image_vals))
-                if rows:
-                    strong_residual_point_counts["buffer_stop"] += len(rows)
-                    append_feature({
-                        "object_id": rec["object_id"], "class_type": "buffer_stop", "weight": 1.0, "paired": True,
-                        "visible_x_range_m": [0.0, teacher_visible_xmax_m],
-                        "image_geometry": {"kind": "bbox", "bbox": [float(x0), float(y0), float(x1), float(y1)]},
-                        "lidar_geometry": {"kind": "cuboid_corners", "cuboids": geoms},
-                    }, rows)
+            if has_rgb and has_lidar and len(strong_features) == before_feature_count:
+                strong_filtered_by_range_counts[class_type] += 1
         label_objects.append(rec)
     os.makedirs(os.path.dirname(sam_base), exist_ok=True)
     os.makedirs(frame_dir, exist_ok=True)
     if lidar_base:
         os.makedirs(os.path.dirname(lidar_base), exist_ok=True)
+    openlabel_scores, openlabel_mean_dists, openlabel_in_image_ratios, label_coordinate_chain_valid = _score_strong_rows_with_openlabel_pose(openlabel, image_sensor, strong_tsv_lines[1:], w, h)
     summary={
         "label_assist_enabled": True,
         "frame_id": frame_id,
@@ -503,6 +668,16 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
         "strong_label_feature_count": int(len(strong_features)),
         "strong_label_feature_counts": strong_counts,
         "strong_label_residual_point_counts": strong_residual_point_counts,
+        "strong_label_raw_object_counts": strong_raw_object_counts,
+        "strong_label_filtered_by_range_counts": strong_filtered_by_range_counts,
+        "strong_label_missing_rgb_counts": strong_missing_rgb_counts,
+        "strong_label_missing_lidar_counts": strong_missing_lidar_counts,
+        "strong_label_visible_xmax_m": strong_visible_xmax_m,
+        "extrinsic_source": "openlabel_coordinate_systems",
+        "openlabel_projection_score_by_class": openlabel_scores,
+        "openlabel_projection_mean_dist_px_by_class": openlabel_mean_dists,
+        "openlabel_projection_in_image_ratio_by_class": openlabel_in_image_ratios,
+        "label_coordinate_chain_valid": bool(label_coordinate_chain_valid),
     }
     coords=[]
     for line in point_lines[1:]:
@@ -580,8 +755,20 @@ def main():
     ap.add_argument("--max-track-samples-per-object", type=int, default=800)
     ap.add_argument("--max-pole-samples-per-object", type=int, default=20)
     ap.add_argument("--bbox-padding-px", type=int, default=12)
+    ap.add_argument("--track-visible-xmax-m", type=float, default=120.0)
+    ap.add_argument("--switch-visible-xmax-m", type=float, default=120.0)
+    ap.add_argument("--catenary-pole-visible-xmax-m", type=float, default=160.0)
+    ap.add_argument("--buffer-stop-visible-xmax-m", type=float, default=240.0)
     args=ap.parse_args()
-    summary=export_label_assist(args.label_json,args.frame_id,args.image,args.image_sensor,args.sam_base,args.frame_dir,args.lidar_base or None,args.lidar_pcd or None,args.teacher_visible_xmax_m,args.teacher_image_bbox_padding_m,args.use_sam_refine,args.strong_features_enabled,args.max_track_samples_per_object,args.max_pole_samples_per_object,args.bbox_padding_px)
+    summary=export_label_assist(
+        args.label_json, args.frame_id, args.image, args.image_sensor,
+        args.sam_base, args.frame_dir, args.lidar_base or None,
+        args.lidar_pcd or None, args.teacher_visible_xmax_m,
+        args.teacher_image_bbox_padding_m, args.use_sam_refine,
+        args.strong_features_enabled, args.max_track_samples_per_object,
+        args.max_pole_samples_per_object, args.bbox_padding_px,
+        args.track_visible_xmax_m, args.switch_visible_xmax_m,
+        args.catenary_pole_visible_xmax_m, args.buffer_stop_visible_xmax_m)
     print(json.dumps(summary, ensure_ascii=False))
 
 if __name__ == "__main__":

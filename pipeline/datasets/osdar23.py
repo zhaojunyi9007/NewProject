@@ -4,15 +4,92 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 from pipeline.datasets.resolver import OSDaRResolver
 from pipeline.datasets.base import DatasetAdapter
+
+def _fixed_body_to_optical() -> np.ndarray:
+    """OSDaR23 non-optical camera body (x fwd, y left, z up) -> optical camera."""
+    return np.array(
+        [
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_xyzw_to_rot(q: Sequence[float]) -> np.ndarray:
+    if len(q) < 4:
+        return np.eye(3, dtype=np.float64)
+    qx, qy, qz, qw = [float(v) for v in q[:4]]
+    n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if n <= 1e-12:
+        return np.eye(3, dtype=np.float64)
+    qx, qy, qz, qw = qx / n, qy / n, qz / n, qw / n
+    return np.asarray(
+        [
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _resolve_openlabel_json(config: Dict[str, Any]) -> str:
+    label_cfg = config.get("label_assist") or {}
+    explicit = str(label_cfg.get("label_json", "") or "").strip()
+    if explicit:
+        return explicit if os.path.isabs(explicit) else os.path.abspath(explicit)
+    root = str(config.get("data", {}).get("osdar_sequence_root", "") or "").strip()
+    if root:
+        tagged = os.path.basename(root.rstrip(os.sep))
+        for candidate in (os.path.join(root, f"{tagged}_labels.json"), os.path.join(root, "1_calibration_1.1_labels.json")):
+            if os.path.isfile(candidate):
+                return candidate
+    return ""
+
+
+def load_osdar23_openlabel_extrinsic(label_json: str, camera_folder: str) -> Optional[Tuple[List[float], List[float]]]:
+    """Read OpenLABEL coordinate_systems camera pose and return LiDAR/base -> optical camera."""
+    if not label_json or not os.path.isfile(label_json):
+        return None
+    with open(label_json, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    openlabel = data.get("openlabel", data)
+    cs = (openlabel.get("coordinate_systems") or {}).get((camera_folder or "rgb_center").strip())
+    pose = (cs or {}).get("pose_wrt_parent") or {}
+    matrix = pose.get("matrix4x4") or pose.get("matrix")
+    if matrix and len(matrix) >= 16:
+        T_sensor_to_lidar = np.asarray([float(v) for v in matrix[:16]], dtype=np.float64).reshape(4, 4)
+    else:
+        quat = pose.get("quaternion") or pose.get("quat") or [0.0, 0.0, 0.0, 1.0]
+        trans = pose.get("translation") or pose.get("position") or [0.0, 0.0, 0.0]
+        if len(trans) < 3:
+            return None
+        T_sensor_to_lidar = np.eye(4, dtype=np.float64)
+        T_sensor_to_lidar[:3, :3] = _quat_xyzw_to_rot(quat)
+        T_sensor_to_lidar[:3, 3] = np.asarray([float(v) for v in trans[:3]], dtype=np.float64)
+    T_lidar_to_body = np.linalg.inv(T_sensor_to_lidar)
+    T_body_to_optical = np.eye(4, dtype=np.float64)
+    T_body_to_optical[:3, :3] = _fixed_body_to_optical()
+    T_lidar_to_optical = T_body_to_optical @ T_lidar_to_body
+    rvec, _ = cv2.Rodrigues(T_lidar_to_optical[:3, :3])
+    tvec = T_lidar_to_optical[:3, 3]
+    print(f"  [OSDaR23 OpenLABEL] sensor={camera_folder} label_json={label_json}")
+    print(f"  [OSDaR23 OpenLABEL] T_lidar_to_optical t={tvec.tolist()}")
+    print(f"  [OSDaR23 OpenLABEL] rvec={rvec.reshape(-1).tolist()}")
+    return rvec.reshape(-1).tolist(), tvec.reshape(-1).tolist()
 
 
 def load_osdar23_init_extrinsic(calib_path: str, camera_folder: str) -> Optional[Tuple[List[float], List[float]]]:
@@ -63,14 +140,7 @@ def load_osdar23_init_extrinsic(calib_path: str, camera_folder: str) -> Optional
 
     T_lidar_to_body = np.linalg.inv(T_cam_to_parent)
 
-    R_body_to_optical = np.array(
-        [
-            [0, -1, 0],
-            [0, 0, -1],
-            [1, 0, 0],
-        ],
-        dtype=np.float64,
-    )
+    R_body_to_optical = _fixed_body_to_optical()
     T_body_to_optical = np.eye(4, dtype=np.float64)
     T_body_to_optical[:3, :3] = R_body_to_optical
 
@@ -172,6 +242,23 @@ class OSDaR23Adapter(DatasetAdapter):
         calib_file = str(self._config.get("data", {}).get("calib_file", "") or "")
         cam = str(self._config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
         return load_osdar23_init_extrinsic(calib_file, cam)
+
+
+    def resolve_label_json(self) -> str:
+        return _resolve_openlabel_json(self._config)
+
+    def load_label_assist_extrinsic(self) -> Optional[Tuple[List[float], List[float]]]:
+        label_cfg = self._config.get("label_assist") or {}
+        if not bool(label_cfg.get("enabled", False)):
+            return None
+        if not bool(label_cfg.get("use_openlabel_extrinsic", True)):
+            return None
+        label_json = self.resolve_label_json()
+        cam = str(self._config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
+        ext = load_osdar23_openlabel_extrinsic(label_json, cam)
+        if ext is None and bool(label_cfg.get("openlabel_extrinsic_fallback_to_calibration", True)):
+            return self.load_initial_extrinsic()
+        return ext
 
     def get_optimizer_env(self) -> Dict[str, str]:
         cam = str(self._config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")

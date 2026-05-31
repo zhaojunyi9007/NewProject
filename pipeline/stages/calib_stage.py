@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import Any, Dict
 
 from pipeline.context import RuntimeContext
 from pipeline.datasets import get_adapter
@@ -531,6 +532,21 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
     return out
 
 
+
+
+def _load_calib_stage_extrinsic(ds, config: Dict[str, Any]):
+    label_cfg = config.get("label_assist") or {}
+    if bool(label_cfg.get("enabled", False)) and bool(label_cfg.get("use_openlabel_extrinsic", True)):
+        loader = getattr(ds, "load_label_assist_extrinsic", None)
+        if callable(loader):
+            ext = loader()
+            if ext:
+                return ext, "openlabel_coordinate_systems"
+            if not bool(label_cfg.get("openlabel_extrinsic_fallback_to_calibration", True)):
+                return None, "openlabel_coordinate_systems_missing"
+    loader = getattr(ds, "load_initial_extrinsic", None)
+    return (loader(), "calibration_txt") if callable(loader) else (None, "config_initial_extrinsic")
+
 def run(context: RuntimeContext) -> None:
     print("\n" + "=" * 40)
     print("[阶段3] 两阶段标定优化")
@@ -559,11 +575,13 @@ def run(context: RuntimeContext) -> None:
     init_t = context.config["calibration"]["initial_extrinsic"]["translation"]
 
     ds = get_adapter(context.config)
-    ext = ds.load_initial_extrinsic()
+    ext, init_extrinsic_source = _load_calib_stage_extrinsic(ds, context.config)
     if ext:
         init_r, init_t = ext
         cam_folder = str(context.config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
-        print(f"[Info] 使用OSDaR23 calibration.txt 读取初始外参, camera={cam_folder}")
+        print(f"[Info] 使用初始外参: source={init_extrinsic_source}, camera={cam_folder}")
+    else:
+        init_extrinsic_source = "config_initial_extrinsic"
 
     bev_cfg = context.config.get("bev") or {}
     bev_by_frame = getattr(context, "bev_pose_by_frame", None) or {}
@@ -884,6 +902,10 @@ def run(context: RuntimeContext) -> None:
                     str(float(label_cfg.get("switch_weight", 1.2))),
                     "--strong_buffer_stop_weight",
                     str(float(label_cfg.get("buffer_stop_weight", 1.0))),
+                    "--strong_label_min_translation_prior_weight",
+                    str(float(sem_cfg.get("strong_label_min_translation_prior_weight", 5.0))),
+                    "--strong_label_rotation_prior_weight",
+                    str(float(sem_cfg.get("strong_label_rotation_prior_weight", 0.5))),
                     "--label_track_weight",
                     str(float(label_cfg.get("track_weight", 1.5))),
                     "--label_static_weight",
@@ -943,6 +965,7 @@ def run(context: RuntimeContext) -> None:
             for k in ("edge_raw_count", "edge_kept_count", "edge_range_gt_50_count", "edge_near_track_count"):
                 if k in edge_debug:
                     br[k] = edge_debug[k]
+        br["extrinsic_source"] = init_extrinsic_source
         br["selected_init_source"] = selected_init_source
         br["bev_candidate_rejected_by_gate"] = 1.0 if bev_candidate_rejected_by_gate else 0.0
         br["candidate_scores"] = candidate_scores
@@ -986,6 +1009,12 @@ def run(context: RuntimeContext) -> None:
                     f.write(f"refined_lidar_rail_nonzero_ratio: {br['refined_lidar_rail_nonzero_ratio']}\n")
         strong_debug = {k: br.get(k) for k in (
             "strong_label_feature_count",
+            "strong_label_object_count",
+            "strong_label_residual_count",
+            "strong_residuals_added_to_optimizer",
+            "strong_label_optimizer_residual_count",
+            "strong_label_score_before_optimization",
+            "strong_label_score_after_optimization",
             "strong_track_residual_count",
             "strong_pole_residual_count",
             "strong_switch_residual_count",
@@ -998,6 +1027,7 @@ def run(context: RuntimeContext) -> None:
             "strong_label_gate_used",
             "final_gate_source",
             "selected_init_source",
+            "extrinsic_source",
             "pose_jump_from_initial_m",
             "yaw_jump_from_initial_deg",
         ) if k in br}

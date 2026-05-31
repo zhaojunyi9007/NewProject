@@ -147,8 +147,15 @@ label_assist:
   bbox_padding_px: 12
   label_json: ""
   teacher_visible_xmax_m: 120.0
+  track_visible_xmax_m: 120.0
+  switch_visible_xmax_m: 120.0
+  catenary_pole_visible_xmax_m: 160.0
+  buffer_stop_visible_xmax_m: 240.0
   teacher_image_bbox_padding_m: 8.0
   use_sam_refine: true
+  use_openlabel_extrinsic: true
+  openlabel_extrinsic_fallback_to_calibration: true
+  debug_extrinsic_comparison: true
 
 semantic_calib:
   rail_weight: 1.5
@@ -157,6 +164,8 @@ semantic_calib:
   min_label_teacher_score: 0.20
   min_strong_label_score: 0.25
   min_strong_track_residual_count: 50
+  strong_label_min_translation_prior_weight: 5.0
+  strong_label_rotation_prior_weight: 0.5
   min_strong_static_residual_count: 2
   min_label_track_visible_count: 50
   min_label_residual_count_for_gate: 50

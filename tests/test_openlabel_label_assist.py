@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import sys
 
 import cv2
@@ -13,6 +14,7 @@ if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
 from openlabel_label_assist import export_label_assist  # noqa: E402
+from pipeline.datasets.osdar23 import load_osdar23_openlabel_extrinsic  # noqa: E402
 
 
 def _write_openlabel(path):
@@ -264,3 +266,136 @@ def test_openlabel_strong_features_skip_unpaired_switch_and_export_buffer_stop(t
     tsv = (tmp_path / "lidar" / "0000000012_label_strong_features.tsv").read_text(encoding="utf-8")
     assert "buffer_stop\tbuf1" in tsv
     assert "switch\tsw1" not in tsv
+
+
+def test_openlabel_strong_features_use_per_class_visible_ranges(tmp_path):
+    label_json = tmp_path / "labels.json"
+    data = {
+        "openlabel": {
+            "objects": {
+                "trk1": {"type": "track", "name": "track"},
+                "sw1": {"type": "switch", "name": "switch"},
+                "pole_near": {"type": "catenary_pole", "name": "near pole"},
+                "pole_mid": {"type": "catenary_pole", "name": "mid pole"},
+                "buf_far": {"type": "buffer_stop", "name": "far buffer"},
+            },
+            "frames": {
+                "12": {
+                    "objects": {
+                        "trk1": {
+                            "object_data": {
+                                "poly2d": [{"name": "rgb_center__poly", "coordinate_system": "rgb_center", "val": [5, 50, 40, 40, 75, 50]}],
+                                "vec": [{"name": "lidar__vec", "coordinate_system": "lidar", "val": [0, 0, 0, 130, 0, 0]}],
+                            }
+                        },
+                        "sw1": {
+                            "object_data": {
+                                "poly2d": [{"name": "rgb_center__poly", "coordinate_system": "rgb_center", "val": [10, 40, 30, 42, 50, 45]}],
+                                "vec": [{"name": "lidar__vec", "coordinate_system": "lidar", "val": [20, 0, 0, 130, 0, 0]}],
+                            }
+                        },
+                        "pole_near": {
+                            "object_data": {
+                                "bbox": [{"name": "rgb_center__bbox", "coordinate_system": "rgb_center", "val": [70, 20, 6, 24]}],
+                                "cuboid": [{"name": "lidar__cuboid", "coordinate_system": "lidar", "val": [105, 2, 2, 0, 0, 0, 1, 0.4, 0.4, 4]}],
+                            }
+                        },
+                        "pole_mid": {
+                            "object_data": {
+                                "bbox": [{"name": "rgb_center__bbox", "coordinate_system": "rgb_center", "val": [50, 20, 6, 24]}],
+                                "cuboid": [{"name": "lidar__cuboid", "coordinate_system": "lidar", "val": [150, 3, 2, 0, 0, 0, 1, 0.4, 0.4, 4]}],
+                            }
+                        },
+                        "buf_far": {
+                            "object_data": {
+                                "bbox": [{"name": "rgb_center__bbox", "coordinate_system": "rgb_center", "val": [40, 30, 20, 12]}],
+                                "cuboid": [{"name": "lidar__cuboid", "coordinate_system": "lidar", "val": [210, 0, 1, 0, 0, 0, 1, 2, 1, 2]}],
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    }
+    label_json.write_text(json.dumps(data), encoding="utf-8")
+    image_path = tmp_path / "image.png"
+    cv2.imwrite(str(image_path), np.zeros((64, 96, 3), dtype=np.uint8))
+    sam_base = str(tmp_path / "sam" / "0000000012")
+    frame_dir = str(tmp_path / "label_features" / "0000000012")
+    lidar_base = str(tmp_path / "lidar" / "0000000012")
+
+    summary = export_label_assist(
+        str(label_json),
+        12,
+        str(image_path),
+        "rgb_center",
+        sam_base,
+        frame_dir,
+        lidar_base,
+        strong_features_enabled=True,
+        teacher_visible_xmax_m=120.0,
+        track_visible_xmax_m=120.0,
+        switch_visible_xmax_m=120.0,
+        catenary_pole_visible_xmax_m=160.0,
+        buffer_stop_visible_xmax_m=240.0,
+    )
+
+    assert summary["strong_label_feature_counts"]["track"] == 1
+    assert summary["strong_label_feature_counts"]["switch"] == 1
+    assert summary["strong_label_feature_counts"]["catenary_pole"] == 2
+    assert summary["strong_label_feature_counts"]["buffer_stop"] == 1
+    assert summary["strong_label_filtered_by_range_counts"]["track"] >= 1
+    assert summary["strong_label_filtered_by_range_counts"]["switch"] >= 1
+    tsv = (tmp_path / "lidar" / "0000000012_label_strong_features.tsv").read_text(encoding="utf-8")
+    assert "buffer_stop\tbuf_far" in tsv
+    assert "catenary_pole\tpole_mid" in tsv
+
+
+def test_openlabel_extrinsic_uses_inverse_sensor_pose_then_optical_rotation(tmp_path):
+    label_json = tmp_path / "labels.json"
+    data = {
+        "openlabel": {
+            "coordinate_systems": {
+                "rgb_center": {
+                    "type": "sensor",
+                    "parent": "base",
+                    "pose_wrt_parent": {
+                        "translation": [1.0, 2.0, 3.0],
+                        "quaternion": [0.0, 0.0, 0.0, 1.0],
+                    },
+                }
+            }
+        }
+    }
+    label_json.write_text(json.dumps(data), encoding="utf-8")
+
+    rvec, tvec = load_osdar23_openlabel_extrinsic(str(label_json), "rgb_center")
+    R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+    expected_R = np.asarray([[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]], dtype=np.float64)
+    expected_t = expected_R @ np.asarray([-1.0, -2.0, -3.0], dtype=np.float64)
+
+    assert np.allclose(R, expected_R, atol=1e-8)
+    assert np.allclose(np.asarray(tvec, dtype=np.float64), expected_t, atol=1e-8)
+
+
+def test_real_openlabel_extrinsic_differs_from_calibration_when_dataset_available():
+    label_json = "/gz-data/OSDaR23/1_calibration_1.1/1_calibration_1.1_labels.json"
+    if not os.path.isfile(label_json):
+        return
+    ext = load_osdar23_openlabel_extrinsic(label_json, "rgb_center")
+    assert ext is not None
+    rvec, tvec = ext
+    assert len(rvec) == 3
+    assert len(tvec) == 3
+    # The known failure mode was silently using calibration.txt instead of OpenLABEL.
+    assert abs(float(tvec[0])) < 0.5
+    assert abs(float(tvec[1]) - 2.054) < 0.1
+
+
+def test_strong_label_costs_are_added_to_optimizer_source():
+    source = (pathlib.Path(ROOT) / "cpp" / "edge_calibrator.cpp").read_text(encoding="utf-8")
+    assert "AutoDiffCostFunction<TrackPolylineProjectionCost" in source
+    assert "AutoDiffCostFunction<PoleCenterlineProjectionCost" in source
+    assert "AutoDiffCostFunction<BufferStopBBoxProjectionCost" in source
+    assert "strong_residuals_added_to_optimizer" in source
+

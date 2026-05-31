@@ -244,7 +244,19 @@ def run(context: RuntimeContext) -> None:
         return
 
     adapter = get_adapter(context.config)
-    ext = adapter.load_initial_extrinsic()
+    label_cfg = context.config.get("label_assist") or {}
+    ext = None
+    extrinsic_source = "config_initial_extrinsic"
+    if bool(label_cfg.get("enabled", False)) and bool(label_cfg.get("use_openlabel_extrinsic", True)):
+        loader = getattr(adapter, "load_label_assist_extrinsic", None)
+        if callable(loader):
+            ext = loader()
+            if ext:
+                extrinsic_source = "openlabel_coordinate_systems"
+    if not ext:
+        ext = adapter.load_initial_extrinsic()
+        if ext:
+            extrinsic_source = "calibration_txt"
     if not ext:
         ie = context.config.get("calibration", {}).get("initial_extrinsic", {})
         rvec = [float(x) for x in ie.get("rotation", [0.0, 0.0, 0.0])]
@@ -253,6 +265,7 @@ def run(context: RuntimeContext) -> None:
         rvec, tvec = ext
         rvec = [float(x) for x in rvec]
         tvec = [float(x) for x in tvec]
+    print(f"  [BEV] init_extrinsic_source={extrinsic_source}")
 
     env = os.environ.copy()
     env["EDGECALIB_BEV_YAW_MIN_DEG"] = str(bev_cfg.get("yaw_min_deg", -6.0))
