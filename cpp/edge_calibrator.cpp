@@ -237,6 +237,15 @@ struct StrongLabelEvalStats {
     int buffer_count = 0;
 };
 
+double StrongStaticScore(const StrongLabelEvalStats& st) {
+    double weighted = 3.0 * st.pole_score + 2.0 * st.switch_score + 4.0 * st.buffer_score;
+    double denom = 0.0;
+    if (st.pole_count > 0) denom += 3.0;
+    if (st.switch_count > 0) denom += 2.0;
+    if (st.buffer_count > 0) denom += 4.0;
+    return denom > 0.0 ? weighted / denom : 0.0;
+}
+
 StrongLabelEvalStats EvaluateStrongLabelFeatures(const std::vector<StrongLabelFeature>& features,
                                                  const Eigen::Matrix3d& R_rect,
                                                  const Eigen::Matrix<double, 3, 4>& P_rect,
@@ -276,11 +285,6 @@ StrongLabelEvalStats EvaluateStrongLabelFeatures(const std::vector<StrongLabelFe
             double dx = std::max(std::max(bb_x0 - u, 0.0), u - bb_x1);
             double dy = std::max(std::max(bb_y0 - v, 0.0), v - bb_y1);
             double d = std::sqrt(dx * dx + dy * dy);
-            if (sf.role.find("center") != std::string::npos) {
-                double cx = 0.5 * (bb_x0 + bb_x1);
-                double cy = 0.5 * (bb_y0 + bb_y1);
-                d = 0.35 * std::hypot(u - cx, v - cy) + d;
-            }
             buffer_sum += score_from_dist(d, std::hypot(bb_x1 - bb_x0, bb_y1 - bb_y0)) * sf.weight;
             st.buffer_count++;
         }
@@ -289,12 +293,12 @@ StrongLabelEvalStats EvaluateStrongLabelFeatures(const std::vector<StrongLabelFe
     st.pole_score = st.pole_count > 0 ? pole_sum / st.pole_count : 0.0;
     st.switch_score = st.switch_count > 0 ? switch_sum / st.switch_count : 0.0;
     st.buffer_score = st.buffer_count > 0 ? buffer_sum / st.buffer_count : 0.0;
-    double weighted = 2.0 * st.track_score + 1.5 * st.pole_score + 1.2 * st.switch_score + st.buffer_score;
+    double weighted = 0.25 * st.track_score + 3.0 * st.pole_score + 2.0 * st.switch_score + 4.0 * st.buffer_score;
     double denom = 0.0;
-    if (st.track_count > 0) denom += 2.0;
-    if (st.pole_count > 0) denom += 1.5;
-    if (st.switch_count > 0) denom += 1.2;
-    if (st.buffer_count > 0) denom += 1.0;
+    if (st.track_count > 0) denom += 0.25;
+    if (st.pole_count > 0) denom += 3.0;
+    if (st.switch_count > 0) denom += 2.0;
+    if (st.buffer_count > 0) denom += 4.0;
     st.score = denom > 0.0 ? weighted / denom : 0.0;
     return st;
 }
@@ -816,6 +820,117 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     std::cout << "[Stage 3] Fine Calibration..." << std::endl;
     PrintProjectionStats("before_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
     ceres::Problem problem;
+    stage_a_attempted_ = false;
+    stage_a_static_score_before_ = 0.0;
+    stage_a_static_score_after_ = 0.0;
+    stage_a_pose_jump_m_ = 0.0;
+    stage_a_yaw_jump_deg_ = 0.0;
+    stage_a_rejected_ = false;
+    stage_a_reject_reason_ = "none";
+    strong_label_revert_reason_ = "none";
+
+    if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
+        Eigen::Matrix3d R_stage_before;
+        ceres::AngleAxisToRotationMatrix(r_curr_, R_stage_before.data());
+        StrongLabelEvalStats stage_before = EvaluateStrongLabelFeatures(
+            strong_label_features_, R_rect_, P_rect_, W_, H_, R_stage_before,
+            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2]));
+        const double static_before = StrongStaticScore(stage_before);
+        stage_a_attempted_ = true;
+        stage_a_static_score_before_ = static_before;
+        stage_a_static_score_after_ = static_before;
+        strong_static_score_before_optimization_ = static_before;
+        strong_static_score_after_optimization_ = static_before;
+        if (static_before > 0.0) {
+            ceres::Problem static_problem;
+            int static_residuals = 0;
+            for (const auto& sf : strong_label_features_) {
+                if (sf.class_type == "track") continue;
+                if (sf.class_type == "switch") {
+                    if (!config_.strong_stage_a_use_switch) continue;
+                    if (sf.image_points.size() < 2) continue;
+                    auto* cost = new TrackPolylineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_switch_weight);
+                    static_problem.AddResidualBlock(new ceres::AutoDiffCostFunction<TrackPolylineProjectionCost, 1, 3, 3>(cost),
+                                                    new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                    ++static_residuals;
+                } else if (sf.class_type == "catenary_pole") {
+                    if (sf.image_points.size() < 2) continue;
+                    auto* cost = new PoleCenterlineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_pole_weight);
+                    static_problem.AddResidualBlock(new ceres::AutoDiffCostFunction<PoleCenterlineProjectionCost, 3, 3, 3>(cost),
+                                                    new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                    ++static_residuals;
+                } else if (sf.class_type == "buffer_stop") {
+                    auto* cost = new BufferStopBBoxProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_buffer_stop_weight);
+                    static_problem.AddResidualBlock(new ceres::AutoDiffCostFunction<BufferStopBBoxProjectionCost, 1, 3, 3>(cost),
+                                                    new ceres::HuberLoss(1.0), r_curr_, t_curr_);
+                    ++static_residuals;
+                }
+            }
+            if (static_residuals > 0) {
+                Eigen::Vector3d t_init_prior(config_.init_t[0], config_.init_t[1], config_.init_t[2]);
+                Eigen::Vector3d r_init_prior(config_.init_r[0], config_.init_r[1], config_.init_r[2]);
+                static_problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<TranslationPriorCost, 3, 3>(
+                        new TranslationPriorCost(t_init_prior, config_.strong_label_min_translation_prior_weight)),
+                    nullptr, t_curr_);
+                static_problem.AddResidualBlock(
+                    new ceres::AutoDiffCostFunction<RotationPriorCost, 3, 3>(
+                        new RotationPriorCost(r_init_prior, config_.strong_label_rotation_prior_weight)),
+                    nullptr, r_curr_);
+                ceres::Solver::Options static_options;
+                static_options.linear_solver_type = ceres::DENSE_SCHUR;
+                static_options.max_num_iterations = 40;
+                ceres::Solver::Summary static_summary;
+                ceres::Solve(static_options, &static_problem, &static_summary);
+                Eigen::Matrix3d R_stage_after;
+                ceres::AngleAxisToRotationMatrix(r_curr_, R_stage_after.data());
+                StrongLabelEvalStats stage_after = EvaluateStrongLabelFeatures(
+                    strong_label_features_, R_rect_, P_rect_, W_, H_, R_stage_after,
+                    Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2]));
+                const double static_after = StrongStaticScore(stage_after);
+                strong_static_score_before_optimization_ = static_before;
+                strong_static_score_after_optimization_ = static_after;
+                const double dx = t_curr_[0] - config_.init_t[0];
+                const double dy = t_curr_[1] - config_.init_t[1];
+                const double dz = t_curr_[2] - config_.init_t[2];
+                const double pose_jump_m = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const double yaw_jump_deg = std::abs(r_curr_[2] - config_.init_r[2]) * 180.0 / M_PI;
+                stage_a_static_score_after_ = static_after;
+                stage_a_pose_jump_m_ = pose_jump_m;
+                stage_a_yaw_jump_deg_ = yaw_jump_deg;
+                const double tol = std::max(0.0, config_.strong_label_static_score_tolerance);
+                if (static_after + tol < static_before) {
+                    stage_a_reject_reason_ = "static_score_degraded";
+                } else if (pose_jump_m > config_.strong_label_max_pose_jump_m) {
+                    stage_a_reject_reason_ = "pose_jump_exceeded";
+                } else if (yaw_jump_deg > config_.strong_label_max_yaw_jump_deg) {
+                    stage_a_reject_reason_ = "yaw_jump_exceeded";
+                }
+                std::cout << "[Debug][Fine] Strong static Stage A: residuals=" << static_residuals
+                          << ", static_before=" << static_before << ", static_after=" << static_after
+                          << ", pose_jump_m=" << pose_jump_m << ", yaw_jump_deg=" << yaw_jump_deg << std::endl;
+                if (stage_a_reject_reason_ != "none") {
+                    std::copy(config_.init_r, config_.init_r + 3, r_curr_);
+                    std::copy(config_.init_t, config_.init_t + 3, t_curr_);
+                    strong_label_pose_reverted_ = true;
+                    strong_label_revert_reason_ = stage_a_reject_reason_;
+                    stage_a_rejected_ = true;
+                    strong_label_score_before_optimization_ = stage_before.score;
+                    strong_label_score_after_optimization_ = stage_before.score;
+                    strong_static_score_after_optimization_ = static_before;
+                    std::cout << "[Debug][Fine] Strong static Stage A rejected; skip auxiliary refine." << std::endl;
+                    PrintProjectionStats("after_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
+                    return;
+                }
+            } else {
+                stage_a_rejected_ = true;
+                stage_a_reject_reason_ = "no_static_residuals";
+            }
+        } else {
+            stage_a_rejected_ = true;
+            stage_a_reject_reason_ = "no_static_residuals";
+        }
+    }
     Eigen::Matrix3d r_mat;
     ceres::AngleAxisToRotationMatrix(r_curr_, r_mat.data());
     Eigen::Vector3d t_vec(t_curr_[0], t_curr_[1], t_curr_[2]);
@@ -894,6 +1009,10 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     strong_residuals_added_to_optimizer_ = false;
     strong_label_score_before_optimization_ = 0.0;
     strong_label_score_after_optimization_ = 0.0;
+    strong_static_score_before_optimization_ = 0.0;
+    strong_static_score_after_optimization_ = 0.0;
+    strong_label_pose_reverted_ = false;
+    strong_label_revert_reason_ = "none";
     if (config_.label_assist_enabled) {
         auto add_teacher_residual = [&](const PointFeature& src,
                                         const cv::Mat* dist,
@@ -949,9 +1068,11 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
         Eigen::Matrix3d R_before;
         ceres::AngleAxisToRotationMatrix(r_curr_, R_before.data());
-        strong_label_score_before_optimization_ = EvaluateStrongLabelFeatures(
+        StrongLabelEvalStats before_stats = EvaluateStrongLabelFeatures(
             strong_label_features_, R_rect_, P_rect_, W_, H_, R_before,
-            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2])).score;
+            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2]));
+        strong_label_score_before_optimization_ = before_stats.score;
+        strong_static_score_before_optimization_ = StrongStaticScore(before_stats);
 
         for (const auto& sf : strong_label_features_) {
             if (sf.class_type == "track") {
@@ -1062,9 +1183,38 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
         Eigen::Matrix3d R_after;
         ceres::AngleAxisToRotationMatrix(r_curr_, R_after.data());
-        strong_label_score_after_optimization_ = EvaluateStrongLabelFeatures(
+        StrongLabelEvalStats after_stats = EvaluateStrongLabelFeatures(
             strong_label_features_, R_rect_, P_rect_, W_, H_, R_after,
-            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2])).score;
+            Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2]));
+        strong_label_score_after_optimization_ = after_stats.score;
+        strong_static_score_after_optimization_ = StrongStaticScore(after_stats);
+        const double dx = t_curr_[0] - config_.init_t[0];
+        const double dy = t_curr_[1] - config_.init_t[1];
+        const double dz = t_curr_[2] - config_.init_t[2];
+        const double pose_jump_m = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double yaw_jump_deg = std::abs(r_curr_[2] - config_.init_r[2]) * 180.0 / M_PI;
+        const double tol = std::max(0.0, config_.strong_label_static_score_tolerance);
+        std::string guard_reason = "none";
+        if (strong_static_score_before_optimization_ > 0.0 &&
+            strong_static_score_after_optimization_ + tol < strong_static_score_before_optimization_) {
+            guard_reason = "static_score_degraded";
+        } else if (pose_jump_m > config_.strong_label_max_pose_jump_m) {
+            guard_reason = "pose_jump_exceeded";
+        } else if (yaw_jump_deg > config_.strong_label_max_yaw_jump_deg) {
+            guard_reason = "yaw_jump_exceeded";
+        }
+        if (guard_reason != "none") {
+            std::cout << "[Debug][Fine] Strong label guard reverted pose: static_before="
+                      << strong_static_score_before_optimization_ << ", static_after="
+                      << strong_static_score_after_optimization_ << ", pose_jump_m=" << pose_jump_m
+                      << ", yaw_jump_deg=" << yaw_jump_deg << std::endl;
+            std::copy(config_.init_r, config_.init_r + 3, r_curr_);
+            std::copy(config_.init_t, config_.init_t + 3, t_curr_);
+            strong_label_pose_reverted_ = true;
+            strong_label_revert_reason_ = guard_reason;
+            strong_label_score_after_optimization_ = strong_label_score_before_optimization_;
+            strong_static_score_after_optimization_ = strong_static_score_before_optimization_;
+        }
     }
     PrintProjectionStats("after_fine", edge_points_, R_rect_, P_rect_, r_curr_, t_curr_, W_, H_);
 }
@@ -1224,6 +1374,18 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "strong_label_optimizer_residual_count: " << last_score_breakdown_.strong_label_optimizer_residual_count << "\n";
     result_file << "strong_label_score_before_optimization: " << last_score_breakdown_.strong_label_score_before_optimization << "\n";
     result_file << "strong_label_score_after_optimization: " << last_score_breakdown_.strong_label_score_after_optimization << "\n";
+    result_file << "static_score_before: " << strong_static_score_before_optimization_ << "\n";
+    result_file << "static_score_after_stage_a: " << strong_static_score_after_optimization_ << "\n";
+    result_file << "strong_label_pose_reverted: " << (strong_label_pose_reverted_ ? 1 : 0) << "\n";
+    result_file << "stage_a_attempted: " << (stage_a_attempted_ ? 1 : 0) << "\n";
+    result_file << "stage_a_static_score_before: " << stage_a_static_score_before_ << "\n";
+    result_file << "stage_a_static_score_after: " << stage_a_static_score_after_ << "\n";
+    result_file << "stage_a_static_score_delta: " << (stage_a_static_score_after_ - stage_a_static_score_before_) << "\n";
+    result_file << "stage_a_pose_jump_m: " << stage_a_pose_jump_m_ << "\n";
+    result_file << "stage_a_yaw_jump_deg: " << stage_a_yaw_jump_deg_ << "\n";
+    result_file << "stage_a_rejected: " << (stage_a_rejected_ ? 1 : 0) << "\n";
+    result_file << "stage_a_reject_reason: " << stage_a_reject_reason_ << "\n";
+    result_file << "strong_label_revert_reason: " << strong_label_revert_reason_ << "\n";
     result_file << "strong_track_residual_count: " << last_score_breakdown_.strong_track_residual_count << "\n";
     result_file << "strong_pole_residual_count: " << last_score_breakdown_.strong_pole_residual_count << "\n";
     result_file << "strong_switch_residual_count: " << last_score_breakdown_.strong_switch_residual_count << "\n";

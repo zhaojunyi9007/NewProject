@@ -311,6 +311,20 @@ def _openlabel_camera_matrix(openlabel: Dict[str, Any], image_sensor: str):
     return None
 
 
+def _pixel_threshold_scale_from_reference(openlabel: Dict[str, Any], image_sensor: str, reference_sensor: str = "rgb_center"):
+    if not reference_sensor or image_sensor == reference_sensor:
+        return 1.0
+    K = _openlabel_camera_matrix(openlabel, image_sensor)
+    K_ref = _openlabel_camera_matrix(openlabel, reference_sensor)
+    if K is None or K_ref is None:
+        return 1.0
+    f = 0.5 * (abs(float(K[0, 0])) + abs(float(K[1, 1])))
+    f_ref = 0.5 * (abs(float(K_ref[0, 0])) + abs(float(K_ref[1, 1])))
+    if not math.isfinite(f) or not math.isfinite(f_ref) or f <= 0.0 or f_ref <= 0.0:
+        return 1.0
+    return float(max(0.25, min(4.0, f / f_ref)))
+
+
 def _openlabel_lidar_to_optical(openlabel: Dict[str, Any], image_sensor: str):
     cs = (openlabel.get("coordinate_systems") or {}).get(image_sensor) or {}
     pose = cs.get("pose_wrt_parent") or {}
@@ -373,6 +387,32 @@ def _centerline_dist(px, py, vals):
     return _point_segment_dist(px, py, float(vals[0]), float(vals[1]), float(vals[2]), float(vals[3]))
 
 
+
+def _filter_track_samples_by_initial_projection(samples, poly, K, T, width: int, height: int, max_dist_px: float):
+    """Keep only track samples that are plausible under the OpenLABEL initial pose."""
+    rejected = {"out_of_image": 0, "initial_distance": 0, "missing_projection_model": 0}
+    if max_dist_px <= 0.0:
+        return list(samples), rejected
+    if K is None or T is None or not poly:
+        rejected["missing_projection_model"] = len(samples)
+        return list(samples), rejected
+    vals = [len(poly)] + [coord for pt in poly for coord in pt]
+    kept = []
+    for pt in samples:
+        uv = _project_point(K, T, pt)
+        if uv is None:
+            rejected["out_of_image"] += 1
+            continue
+        u, v = uv
+        if u < 0.0 or v < 0.0 or u >= float(width) or v >= float(height):
+            rejected["out_of_image"] += 1
+            continue
+        if _polyline_dist(u, v, vals) > max_dist_px:
+            rejected["initial_distance"] += 1
+            continue
+        kept.append(pt)
+    return kept, rejected
+
 def _score_strong_rows_with_openlabel_pose(openlabel: Dict[str, Any], image_sensor: str, strong_rows: List[str], width: int, height: int):
     K = _openlabel_camera_matrix(openlabel, image_sensor)
     T = _openlabel_lidar_to_optical(openlabel, image_sensor)
@@ -420,7 +460,7 @@ def _score_strong_rows_with_openlabel_pose(openlabel: Dict[str, Any], image_sens
     return scores, mean_dists, ratios, valid
 
 
-def export_label_assist(label_json: str, frame_id: int, image_path: str, image_sensor: str, sam_base: str, frame_dir: str, lidar_base: str|None=None, lidar_pcd_path: str|None=None, teacher_visible_xmax_m: float = 120.0, teacher_image_bbox_padding_m: float = 8.0, use_sam_refine: bool = False, strong_features_enabled: bool = True, max_track_samples_per_object: int = 800, max_pole_samples_per_object: int = 20, bbox_padding_px: int = 12, track_visible_xmax_m: float = 120.0, switch_visible_xmax_m: float = 120.0, catenary_pole_visible_xmax_m: float = 160.0, buffer_stop_visible_xmax_m: float = 240.0):
+def export_label_assist(label_json: str, frame_id: int, image_path: str, image_sensor: str, sam_base: str, frame_dir: str, lidar_base: str|None=None, lidar_pcd_path: str|None=None, teacher_visible_xmax_m: float = 120.0, teacher_image_bbox_padding_m: float = 8.0, use_sam_refine: bool = False, strong_features_enabled: bool = True, max_track_samples_per_object: int = 120, max_pole_samples_per_object: int = 20, max_switch_samples_per_object: int = 80, bbox_padding_px: int = 12, track_visible_xmax_m: float = 120.0, switch_visible_xmax_m: float = 120.0, catenary_pole_visible_xmax_m: float = 160.0, buffer_stop_visible_xmax_m: float = 240.0, track_initial_max_dist_px: float = 300.0, pixel_threshold_reference_sensor: str = "rgb_center"):
     image=cv2.imread(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"Cannot read image: {image_path}")
@@ -428,6 +468,11 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
     data=json.loads(Path(label_json).read_text(encoding="utf-8"))
     openlabel=data.get("openlabel", data)
     rows=_extract_frame(openlabel, frame_id, image_sensor)
+    openlabel_K = _openlabel_camera_matrix(openlabel, image_sensor)
+    openlabel_T = _openlabel_lidar_to_optical(openlabel, image_sensor)
+    pixel_threshold_scale = _pixel_threshold_scale_from_reference(openlabel, image_sensor, pixel_threshold_reference_sensor)
+    effective_bbox_padding_px = max(0, int(round(float(bbox_padding_px) * pixel_threshold_scale)))
+    effective_track_initial_max_dist_px = max(0.0, float(track_initial_max_dist_px) * pixel_threshold_scale)
     pcd_xyz=_load_pcd_xyz(lidar_pcd_path)
     masks={k:np.zeros((h,w), dtype=np.uint8) for k in ["person","vehicle","track","static"]}
     paired_counts={k:0 for k in ["person","vehicle","track","static"]}
@@ -444,6 +489,9 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
     strong_filtered_by_range_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
     strong_missing_rgb_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
     strong_missing_lidar_counts={k:0 for k in ["track","catenary_pole","switch","buffer_stop"]}
+    track_residual_count_before_filter = 0
+    track_residual_count_after_filter = 0
+    rejected_track_count_by_reason = {"out_of_image": 0, "initial_distance": 0, "missing_projection_model": 0}
     teacher_visible_xmax_m = float(teacher_visible_xmax_m)
     teacher_image_bbox_padding_m = float(teacher_image_bbox_padding_m)
     strong_visible_xmax_m = {
@@ -540,10 +588,17 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
                         raw_samples = _vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=max_track_samples_per_object) if pcd_xyz is not None else _vec_samples(v.get("val"))
                         visible_samples = _filter_visible_points(raw_samples, xmax_m)
                         strong_filtered_by_range_counts["track"] += max(0, len(raw_samples) - len(visible_samples))
-                        samples = _downsample_points(visible_samples, max_track_samples_per_object)
+                        poly = image_polys[min(vi, len(image_polys) - 1)]
+                        track_residual_count_before_filter += len(visible_samples)
+                        filtered_samples, rejected = _filter_track_samples_by_initial_projection(
+                            visible_samples, poly, openlabel_K, openlabel_T, w, h, effective_track_initial_max_dist_px
+                        )
+                        for reason, count in rejected.items():
+                            rejected_track_count_by_reason[reason] = rejected_track_count_by_reason.get(reason, 0) + int(count)
+                        samples = _downsample_points(filtered_samples, max_track_samples_per_object)
+                        track_residual_count_after_filter += len(samples)
                         if not samples:
                             continue
-                        poly = image_polys[min(vi, len(image_polys) - 1)]
                         image_vals = [len(poly)] + [coord for pt in poly for coord in pt]
                         rows = [_tsv_row("track", rec["object_id"], f"point{si}", 1.0, pt, (0, 0, 0), "polyline", image_vals) for si, pt in enumerate(samples)]
                         strong_residual_point_counts["track"] += len(samples)
@@ -556,15 +611,16 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
 
                 elif class_type == "switch" and image_polys:
                     xmax_m = _strong_xmax("switch")
+                    switch_limit = max(0, int(max_switch_samples_per_object))
                     switch_points = []
                     for v in rec.get("lidar_vec", []):
-                        switch_points.extend(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=400) if pcd_xyz is not None else _vec_samples(v.get("val")))
+                        switch_points.extend(_vec_samples_from_indices(v.get("val"), pcd_xyz, max_points=switch_limit) if pcd_xyz is not None else _vec_samples(v.get("val")))
                     for c in rec.get("lidar_cuboid", []):
                         switch_points.extend(_cuboid_samples(c.get("val")))
                     raw_switch_points = switch_points
                     visible_switch_points = _filter_visible_points(raw_switch_points, xmax_m)
                     strong_filtered_by_range_counts["switch"] += max(0, len(raw_switch_points) - len(visible_switch_points))
-                    switch_points = _downsample_points(visible_switch_points, 400)
+                    switch_points = _downsample_points(visible_switch_points, switch_limit)
                     if switch_points:
                         poly = image_polys[0]
                         image_vals = [len(poly)] + [coord for pt in poly for coord in pt]
@@ -608,8 +664,8 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
                     xmax_m = _strong_xmax("buffer_stop")
                     rect = image_rects[0]
                     x0, y0, x1, y1 = rect
-                    x0 = max(0, x0 - int(bbox_padding_px)); y0 = max(0, y0 - int(bbox_padding_px))
-                    x1 = min(w - 1, x1 + int(bbox_padding_px)); y1 = min(h - 1, y1 + int(bbox_padding_px))
+                    x0 = max(0, x0 - effective_bbox_padding_px); y0 = max(0, y0 - effective_bbox_padding_px)
+                    x1 = min(w - 1, x1 + effective_bbox_padding_px); y1 = min(h - 1, y1 + effective_bbox_padding_px)
                     image_vals = [x0, y0, x1, y1]
                     rows = []
                     geoms = []
@@ -673,6 +729,16 @@ def export_label_assist(label_json: str, frame_id: int, image_path: str, image_s
         "strong_label_missing_rgb_counts": strong_missing_rgb_counts,
         "strong_label_missing_lidar_counts": strong_missing_lidar_counts,
         "strong_label_visible_xmax_m": strong_visible_xmax_m,
+        "max_switch_samples_per_object": int(max_switch_samples_per_object),
+        "track_residual_count_before_filter": int(track_residual_count_before_filter),
+        "track_residual_count_after_filter": int(track_residual_count_after_filter),
+        "rejected_track_count_by_reason": rejected_track_count_by_reason,
+        "track_initial_max_dist_px": float(track_initial_max_dist_px),
+        "effective_track_initial_max_dist_px": float(effective_track_initial_max_dist_px),
+        "bbox_padding_px": int(bbox_padding_px),
+        "effective_bbox_padding_px": int(effective_bbox_padding_px),
+        "pixel_threshold_reference_sensor": str(pixel_threshold_reference_sensor or ""),
+        "pixel_threshold_scale": float(pixel_threshold_scale),
         "extrinsic_source": "openlabel_coordinate_systems",
         "openlabel_projection_score_by_class": openlabel_scores,
         "openlabel_projection_mean_dist_px_by_class": openlabel_mean_dists,
@@ -752,13 +818,16 @@ def main():
     ap.add_argument("--teacher-image-bbox-padding-m", type=float, default=8.0)
     ap.add_argument("--use-sam-refine", action="store_true")
     ap.add_argument("--strong-features-enabled", action="store_true")
-    ap.add_argument("--max-track-samples-per-object", type=int, default=800)
+    ap.add_argument("--max-track-samples-per-object", type=int, default=120)
     ap.add_argument("--max-pole-samples-per-object", type=int, default=20)
+    ap.add_argument("--max-switch-samples-per-object", type=int, default=80)
     ap.add_argument("--bbox-padding-px", type=int, default=12)
     ap.add_argument("--track-visible-xmax-m", type=float, default=120.0)
     ap.add_argument("--switch-visible-xmax-m", type=float, default=120.0)
     ap.add_argument("--catenary-pole-visible-xmax-m", type=float, default=160.0)
     ap.add_argument("--buffer-stop-visible-xmax-m", type=float, default=240.0)
+    ap.add_argument("--track-initial-max-dist-px", type=float, default=300.0)
+    ap.add_argument("--pixel-threshold-reference-sensor", default="rgb_center")
     args=ap.parse_args()
     summary=export_label_assist(
         args.label_json, args.frame_id, args.image, args.image_sensor,
@@ -766,9 +835,11 @@ def main():
         args.lidar_pcd or None, args.teacher_visible_xmax_m,
         args.teacher_image_bbox_padding_m, args.use_sam_refine,
         args.strong_features_enabled, args.max_track_samples_per_object,
-        args.max_pole_samples_per_object, args.bbox_padding_px,
+        args.max_pole_samples_per_object, args.max_switch_samples_per_object,
+        args.bbox_padding_px,
         args.track_visible_xmax_m, args.switch_visible_xmax_m,
-        args.catenary_pole_visible_xmax_m, args.buffer_stop_visible_xmax_m)
+        args.catenary_pole_visible_xmax_m, args.buffer_stop_visible_xmax_m,
+        args.track_initial_max_dist_px, args.pixel_threshold_reference_sensor)
     print(json.dumps(summary, ensure_ascii=False))
 
 if __name__ == "__main__":

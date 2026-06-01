@@ -4,6 +4,7 @@
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,6 +37,16 @@ def _parse_calib_breakdown(path: str) -> dict:
     out: dict = {}
     if not os.path.isfile(path):
         return {}
+    string_keys = {
+        "extrinsic_source",
+        "final_gate_source",
+        "invalid_reason",
+        "optimizer_calib_file",
+        "optimizer_intrinsics_source",
+        "selected_init_source",
+        "stage_a_reject_reason",
+        "strong_label_revert_reason",
+    }
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             s = line.strip()
@@ -46,7 +57,12 @@ def _parse_calib_breakdown(path: str) -> dict:
             if k in {"r", "t"}:
                 # Pose vectors are parsed by _parse_calib_pose; do not pollute breakdown with scalar fragments.
                 continue
-            v = v.strip().split()[0] if v.strip() else ""
+            raw_v = v.strip()
+            if k in string_keys:
+                if raw_v:
+                    out[k] = raw_v
+                continue
+            v = raw_v.split()[0] if raw_v else ""
             if not v:
                 continue
             try:
@@ -54,6 +70,77 @@ def _parse_calib_breakdown(path: str) -> dict:
             except ValueError:
                 continue
     return out
+
+
+def _stage_a_reject_reason(
+    *,
+    static_before: float,
+    static_after: float,
+    pose_jump_m: float,
+    yaw_jump_deg: float,
+    tolerance: float,
+    max_pose_jump_m: float,
+    max_yaw_jump_deg: float,
+) -> str:
+    if static_before <= 0.0:
+        return "no_static_residuals"
+    if static_after + max(0.0, tolerance) < static_before:
+        return "static_score_degraded"
+    if pose_jump_m > max_pose_jump_m:
+        return "pose_jump_exceeded"
+    if yaw_jump_deg > max_yaw_jump_deg:
+        return "yaw_jump_exceeded"
+    return "none"
+
+
+def _extract_strong_label_debug(breakdown: dict) -> dict:
+    keys = (
+        "strong_label_feature_count",
+        "strong_label_object_count",
+        "strong_label_residual_count",
+        "strong_residuals_added_to_optimizer",
+        "strong_label_optimizer_residual_count",
+        "strong_label_score_before_optimization",
+        "strong_label_score_after_optimization",
+        "static_score_before",
+        "static_score_after_stage_a",
+        "strong_label_pose_reverted",
+        "strong_label_revert_reason",
+        "stage_a_attempted",
+        "stage_a_static_score_before",
+        "stage_a_static_score_after",
+        "stage_a_static_score_delta",
+        "stage_a_pose_jump_m",
+        "stage_a_yaw_jump_deg",
+        "stage_a_rejected",
+        "stage_a_reject_reason",
+        "strong_track_residual_count",
+        "strong_pole_residual_count",
+        "strong_switch_residual_count",
+        "strong_buffer_stop_residual_count",
+        "strong_label_score",
+        "strong_track_score",
+        "strong_pole_score",
+        "strong_switch_score",
+        "strong_buffer_stop_score",
+        "strong_label_gate_used",
+        "final_gate_source",
+        "selected_init_source",
+        "extrinsic_source",
+        "openlabel_intrinsics_available",
+        "optimizer_intrinsics_source",
+        "intrinsics_cx_delta_px",
+        "intrinsics_cy_delta_px",
+        "calibration_intrinsics_cx_delta_px",
+        "calibration_intrinsics_cy_delta_px",
+        "optimizer_calib_file",
+        "rail_bev_alignment_mismatch",
+        "rail_mismatch_ignored_due_to_strong_label",
+        "rail_weight_forced_low_due_to_mismatch",
+        "pose_jump_from_initial_m",
+        "yaw_jump_from_initial_deg",
+    )
+    return {k: breakdown.get(k) for k in keys if k in breakdown}
 
 
 def _parse_calib_pose(path: str):
@@ -107,6 +194,127 @@ def _load_json_dict(path: str) -> dict:
         return obj if isinstance(obj, dict) else {}
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
+
+
+def _numbers_from_line(line: str) -> list[float]:
+    return [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", line)]
+
+
+def _read_osdar_homogeneous_transform(calib_file: str, camera_folder: str) -> list[list[float]]:
+    identity = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    if not calib_file or not os.path.isfile(calib_file):
+        return identity
+    want = (camera_folder or "rgb_center").strip()
+    try:
+        with open(calib_file, "r", encoding="utf-8", errors="ignore") as f:
+            lines = [ln.rstrip() for ln in f.readlines()]
+    except OSError:
+        return identity
+    in_cam = False
+    cam_match = False
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+        if s == "CAMERA":
+            in_cam = True
+            cam_match = False
+            i += 1
+            continue
+        if in_cam and s.startswith("data_folder:"):
+            cam_match = s.split(":", 1)[1].strip() == want
+            i += 1
+            continue
+        if in_cam and cam_match and s.startswith("homogeneous transform:"):
+            nums = _numbers_from_line(s[len("homogeneous transform:") :])
+            j = i + 1
+            while len(nums) < 16 and j < len(lines):
+                nums.extend(_numbers_from_line(lines[j]))
+                j += 1
+            if len(nums) >= 16:
+                return [nums[0:4], nums[4:8], nums[8:12], nums[12:16]]
+            return identity
+        i += 1
+    return identity
+
+
+def _prepare_optimizer_calib_file(
+    config: Dict[str, Any],
+    calib_file: str,
+    calib_dir: str,
+    frame_id: int,
+    init_extrinsic_source: str,
+) -> tuple[str, dict]:
+    data_cfg = config.get("data") or {}
+    fmt = str(data_cfg.get("dataset_format", "") or "").lower()
+    cam = str(data_cfg.get("image_sensor", "rgb_center") or "rgb_center").strip() or "rgb_center"
+    debug = {
+        "openlabel_intrinsics_available": False,
+        "optimizer_intrinsics_source": "calibration_txt" if calib_file and os.path.exists(calib_file) else "default",
+        "intrinsics_cx_delta_px": 0.0,
+        "intrinsics_cy_delta_px": 0.0,
+        "calibration_intrinsics_cx_delta_px": 0.0,
+        "calibration_intrinsics_cy_delta_px": 0.0,
+    }
+    if fmt not in {"osdar23", "osdar"} or init_extrinsic_source != "openlabel_coordinate_systems":
+        return calib_file, debug
+
+    try:
+        from pipeline.datasets.osdar23 import (
+            _resolve_openlabel_json,
+            load_osdar23_intrinsics,
+            load_osdar23_openlabel_intrinsics,
+        )
+    except Exception:
+        return calib_file, debug
+
+    label_json = _resolve_openlabel_json(config)
+    K_openlabel = load_osdar23_openlabel_intrinsics(label_json, cam)
+    if K_openlabel is None:
+        return calib_file, debug
+    debug["openlabel_intrinsics_available"] = True
+
+    K_calib = None
+    try:
+        K_calib, _, _ = load_osdar23_intrinsics(calib_file, cam, label_json="")
+    except Exception:
+        K_calib = None
+    if K_calib is not None:
+        debug["calibration_intrinsics_cx_delta_px"] = float(K_calib[0, 2] - K_openlabel[0, 2])
+        debug["calibration_intrinsics_cy_delta_px"] = float(K_calib[1, 2] - K_openlabel[1, 2])
+        if abs(debug["calibration_intrinsics_cx_delta_px"]) > 1.0 or abs(debug["calibration_intrinsics_cy_delta_px"]) > 1.0:
+            print(
+                "[Warning] OSDaR intrinsics mismatch: "
+                f"camera={cam}, cx_delta={debug['calibration_intrinsics_cx_delta_px']:.3f}px, "
+                f"cy_delta={debug['calibration_intrinsics_cy_delta_px']:.3f}px; "
+                "optimizer will use OpenLABEL stream intrinsics."
+            )
+
+    os.makedirs(calib_dir, exist_ok=True)
+    out = os.path.join(calib_dir, f"{frame_id:010d}_openlabel_intrinsics_calib.txt")
+    T = _read_osdar_homogeneous_transform(calib_file, cam)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("# Auto-generated by calib_stage.py; K comes from OpenLABEL streams.\n")
+        f.write("CAMERA\n")
+        f.write(f"data_folder: {cam}\n")
+        f.write("camera_matrix:\n")
+        f.write(f"[{K_openlabel[0, 0]:.15g}, {K_openlabel[0, 1]:.15g}, {K_openlabel[0, 2]:.15g};\n")
+        f.write(f" {K_openlabel[1, 0]:.15g}, {K_openlabel[1, 1]:.15g}, {K_openlabel[1, 2]:.15g};\n")
+        f.write(f" {K_openlabel[2, 0]:.15g}, {K_openlabel[2, 1]:.15g}, {K_openlabel[2, 2]:.15g}]\n")
+        f.write("homogeneous transform:\n")
+        f.write(f"[{T[0][0]:.15g}, {T[0][1]:.15g}, {T[0][2]:.15g}, {T[0][3]:.15g};\n")
+        f.write(f" {T[1][0]:.15g}, {T[1][1]:.15g}, {T[1][2]:.15g}, {T[1][3]:.15g};\n")
+        f.write(f" {T[2][0]:.15g}, {T[2][1]:.15g}, {T[2][2]:.15g}, {T[2][3]:.15g};\n")
+        f.write(f" {T[3][0]:.15g}, {T[3][1]:.15g}, {T[3][2]:.15g}, {T[3][3]:.15g}]\n")
+    debug["optimizer_intrinsics_source"] = "openlabel_streams"
+    debug["optimizer_calib_file"] = out
+    debug["intrinsics_cx_delta_px"] = 0.0
+    debug["intrinsics_cy_delta_px"] = 0.0
+    return out, debug
 
 
 def _read_label_teacher_points(path: str, xmax_m: float = 0.0) -> list[tuple[float, float, float, int, float]]:
@@ -320,9 +528,10 @@ def _select_initial_pose_candidate(frame_id: int, init_r: list[float], init_t: l
             return list(pose["rvec"]), list(pose["tvec"]), "bev_accepted", False, []
         return list(init_r), list(init_t), "original", False, []
     candidates: list[dict] = [{"source": "original_init", "pose": {"rvec": list(init_r), "tvec": list(init_t)}, "rejected": False}]
-    if frame_id in bev_by_frame:
+    allow_bev_candidate = (not label_assist_for_calib) or bool(sem_cfg.get("use_bev_candidate_in_label_assist", False))
+    if allow_bev_candidate and frame_id in bev_by_frame:
         candidates.append({"source": "bev_accepted", "pose": bev_by_frame[frame_id], "rejected": False})
-    if frame_id in bev_candidates_by_frame:
+    if allow_bev_candidate and frame_id in bev_candidates_by_frame:
         cand = bev_candidates_by_frame[frame_id]
         pose = cand.get("pose", {}) if isinstance(cand, dict) else {}
         if pose.get("rvec") and pose.get("tvec"):
@@ -387,12 +596,49 @@ def _write_invalid_calib_result(path: str, rvec: list[float], tvec: list[float],
                 f.write(f"{k}: {' '.join(str(x) for x in v)}\n")
 
 
-def _should_skip_optimizer_for_rail_mismatch(sem_cfg: dict, oracle_rail: bool, rail_debug: dict, align_debug: dict) -> tuple[bool, str]:
+def _has_strong_label_feature_rows(path: str) -> bool:
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _has_rail_mismatch(rail_debug: dict, align_debug: dict) -> bool:
+    if rail_debug and not bool(rail_debug.get("rail_refinement_valid", True)):
+        return True
+    if align_debug and not bool(align_debug.get("rail_bev_alignment_valid", True)):
+        return True
+    return False
+
+
+def _strong_label_can_override_rail_mismatch(label_cfg: dict, strong_label_features_path: str) -> bool:
+    return (
+        bool(label_cfg.get("enabled", False))
+        and bool(label_cfg.get("strong_features_enabled", True))
+        and _has_strong_label_feature_rows(strong_label_features_path)
+    )
+
+
+def _should_skip_optimizer_for_rail_mismatch(
+    sem_cfg: dict,
+    oracle_rail: bool,
+    rail_debug: dict,
+    align_debug: dict,
+    label_cfg: dict | None = None,
+    strong_label_features_path: str = "",
+) -> tuple[bool, str]:
     if not oracle_rail or not bool(sem_cfg.get("skip_optimizer_on_rail_refinement_mismatch", False)):
         return False, ""
-    if rail_debug and not bool(rail_debug.get("rail_refinement_valid", True)):
-        return True, "rail_bev_alignment_mismatch"
-    if align_debug and not bool(align_debug.get("rail_bev_alignment_valid", True)):
+    if _strong_label_can_override_rail_mismatch(label_cfg or {}, strong_label_features_path):
+        return False, ""
+    if _has_rail_mismatch(rail_debug, align_debug):
         return True, "rail_bev_alignment_mismatch"
     return False, ""
 
@@ -413,7 +659,8 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
             + float(out.get("strong_buffer_stop_residual_count", 0.0) or 0.0)
         )
         min_strong_score = float(sem_cfg.get("min_strong_label_score", 0.25))
-        min_track = float(sem_cfg.get("min_strong_track_residual_count", 50))
+        track_primary_gate = bool(sem_cfg.get("track_use_as_primary_gate", False))
+        min_track = float(sem_cfg.get("min_strong_track_residual_count", 0 if not track_primary_gate else 50))
         min_static = float(sem_cfg.get("min_strong_static_residual_count", 2))
         max_pose_jump = float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))
         max_yaw_jump = float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0))
@@ -421,7 +668,7 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
         yaw_jump = float(out.get("yaw_jump_from_initial_deg", 0.0) or 0.0)
         strong_ok = (
             strong_score >= min_strong_score
-            and strong_track_count >= min_track
+            and ((not track_primary_gate) or strong_track_count >= min_track)
             and strong_static_count >= min_static
             and pose_jump <= max_pose_jump
             and yaw_jump <= max_yaw_jump
@@ -436,7 +683,7 @@ def _apply_final_rail_hard_gate(breakdown: dict, sem_cfg: dict, oracle_rail: boo
             reasons = []
             if strong_score < min_strong_score:
                 reasons.append(f"strong_label_score={strong_score:.6f}<{min_strong_score:.6f}")
-            if strong_track_count < min_track:
+            if track_primary_gate and strong_track_count < min_track:
                 reasons.append(f"strong_track_residual_count={strong_track_count:.0f}<{min_track:.0f}")
             if strong_static_count < min_static:
                 reasons.append(f"strong_static_residual_count={strong_static_count:.0f}<{min_static:.0f}")
@@ -622,6 +869,13 @@ def run(context: RuntimeContext) -> None:
         frame_dir = os.path.join(image_root, f"{frame_id:010d}")
         sam_base = os.path.join(sam_root, f"{frame_id:010d}")
         output_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
+        optimizer_calib_file, intrinsics_debug = _prepare_optimizer_calib_file(
+            context.config,
+            calib_file,
+            calib_dir,
+            frame_id,
+            init_extrinsic_source,
+        )
 
         if not os.path.exists(f"{feature_base}_points.txt"):
             print(f"[Warning] 特征文件不存在，跳过帧 {frame_id:010d}")
@@ -759,8 +1013,25 @@ def run(context: RuntimeContext) -> None:
                 oracle_rail = False
             align_debug = _load_json_dict(f"{feature_base}_rail_bev_alignment_debug.json")
             rail_debug_current = _load_json_dict(f"{feature_base}_rail_bev_debug.json")
+            strong_label_features_path = f"{feature_base}_label_strong_features.tsv"
+            strong_label_overrides_rail_mismatch = _strong_label_can_override_rail_mismatch(label_cfg, strong_label_features_path)
+            rail_mismatch_present = _has_rail_mismatch(rail_debug_current, align_debug)
+            rail_mismatch_ignored_due_to_strong_label = bool(strong_label_overrides_rail_mismatch and rail_mismatch_present)
+            rail_weight_forced_low_due_to_mismatch = False
+            if rail_mismatch_ignored_due_to_strong_label:
+                fallback_weight = float(sem_cfg.get("oracle_rail_weight_fallback", 0.0))
+                effective_rail_weight = min(float(effective_rail_weight), fallback_weight)
+                rail_weight_forced_low_due_to_mismatch = True
+                print(
+                    f"[Info] Strong label features available; ignore rail BEV mismatch and lower rail_weight={effective_rail_weight}"
+                )
             skip_optimizer, skip_reason = _should_skip_optimizer_for_rail_mismatch(
-                sem_cfg, bool(oracle_rail), rail_debug_current, align_debug
+                sem_cfg,
+                bool(oracle_rail),
+                rail_debug_current,
+                align_debug,
+                label_cfg,
+                strong_label_features_path,
             )
             if skip_optimizer:
                 extra = {
@@ -772,6 +1043,7 @@ def run(context: RuntimeContext) -> None:
                 }
                 _write_invalid_calib_result(output_file, list(r_use), list(t_use), skip_reason, extra)
                 br = _parse_calib_breakdown(output_file)
+                br.update(intrinsics_debug)
                 pose_out = _parse_calib_pose(output_file)
                 write_unified_debug_json(
                     os.path.join(calib_dir, f"{frame_id:010d}_debug_score_breakdown.json"),
@@ -812,7 +1084,7 @@ def run(context: RuntimeContext) -> None:
                 "--sam_feature_base",
                 sam_base,
                 "--calib_file",
-                calib_file if os.path.exists(calib_file) else "",
+                optimizer_calib_file if os.path.exists(optimizer_calib_file) else "",
                 "--init_rx",
                 str(r_use[0]),
                 "--init_ry",
@@ -905,7 +1177,11 @@ def run(context: RuntimeContext) -> None:
                     "--strong_label_min_translation_prior_weight",
                     str(float(sem_cfg.get("strong_label_min_translation_prior_weight", 5.0))),
                     "--strong_label_rotation_prior_weight",
-                    str(float(sem_cfg.get("strong_label_rotation_prior_weight", 0.5))),
+                    str(float(sem_cfg.get("strong_label_rotation_prior_weight", 10.0))),
+                    "--strong_label_max_pose_jump_m",
+                    str(float(sem_cfg.get("max_label_assisted_pose_jump_m", 1.0))),
+                    "--strong_label_max_yaw_jump_deg",
+                    str(float(sem_cfg.get("max_label_assisted_yaw_jump_deg", 3.0))),
                     "--label_track_weight",
                     str(float(label_cfg.get("track_weight", 1.5))),
                     "--label_static_weight",
@@ -915,6 +1191,16 @@ def run(context: RuntimeContext) -> None:
                     "--label_person_weight",
                     str(float(label_cfg.get("person_weight", 0.2))),
                 ])
+                if _optimizer_binary_supports_arg(optimizer_bin, "--strong_label_static_score_tolerance"):
+                    cmd.extend([
+                        "--strong_label_static_score_tolerance",
+                        str(float(sem_cfg.get("strong_label_static_score_tolerance", 0.0))),
+                    ])
+                if _optimizer_binary_supports_arg(optimizer_bin, "--strong_stage_a_use_switch"):
+                    cmd.extend([
+                        "--strong_stage_a_use_switch",
+                        "1" if bool(label_cfg.get("stage_a_use_switch", False)) else "0",
+                    ])
             elif label_assist_for_calib:
                 print(
                     "[Warning] build/optimizer does not support label-assisted arguments; "
@@ -933,7 +1219,7 @@ def run(context: RuntimeContext) -> None:
                 os.path.join(_REPO_ROOT, "build", "optimizer"),
                 feature_base,
                 sam_base,
-                calib_file if os.path.exists(calib_file) else "",
+                optimizer_calib_file if os.path.exists(optimizer_calib_file) else "",
                 str(r_use[0]),
                 str(r_use[1]),
                 str(r_use[2]),
@@ -953,6 +1239,7 @@ def run(context: RuntimeContext) -> None:
         if pose_out:
             context.current_pose_semantic = pose_out
         br = _parse_calib_breakdown(output_file)
+        br.update(intrinsics_debug)
         rail_debug = _load_json_dict(f"{feature_base}_rail_bev_debug.json")
         edge_debug = _load_json_dict(f"{feature_base}_edge_meta.json")
         label_debug = _load_json_dict(f"{feature_base}_debug_label_assist.json")
@@ -966,6 +1253,12 @@ def run(context: RuntimeContext) -> None:
                 if k in edge_debug:
                     br[k] = edge_debug[k]
         br["extrinsic_source"] = init_extrinsic_source
+        if "rail_mismatch_present" in locals():
+            br["rail_bev_alignment_mismatch"] = 1.0 if rail_mismatch_present else 0.0
+        if "rail_mismatch_ignored_due_to_strong_label" in locals():
+            br["rail_mismatch_ignored_due_to_strong_label"] = 1.0 if rail_mismatch_ignored_due_to_strong_label else 0.0
+        if "rail_weight_forced_low_due_to_mismatch" in locals():
+            br["rail_weight_forced_low_due_to_mismatch"] = 1.0 if rail_weight_forced_low_due_to_mismatch else 0.0
         br["selected_init_source"] = selected_init_source
         br["bev_candidate_rejected_by_gate"] = 1.0 if bev_candidate_rejected_by_gate else 0.0
         br["candidate_scores"] = candidate_scores
@@ -1000,37 +1293,14 @@ def run(context: RuntimeContext) -> None:
                 f.write(f"rail_gate_failed: {br.get('rail_gate_failed', 0.0)}\n")
                 if br.get("invalid_reason"):
                     f.write(f"invalid_reason: {br.get('invalid_reason')}\n")
-                for _k in ("label_gate_bypass_used", "label_gate_failed_reason", "strong_label_gate_used", "object_or_edge_rail_gate_bypass", "pose_jump_from_initial_m", "yaw_jump_from_initial_deg", "rotation_jump_from_initial_deg", "selected_init_source", "bev_candidate_rejected_by_gate", "final_gate_source", "init_label_teacher_eligible_count", "init_label_teacher_visible_ratio"):
+                for _k in ("label_gate_bypass_used", "label_gate_failed_reason", "strong_label_gate_used", "object_or_edge_rail_gate_bypass", "pose_jump_from_initial_m", "yaw_jump_from_initial_deg", "rotation_jump_from_initial_deg", "selected_init_source", "bev_candidate_rejected_by_gate", "final_gate_source", "init_label_teacher_eligible_count", "init_label_teacher_visible_ratio", "rail_bev_alignment_mismatch", "rail_mismatch_ignored_due_to_strong_label", "rail_weight_forced_low_due_to_mismatch", "openlabel_intrinsics_available", "optimizer_intrinsics_source", "intrinsics_cx_delta_px", "intrinsics_cy_delta_px", "calibration_intrinsics_cx_delta_px", "calibration_intrinsics_cy_delta_px", "optimizer_calib_file"):
                     if _k in br:
                         f.write(f"{_k}: {br[_k]}\n")
                 if br.get("candidate_scores"):
                     f.write("candidate_scores_json: " + json.dumps(br["candidate_scores"], ensure_ascii=False) + "\n")
                 if "refined_lidar_rail_nonzero_ratio" in br:
                     f.write(f"refined_lidar_rail_nonzero_ratio: {br['refined_lidar_rail_nonzero_ratio']}\n")
-        strong_debug = {k: br.get(k) for k in (
-            "strong_label_feature_count",
-            "strong_label_object_count",
-            "strong_label_residual_count",
-            "strong_residuals_added_to_optimizer",
-            "strong_label_optimizer_residual_count",
-            "strong_label_score_before_optimization",
-            "strong_label_score_after_optimization",
-            "strong_track_residual_count",
-            "strong_pole_residual_count",
-            "strong_switch_residual_count",
-            "strong_buffer_stop_residual_count",
-            "strong_label_score",
-            "strong_track_score",
-            "strong_pole_score",
-            "strong_switch_score",
-            "strong_buffer_stop_score",
-            "strong_label_gate_used",
-            "final_gate_source",
-            "selected_init_source",
-            "extrinsic_source",
-            "pose_jump_from_initial_m",
-            "yaw_jump_from_initial_deg",
-        ) if k in br}
+        strong_debug = _extract_strong_label_debug(br)
         if strong_debug:
             with open(os.path.join(calib_dir, f"{frame_id:010d}_strong_label_debug.json"), "w", encoding="utf-8") as f:
                 json.dump(strong_debug, f, indent=2, ensure_ascii=False)

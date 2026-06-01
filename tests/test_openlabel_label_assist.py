@@ -351,6 +351,246 @@ def test_openlabel_strong_features_use_per_class_visible_ranges(tmp_path):
     assert "catenary_pole\tpole_mid" in tsv
 
 
+def test_switch_strong_features_are_downsampled_per_object(tmp_path):
+    label_json = tmp_path / "labels.json"
+    data = {
+        "openlabel": {
+            "objects": {"sw1": {"type": "switch", "name": "switch"}},
+            "frames": {
+                "12": {
+                    "objects": {
+                        "sw1": {
+                            "object_data": {
+                                "poly2d": [{"name": "rgb_center__poly", "coordinate_system": "rgb_center", "val": [10, 40, 30, 42, 50, 45]}],
+                                "vec": [{"name": "lidar__vec", "coordinate_system": "lidar", "val": [0, 0, 0, 100, 0, 0]}],
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+    label_json.write_text(json.dumps(data), encoding="utf-8")
+    image_path = tmp_path / "image.png"
+    cv2.imwrite(str(image_path), np.zeros((64, 96, 3), dtype=np.uint8))
+    sam_base = str(tmp_path / "sam" / "0000000012")
+    frame_dir = str(tmp_path / "label_features" / "0000000012")
+    lidar_base = str(tmp_path / "lidar" / "0000000012")
+
+    summary = export_label_assist(
+        str(label_json),
+        12,
+        str(image_path),
+        "rgb_center",
+        sam_base,
+        frame_dir,
+        lidar_base,
+        strong_features_enabled=True,
+        max_switch_samples_per_object=5,
+    )
+
+    assert summary["max_switch_samples_per_object"] == 5
+    assert summary["strong_label_feature_counts"]["switch"] == 1
+    assert summary["strong_label_residual_point_counts"]["switch"] <= 5
+
+
+def test_stage_a_switch_is_config_gated_but_stage_b_keeps_switch_residuals():
+    header = (pathlib.Path(ROOT) / "cpp" / "include" / "edge_calibrator.h").read_text(encoding="utf-8")
+    main = (pathlib.Path(ROOT) / "cpp" / "main.cpp").read_text(encoding="utf-8")
+    source = (pathlib.Path(ROOT) / "cpp" / "edge_calibrator.cpp").read_text(encoding="utf-8")
+    stage_a_start = source.index("for (const auto& sf : strong_label_features_)")
+    stage_a_end = source.index("Eigen::Matrix3d r_mat;", stage_a_start)
+    stage_a = source[stage_a_start:stage_a_end]
+    stage_b_start = source.index("strong_track_residual_count_ = 0;")
+    stage_b = source[stage_b_start:]
+
+    assert "bool strong_stage_a_use_switch = false;" in header
+    assert "--strong_stage_a_use_switch" in main
+    assert "if (!config_.strong_stage_a_use_switch) continue;" in stage_a
+    assert "sf.class_type == \"switch\"" in stage_b
+    assert "++strong_switch_residual_count_" in stage_b
+
+
+def test_stage_b_track_switch_are_disabled_by_default_and_debugged():
+    header = (pathlib.Path(ROOT) / "cpp" / "include" / "edge_calibrator.h").read_text(encoding="utf-8")
+    main = (pathlib.Path(ROOT) / "cpp" / "main.cpp").read_text(encoding="utf-8")
+    source = (pathlib.Path(ROOT) / "cpp" / "edge_calibrator.cpp").read_text(encoding="utf-8")
+    common = (pathlib.Path(ROOT) / "cpp" / "include" / "common.h").read_text(encoding="utf-8")
+
+    assert "bool strong_stage_b_use_track = false;" in header
+    assert "bool strong_stage_b_use_switch = false;" in header
+    assert "double strong_stage_b_track_min_score = 0.25;" in header
+    assert "double strong_stage_b_switch_min_score = 0.25;" in header
+    assert "--strong_stage_b_use_track" in main
+    assert "--strong_stage_b_use_switch" in main
+    assert "--strong_stage_b_track_min_score" in main
+    assert "--strong_stage_b_switch_min_score" in main
+    assert "stage_b_track_skipped_reason_ = \"disabled\"" in source
+    assert "stage_b_switch_skipped_reason_ = \"disabled\"" in source
+    assert "stage_b_reverted_to_stage_a_" in source
+    assert "strong_track_optimizer_residual_count" in common
+    assert "strong_switch_eval_residual_count" in common
+
+
+def test_track_strong_features_are_filtered_by_openlabel_initial_projection(tmp_path):
+    label_json = tmp_path / "labels.json"
+    data = {
+        "openlabel": {
+            "coordinate_systems": {
+                "rgb_center": {
+                    "type": "sensor",
+                    "parent": "lidar",
+                    "pose_wrt_parent": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "quaternion": [0.0, 0.0, 0.0, 1.0],
+                    },
+                }
+            },
+            "streams": {
+                "rgb_center": {
+                    "stream_properties": {
+                        "intrinsics_pinhole": {
+                            "camera_matrix": [20.0, 0.0, 50.0, 0.0, 20.0, 50.0, 0.0, 0.0, 1.0]
+                        }
+                    }
+                }
+            },
+            "objects": {"trk1": {"type": "track", "name": "track"}},
+            "frames": {
+                "12": {
+                    "objects": {
+                        "trk1": {
+                            "object_data": {
+                                "poly2d": [{"name": "rgb_center__poly", "coordinate_system": "rgb_center", "val": [45, 50, 55, 50]}],
+                                "vec": [{"name": "lidar__vec", "coordinate_system": "lidar", "val": [10, 0, 0, 10, -20, 0]}],
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+    label_json.write_text(json.dumps(data), encoding="utf-8")
+    image_path = tmp_path / "image.png"
+    cv2.imwrite(str(image_path), np.zeros((100, 100, 3), dtype=np.uint8))
+    sam_base = str(tmp_path / "sam" / "0000000012")
+    frame_dir = str(tmp_path / "label_features" / "0000000012")
+    lidar_base = str(tmp_path / "lidar" / "0000000012")
+
+    summary = export_label_assist(
+        str(label_json),
+        12,
+        str(image_path),
+        "rgb_center",
+        sam_base,
+        frame_dir,
+        lidar_base,
+        strong_features_enabled=True,
+        max_track_samples_per_object=120,
+        track_initial_max_dist_px=10.0,
+    )
+
+    assert summary["track_residual_count_before_filter"] > summary["track_residual_count_after_filter"]
+    assert summary["rejected_track_count_by_reason"]["initial_distance"] > 0
+    assert summary["strong_label_residual_point_counts"]["track"] == summary["track_residual_count_after_filter"]
+    assert summary["strong_label_residual_point_counts"]["track"] <= 20
+
+
+def test_highres_sensor_scales_pixel_thresholds_from_rgb_center_intrinsics(tmp_path):
+    label_json = tmp_path / "labels.json"
+    data = {
+        "openlabel": {
+            "coordinate_systems": {
+                "rgb_center": {
+                    "type": "sensor",
+                    "parent": "lidar",
+                    "pose_wrt_parent": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "quaternion": [0.0, 0.0, 0.0, 1.0],
+                    },
+                },
+                "rgb_highres_center": {
+                    "type": "sensor",
+                    "parent": "lidar",
+                    "pose_wrt_parent": {
+                        "translation": [0.0, 0.0, 0.0],
+                        "quaternion": [0.0, 0.0, 0.0, 1.0],
+                    },
+                },
+            },
+            "streams": {
+                "rgb_center": {
+                    "stream_properties": {
+                        "intrinsics_pinhole": {
+                            "camera_matrix": [100.0, 0.0, 50.0, 0.0, 100.0, 50.0, 0.0, 0.0, 1.0]
+                        }
+                    }
+                },
+                "rgb_highres_center": {
+                    "stream_properties": {
+                        "intrinsics_pinhole": {
+                            "camera_matrix": [200.0, 0.0, 100.0, 0.0, 200.0, 100.0, 0.0, 0.0, 1.0]
+                        }
+                    }
+                },
+            },
+            "objects": {
+                "trk1": {"type": "track", "name": "track"},
+                "buf1": {"type": "buffer_stop", "name": "buffer"},
+            },
+            "frames": {
+                "12": {
+                    "objects": {
+                        "trk1": {
+                            "object_data": {
+                                "poly2d": [{"name": "rgb_highres_center__poly", "coordinate_system": "rgb_highres_center", "val": [90, 100, 110, 100]}],
+                                "vec": [{"name": "lidar__vec", "coordinate_system": "lidar", "val": [10, 0, 0, 10, 1, 0]}],
+                            }
+                        },
+                        "buf1": {
+                            "object_data": {
+                                "bbox": [{"name": "rgb_highres_center__bbox", "coordinate_system": "rgb_highres_center", "val": [100, 100, 20, 20]}],
+                                "cuboid": [{"name": "lidar__cuboid", "coordinate_system": "lidar", "val": [10, 0, 0, 0, 0, 0, 1, 1, 1, 1]}],
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    }
+    label_json.write_text(json.dumps(data), encoding="utf-8")
+    image_path = tmp_path / "image.png"
+    cv2.imwrite(str(image_path), np.zeros((200, 200, 3), dtype=np.uint8))
+    sam_base = str(tmp_path / "sam" / "0000000012")
+    frame_dir = str(tmp_path / "label_features" / "0000000012")
+    lidar_base = str(tmp_path / "lidar" / "0000000012")
+
+    summary = export_label_assist(
+        str(label_json),
+        12,
+        str(image_path),
+        "rgb_highres_center",
+        sam_base,
+        frame_dir,
+        lidar_base,
+        strong_features_enabled=True,
+        bbox_padding_px=4,
+        track_initial_max_dist_px=10.0,
+    )
+
+    assert summary["pixel_threshold_reference_sensor"] == "rgb_center"
+    assert summary["pixel_threshold_scale"] == 2.0
+    assert summary["effective_bbox_padding_px"] == 8
+    assert summary["effective_track_initial_max_dist_px"] == 20.0
+
+
+def test_buffer_stop_projection_cost_does_not_force_cuboid_center_to_bbox_center():
+    source = (pathlib.Path(ROOT) / "cpp" / "include" / "optimizer_cost_function.h").read_text(encoding="utf-8")
+    start = source.index("struct BufferStopBBoxProjectionCost")
+    end = source.index("StrongLabelFeature feature_", start)
+    buffer_stop_cost = source[start:end]
+    assert 'feature_.role.find("center")' not in buffer_stop_cost
+
 def test_openlabel_extrinsic_uses_inverse_sensor_pose_then_optical_rotation(tmp_path):
     label_json = tmp_path / "labels.json"
     data = {
@@ -398,4 +638,3 @@ def test_strong_label_costs_are_added_to_optimizer_source():
     assert "AutoDiffCostFunction<PoleCenterlineProjectionCost" in source
     assert "AutoDiffCostFunction<BufferStopBBoxProjectionCost" in source
     assert "strong_residuals_added_to_optimizer" in source
-

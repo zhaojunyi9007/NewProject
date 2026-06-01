@@ -33,6 +33,27 @@ def _read_calib_pose(path: str):
     return (r_vec, t_vec) if len(r_vec) == 3 and len(t_vec) == 3 else None
 
 
+def _existing_path(path: str) -> str:
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    candidates = [p]
+    if not os.path.isabs(p):
+        candidates.append(os.path.join(_REPO_ROOT, p))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return ""
+
+
+def _select_visualization_calib_file(calib_meta: dict[str, str], fallback_calib_file: str) -> tuple[str, str, bool]:
+    optimizer_calib = _existing_path(calib_meta.get("optimizer_calib_file", ""))
+    if optimizer_calib:
+        return optimizer_calib, calib_meta.get("optimizer_intrinsics_source", "optimizer_calib_file") or "optimizer_calib_file", True
+    fallback = _existing_path(fallback_calib_file)
+    return fallback, "config_calib_file" if fallback else "missing", False
+
+
 def _calib_meta_valid(kv: dict[str, str]) -> bool:
     try:
         return float((kv.get("final_pose_valid", "1") or "1").split()[0]) >= 0.5
@@ -138,20 +159,38 @@ def run(context: RuntimeContext) -> None:
         print(f"  logical_frame_id={frame_id:010d}")
         print(f"  source_image={img_path}")
         print(f"  feature_base={feature_base}")
+        visualization_calib_file, visualization_intrinsics_source, optimizer_calib_file_found = _select_visualization_calib_file(
+            calib_meta,
+            calib_file,
+        )
+        print(f"  visualization_intrinsics_source={visualization_intrinsics_source}")
+        print(f"  visualization_calib_file={visualization_calib_file}")
+        print(f"  optimizer_calib_file_found={1 if optimizer_calib_file_found else 0}")
         cmd = [
             sys.executable, "tools/visualize.py",
             "--img", img_path,
             "--feature_base", feature_base,
-            "--calib_file", calib_file if os.path.exists(calib_file) else "",
+            "--calib_file", visualization_calib_file,
             "--dataset_format", ds_fmt,
             "--r_vec", *r_vec,
             "--t_vec", *t_vec,
             "--output", output_path,
-            "--overlay-json-rail",
             "--overlay-lidar-rail-samples",
         ]
+        if bool(vis_cfg.get("overlay_json_rail", False)):
+            cmd.append("--overlay-json-rail")
         if img_sensor:
             cmd.extend(["--image_sensor", img_sensor])
+        label_cfg = context.config.get("label_assist") or {}
+        strong_label_features = f"{feature_base}_label_strong_features.tsv"
+        if bool(label_cfg.get("strong_label_static_overlay_enabled", True)) and os.path.isfile(strong_label_features):
+            out_root, _ = os.path.splitext(output_path)
+            cmd.extend([
+                "--strong-label-features",
+                strong_label_features,
+                "--strong-static-overlay-output",
+                out_root + "_diag_static_strong.png",
+            ])
 
         if bool(vis_cfg.get("enable_diag_panels", True)):
             img_feat = os.path.join(

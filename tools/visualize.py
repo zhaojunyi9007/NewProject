@@ -405,6 +405,114 @@ def overlay_lidar_rail_samples(img, feature_base, K, R_rect, P_rect, R, t, max_p
     return img
 
 
+def _project_lidar_point(p, R_rect, P_rect, R, t, width, height):
+    pc = R @ np.array(p, dtype=np.float64) + t
+    pr = R_rect @ pc
+    if pr[2] <= 0.1:
+        return None
+    uv = P_rect @ np.hstack([pr, 1.0])
+    if abs(float(uv[2])) <= 1e-9:
+        return None
+    u, v = int(round(float(uv[0] / uv[2]))), int(round(float(uv[1] / uv[2])))
+    if 0 <= u < width and 0 <= v < height:
+        return u, v
+    return None
+
+
+def _read_strong_label_features(path):
+    rows = []
+    if not path or not os.path.isfile(path):
+        return rows
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            if len(parts) < 12:
+                continue
+            try:
+                rows.append({
+                    "class_type": parts[0],
+                    "object_id": parts[1],
+                    "role": parts[2],
+                    "p1": (float(parts[4]), float(parts[5]), float(parts[6])),
+                    "p2": (float(parts[7]), float(parts[8]), float(parts[9])),
+                    "image_kind": parts[10],
+                    "image_values": [float(x) for x in parts[11:]],
+                })
+            except ValueError:
+                continue
+    return rows
+
+
+def render_strong_static_overlay(img_bgr, feature_path, R_rect, P_rect, R, t, output_path):
+    rows = _read_strong_label_features(feature_path)
+    if not rows or not output_path:
+        return False
+    out = img_bgr.copy()
+    h, w = out.shape[:2]
+    colors = {
+        "catenary_pole": (0, 0, 255),
+        "switch": (255, 255, 0),
+        "buffer_stop": (0, 165, 255),
+        "track": (160, 160, 160),
+    }
+    labels = {
+        "catenary_pole": "pole",
+        "switch": "switch",
+        "buffer_stop": "buffer",
+        "track": "track",
+    }
+    static_classes = {"catenary_pole", "switch", "buffer_stop"}
+    grouped_image = {}
+    projected = 0
+    for row in rows:
+        cls = row["class_type"]
+        if cls not in static_classes:
+            continue
+        color = colors.get(cls, (255, 255, 255))
+        key = (cls, row["object_id"], row["image_kind"], tuple(row["image_values"]))
+        grouped_image[key] = row
+        p1 = _project_lidar_point(row["p1"], R_rect, P_rect, R, t, w, h)
+        p2 = None
+        if any(abs(v) > 1e-9 for v in row["p2"]):
+            p2 = _project_lidar_point(row["p2"], R_rect, P_rect, R, t, w, h)
+        if p1:
+            cv2.circle(out, p1, 3, color, -1, lineType=cv2.LINE_AA)
+            projected += 1
+        if p1 and p2:
+            cv2.line(out, p1, p2, color, 2, lineType=cv2.LINE_AA)
+
+    for (cls, _oid, kind, values), row in grouped_image.items():
+        color = colors.get(cls, (255, 255, 255))
+        if kind == "bbox" and len(values) >= 4:
+            x1, y1, x2, y2 = [int(round(v)) for v in values[:4]]
+            cv2.rectangle(out, (x1, y1), (x2, y2), color, 2, lineType=cv2.LINE_AA)
+            cv2.putText(out, labels.get(cls, cls), (x1, max(18, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        elif kind == "centerline" and len(values) >= 4:
+            p1 = (int(round(values[0])), int(round(values[1])))
+            p2 = (int(round(values[2])), int(round(values[3])))
+            cv2.line(out, p1, p2, color, 2, lineType=cv2.LINE_AA)
+            cv2.putText(out, labels.get(cls, cls), p1, cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        elif kind == "polyline" and len(values) >= 3:
+            n = int(round(values[0]))
+            coords = values[1 : 1 + 2 * n]
+            if len(coords) >= 4:
+                pts = np.array(
+                    [[int(round(coords[i])), int(round(coords[i + 1]))] for i in range(0, len(coords) - 1, 2)],
+                    dtype=np.int32,
+                )
+                cv2.polylines(out, [pts.reshape(-1, 1, 2)], False, color, 2, lineType=cv2.LINE_AA)
+                cv2.putText(out, labels.get(cls, cls), tuple(pts[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    ok = cv2.imwrite(output_path, out)
+    if ok:
+        print(f"[Info] Strong static overlay saved: {output_path} (projected={projected})")
+    return bool(ok)
+
+
 def project_points(img, points, K, R_rect, P_rect, R, t, subsample=5):
     """
     将3D点投影到图像上
@@ -648,6 +756,8 @@ Examples:
     parser.add_argument("--rail_dist_alpha", type=float, default=0.35, help="Alpha for rail_dist overlay (0..1).")
     parser.add_argument("--overlay-json-rail", action="store_true", help="Overlay JSON/Steger 2D rail centerlines in cyan.")
     parser.add_argument("--overlay-lidar-rail-samples", action="store_true", help="Project LiDAR rail BEV sample points in blue.")
+    parser.add_argument("--strong-label-features", type=str, default="", help="Strong label TSV for static-anchor diagnostics.")
+    parser.add_argument("--strong-static-overlay-output", type=str, default="", help="Output path for strong static anchor overlay.")
     parser.add_argument("--overlay-diagnostic-vertical-lines", action="store_true", help="Draw diagnostic vertical structure lines in red.")
     parser.add_argument("--diag", action="append", choices=["bev", "semantic", "refine", "rail"],
                         help="Phase 7：额外生成诊断拼图（bev/semantic/refine/rail，可重复指定）")
@@ -883,6 +993,16 @@ Examples:
         img = overlay_json_rail_centerlines(img, rail_dir)
     if args.overlay_lidar_rail_samples:
         img = overlay_lidar_rail_samples(img, args.feature_base, K, R_rect, P_rect, R, t_vec)
+    if args.strong_static_overlay_output:
+        render_strong_static_overlay(
+            img_clean,
+            args.strong_label_features,
+            R_rect,
+            P_rect,
+            R,
+            t_vec,
+            args.strong_static_overlay_output,
+        )
     
     # 先画点 (作为背景)
     if points:

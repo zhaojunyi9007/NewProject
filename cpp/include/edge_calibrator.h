@@ -36,12 +36,16 @@ struct EdgeCalibratorConfig {
     std::string label_strong_features_path;
     double label_track_weight = 1.5;
     double label_static_weight = 1.0;
-    double strong_track_weight = 2.0;
-    double strong_pole_weight = 1.5;
-    double strong_switch_weight = 1.2;
-    double strong_buffer_stop_weight = 1.0;
-    double strong_label_min_translation_prior_weight = 5.0;
-    double strong_label_rotation_prior_weight = 0.5;
+    double strong_track_weight = 0.25;
+    double strong_pole_weight = 3.0;
+    double strong_switch_weight = 2.0;
+    double strong_buffer_stop_weight = 4.0;
+    bool strong_stage_a_use_switch = false;
+    double strong_label_min_translation_prior_weight = 50.0;
+    double strong_label_rotation_prior_weight = 10.0;
+    double strong_label_max_pose_jump_m = 1.0;
+    double strong_label_max_yaw_jump_deg = 3.0;
+    double strong_label_static_score_tolerance = 0.0;
     double label_vehicle_weight = 0.4;
     double label_person_weight = 0.2;
     int lidar_semantic_max_points = 0;        // 0 means keep all points.
@@ -143,6 +147,17 @@ private:
     bool strong_residuals_added_to_optimizer_ = false;
     double strong_label_score_before_optimization_ = 0.0;
     double strong_label_score_after_optimization_ = 0.0;
+    double strong_static_score_before_optimization_ = 0.0;
+    double strong_static_score_after_optimization_ = 0.0;
+    bool strong_label_pose_reverted_ = false;
+    bool stage_a_attempted_ = false;
+    double stage_a_static_score_before_ = 0.0;
+    double stage_a_static_score_after_ = 0.0;
+    double stage_a_pose_jump_m_ = 0.0;
+    double stage_a_yaw_jump_deg_ = 0.0;
+    bool stage_a_rejected_ = false;
+    std::string stage_a_reject_reason_ = "none";
+    std::string strong_label_revert_reason_ = "none";
 
     CalibHistory history_;
 

@@ -87,13 +87,15 @@ def _export_label_assist_if_enabled(cfg: Dict[str, Any], frame_id: int, image_pa
         cmd.append("--use-sam-refine")
     if bool(label_cfg.get("strong_features_enabled", True)):
         cmd.append("--strong-features-enabled")
-    cmd.extend(["--max-track-samples-per-object", str(int(label_cfg.get("max_track_samples_per_object", 800)))])
+    cmd.extend(["--max-track-samples-per-object", str(int(label_cfg.get("max_track_samples_per_object", 120)))])
     cmd.extend(["--max-pole-samples-per-object", str(int(label_cfg.get("max_pole_samples_per_object", 20)))])
+    cmd.extend(["--max-switch-samples-per-object", str(int(label_cfg.get("max_switch_samples_per_object", 80)))])
     cmd.extend(["--bbox-padding-px", str(int(label_cfg.get("bbox_padding_px", 12)))])
     cmd.extend(["--track-visible-xmax-m", str(float(label_cfg.get("track_visible_xmax_m", teacher_visible_xmax_m)))])
     cmd.extend(["--switch-visible-xmax-m", str(float(label_cfg.get("switch_visible_xmax_m", teacher_visible_xmax_m)))])
     cmd.extend(["--catenary-pole-visible-xmax-m", str(float(label_cfg.get("catenary_pole_visible_xmax_m", 160.0)))])
     cmd.extend(["--buffer-stop-visible-xmax-m", str(float(label_cfg.get("buffer_stop_visible_xmax_m", 240.0)))])
+    cmd.extend(["--track-initial-max-dist-px", str(float(label_cfg.get("track_initial_max_dist_px", 300.0)))])
     if lidar_pcd:
         cmd.extend(["--lidar-pcd", lidar_pcd])
     subprocess.run(cmd, check=True)

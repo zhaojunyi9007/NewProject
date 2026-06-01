@@ -92,6 +92,33 @@ def load_osdar23_openlabel_extrinsic(label_json: str, camera_folder: str) -> Opt
     return rvec.reshape(-1).tolist(), tvec.reshape(-1).tolist()
 
 
+def load_osdar23_openlabel_intrinsics(label_json: str, camera_folder: str) -> Optional[np.ndarray]:
+    """Read OpenLABEL stream intrinsics and return a 3x3 pinhole camera matrix."""
+    if not label_json or not os.path.isfile(label_json):
+        return None
+    try:
+        with open(label_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    openlabel = data.get("openlabel", data)
+    stream = (openlabel.get("streams") or {}).get((camera_folder or "rgb_center").strip()) or {}
+    intr = ((stream.get("stream_properties") or {}).get("intrinsics_pinhole") or {})
+    mat = intr.get("camera_matrix") or []
+    try:
+        vals = [float(v) for v in mat]
+    except (TypeError, ValueError):
+        return None
+    if len(vals) >= 12:
+        return np.asarray(
+            [vals[0], vals[1], vals[2], vals[4], vals[5], vals[6], vals[8], vals[9], vals[10]],
+            dtype=np.float64,
+        ).reshape(3, 3)
+    if len(vals) >= 9:
+        return np.asarray(vals[:9], dtype=np.float64).reshape(3, 3)
+    return None
+
+
 def load_osdar23_init_extrinsic(calib_path: str, camera_folder: str) -> Optional[Tuple[List[float], List[float]]]:
     """
     Parse OSDaR23 calibration.txt for initial LiDAR->optical extrinsic.
@@ -159,11 +186,17 @@ def _extract_numbers(line: str) -> List[float]:
     return [float(x) for x in nums]
 
 
-def load_osdar23_intrinsics(calib_file: str, camera_folder: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_osdar23_intrinsics(calib_file: str, camera_folder: str, label_json: str = "") -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Load K, R_rect=I, P_rect=[K|0] for the given camera data_folder (e.g. rgb_center).
-    Aligns with C++ optimizer OSDaR branch.
+    Prefer OpenLABEL stream intrinsics so 2D labels and optimizer projections share one pixel frame.
     """
+    K_openlabel = load_osdar23_openlabel_intrinsics(label_json, camera_folder)
+    if K_openlabel is not None:
+        R_rect = np.eye(3, dtype=np.float64)
+        P_rect = np.hstack([K_openlabel, np.zeros((3, 1), dtype=np.float64)])
+        return K_openlabel, R_rect, P_rect
+
     if not calib_file or not os.path.exists(calib_file):
         print("[Warning] OSDaR23 calib_file missing; fallback to default intrinsics")
         K = np.array([[1000.0, 0.0, 960.0], [0.0, 1000.0, 540.0], [0.0, 0.0, 1.0]], dtype=np.float64)
@@ -236,7 +269,7 @@ class OSDaR23Adapter(DatasetAdapter):
     def load_intrinsics(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         calib_file = str(self._config.get("data", {}).get("calib_file", "") or "")
         cam = str(self._config.get("data", {}).get("image_sensor", "rgb_center") or "rgb_center")
-        return load_osdar23_intrinsics(calib_file, cam)
+        return load_osdar23_intrinsics(calib_file, cam, label_json=self.resolve_label_json())
 
     def load_initial_extrinsic(self) -> Optional[Tuple[List[float], List[float]]]:
         calib_file = str(self._config.get("data", {}).get("calib_file", "") or "")

@@ -514,14 +514,7 @@ struct BufferStopBBoxProjectionCost {
         auto smooth_hinge = [&](const T& x) -> T { return (x + ceres::sqrt(x * x + eps)) * T(0.5); };
         T outside = smooth_hinge(x0 - u) + smooth_hinge(u - x1) + smooth_hinge(y0 - v) + smooth_hinge(v - y1);
         T scale = ceres::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0) + T(1.0));
-        if (feature_.role.find("center") != std::string::npos) {
-            const T cx = (x0 + x1) * T(0.5);
-            const T cy = (y0 + y1) * T(0.5);
-            T center_dist = ceres::sqrt((u - cx) * (u - cx) + (v - cy) * (v - cy) + T(1e-6));
-            residual[0] = T(sqrt_weight_) * (outside + T(0.35) * center_dist) / scale;
-        } else {
-            residual[0] = T(sqrt_weight_) * outside / scale;
-        }
+        residual[0] = T(sqrt_weight_) * outside / scale;
         return true;
     }
 

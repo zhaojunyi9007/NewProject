@@ -11,7 +11,7 @@ data:
   dataset_format: "osdar23"
   # ★ 修改这里指向你的序列根目录
   osdar_sequence_root: "/gz-data/OSDaR23/1_calibration_1.1"
-  image_sensor: "rgb_center"        # rgb_center / rgb_left / rgb_right
+  image_sensor: "rgb_highres_center"        # rgb_center / rgb_left / rgb_right
   osdar_duplicate_policy: "latest"  # latest | earliest
 
   # 以下三项由 osdar_sequence_root 自动推导，留空即可
@@ -135,24 +135,29 @@ label_assist:
   use_for_calib_residual: true
   export_diagnostics: true
   strong_features_enabled: true
-  track_weight: 2.0
-  catenary_pole_weight: 1.5
-  switch_weight: 1.2
-  buffer_stop_weight: 1.0
+  track_weight: 0.25
+  catenary_pole_weight: 3.0
+  switch_weight: 2.0
+  buffer_stop_weight: 4.0
   static_object_weight: 1.0
   vehicle_weight: 0.4
   person_weight: 0.2
-  max_track_samples_per_object: 800
+  max_track_samples_per_object: 120
   max_pole_samples_per_object: 20
+  max_switch_samples_per_object: 80
+  stage_a_use_switch: false
   bbox_padding_px: 12
   label_json: ""
   teacher_visible_xmax_m: 120.0
   track_visible_xmax_m: 120.0
+  track_initial_max_dist_px: 300.0
+  track_use_as_primary_gate: false
   switch_visible_xmax_m: 120.0
   catenary_pole_visible_xmax_m: 160.0
   buffer_stop_visible_xmax_m: 240.0
   teacher_image_bbox_padding_m: 8.0
   use_sam_refine: true
+  strong_label_static_overlay_enabled: true
   use_openlabel_extrinsic: true
   openlabel_extrinsic_fallback_to_calibration: true
   debug_extrinsic_comparison: true
@@ -164,13 +169,16 @@ semantic_calib:
   min_label_teacher_score: 0.20
   min_strong_label_score: 0.25
   min_strong_track_residual_count: 50
-  strong_label_min_translation_prior_weight: 5.0
-  strong_label_rotation_prior_weight: 0.5
+  strong_label_min_translation_prior_weight: 50.0
+  strong_label_rotation_prior_weight: 10.0
+  strong_label_static_score_tolerance: 0.0
   min_strong_static_residual_count: 2
   min_label_track_visible_count: 50
   min_label_residual_count_for_gate: 50
   label_assist_requires_label_gate: true
   use_rejected_bev_as_label_candidate: false
+  use_bev_candidate_in_label_assist: false
+  track_use_as_primary_gate: false
   enable_init_candidate_scoring: true
   max_label_assisted_pose_jump_m: 1.0
   max_label_assisted_yaw_jump_deg: 3.0
@@ -238,6 +246,7 @@ visualization:
   pose_source: "refined"
   reject_invalid_pose: true
   invalid_pose_fallback: "initial"
+  overlay_json_rail: false
 
 refine:
   skip_invalid_calibration_pose: true
