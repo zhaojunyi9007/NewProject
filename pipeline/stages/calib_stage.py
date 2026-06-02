@@ -45,6 +45,9 @@ def _parse_calib_breakdown(path: str) -> dict:
         "optimizer_intrinsics_source",
         "selected_init_source",
         "stage_a_reject_reason",
+        "stage_b_guard_reason",
+        "stage_b_switch_skipped_reason",
+        "stage_b_track_skipped_reason",
         "strong_label_revert_reason",
     }
     with open(path, "r", encoding="utf-8") as f:
@@ -114,10 +117,20 @@ def _extract_strong_label_debug(breakdown: dict) -> dict:
         "stage_a_yaw_jump_deg",
         "stage_a_rejected",
         "stage_a_reject_reason",
+        "stage_b_track_used",
+        "stage_b_switch_used",
+        "stage_b_track_skipped_reason",
+        "stage_b_switch_skipped_reason",
+        "stage_b_reverted_to_stage_a",
+        "stage_b_guard_reason",
         "strong_track_residual_count",
         "strong_pole_residual_count",
         "strong_switch_residual_count",
         "strong_buffer_stop_residual_count",
+        "strong_track_optimizer_residual_count",
+        "strong_switch_optimizer_residual_count",
+        "strong_track_eval_residual_count",
+        "strong_switch_eval_residual_count",
         "strong_label_score",
         "strong_track_score",
         "strong_pole_score",
@@ -1200,6 +1213,26 @@ def run(context: RuntimeContext) -> None:
                     cmd.extend([
                         "--strong_stage_a_use_switch",
                         "1" if bool(label_cfg.get("stage_a_use_switch", False)) else "0",
+                    ])
+                if _optimizer_binary_supports_arg(optimizer_bin, "--strong_stage_b_use_track"):
+                    cmd.extend([
+                        "--strong_stage_b_use_track",
+                        "1" if bool(label_cfg.get("stage_b_use_track", False)) else "0",
+                    ])
+                if _optimizer_binary_supports_arg(optimizer_bin, "--strong_stage_b_use_switch"):
+                    cmd.extend([
+                        "--strong_stage_b_use_switch",
+                        "1" if bool(label_cfg.get("stage_b_use_switch", False)) else "0",
+                    ])
+                if _optimizer_binary_supports_arg(optimizer_bin, "--strong_stage_b_track_min_score"):
+                    cmd.extend([
+                        "--strong_stage_b_track_min_score",
+                        str(float(label_cfg.get("stage_b_track_min_score", 0.25))),
+                    ])
+                if _optimizer_binary_supports_arg(optimizer_bin, "--strong_stage_b_switch_min_score"):
+                    cmd.extend([
+                        "--strong_stage_b_switch_min_score",
+                        str(float(label_cfg.get("stage_b_switch_min_score", 0.25))),
                     ])
             elif label_assist_for_calib:
                 print(

@@ -146,6 +146,10 @@ label_assist:
   max_pole_samples_per_object: 20
   max_switch_samples_per_object: 80
   stage_a_use_switch: false
+  stage_b_use_track: false
+  stage_b_use_switch: false
+  stage_b_track_min_score: 0.25
+  stage_b_switch_min_score: 0.25
   bbox_padding_px: 12
   label_json: ""
   teacher_visible_xmax_m: 120.0
@@ -247,6 +251,15 @@ visualization:
   reject_invalid_pose: true
   invalid_pose_fallback: "initial"
   overlay_json_rail: false
+  lidar_projection_enabled: true
+  lidar_projection_point_source: "all"
+  lidar_projection_color_mode: "depth"
+  lidar_projection_max_points: 120000
+  lidar_projection_point_radius: 2
+  lidar_projection_background: "grayscale"
+  lidar_projection_background_alpha: 0.55
+  lidar_projection_depth_min_m: 5.0
+  lidar_projection_depth_max_m: 120.0
 
 refine:
   skip_invalid_calibration_pose: true

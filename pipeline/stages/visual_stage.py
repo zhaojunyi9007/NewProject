@@ -116,6 +116,7 @@ def run(context: RuntimeContext) -> None:
         feature_base = os.path.join(lidar_dir, f"{frame_id:010d}")
         calib_result_file = os.path.join(calib_dir, f"{frame_id:010d}_calib_result.txt")
         output_path = os.path.join(visual_dir, f"{frame_id:010d}_result.png")
+        out_root, _ = os.path.splitext(output_path)
 
         if not img_path or not os.path.exists(img_path):
             print(f"[Warning] 图像不存在，跳过帧 {frame_id:010d}: {img_path}")
@@ -184,12 +185,34 @@ def run(context: RuntimeContext) -> None:
         label_cfg = context.config.get("label_assist") or {}
         strong_label_features = f"{feature_base}_label_strong_features.tsv"
         if bool(label_cfg.get("strong_label_static_overlay_enabled", True)) and os.path.isfile(strong_label_features):
-            out_root, _ = os.path.splitext(output_path)
             cmd.extend([
                 "--strong-label-features",
                 strong_label_features,
                 "--strong-static-overlay-output",
                 out_root + "_diag_static_strong.png",
+            ])
+        if bool(vis_cfg.get("lidar_projection_enabled", True)):
+            cmd.extend([
+                "--lidar-projection-output",
+                out_root + "_lidar_projection.png",
+                "--lidar-projection-point-source",
+                str(vis_cfg.get("lidar_projection_point_source", "all") or "all"),
+                "--lidar-projection-color-mode",
+                str(vis_cfg.get("lidar_projection_color_mode", "depth") or "depth"),
+                "--lidar-projection-max-points",
+                str(int(vis_cfg.get("lidar_projection_max_points", 120000) or 120000)),
+                "--lidar-projection-point-radius",
+                str(int(vis_cfg.get("lidar_projection_point_radius", 2) or 2)),
+                "--lidar-projection-background",
+                str(vis_cfg.get("lidar_projection_background", "grayscale") or "grayscale"),
+                "--lidar-projection-background-alpha",
+                str(float(vis_cfg.get("lidar_projection_background_alpha", 0.55))),
+                "--lidar-projection-depth-min-m",
+                str(float(vis_cfg.get("lidar_projection_depth_min_m", 5.0))),
+                "--lidar-projection-depth-max-m",
+                str(float(vis_cfg.get("lidar_projection_depth_max_m", 120.0))),
+                "--pose-source",
+                used_pose_source,
             ])
 
         if bool(vis_cfg.get("enable_diag_panels", True)):

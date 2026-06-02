@@ -102,8 +102,11 @@ def test_osdar_strong_label_stability_defaults_are_static_anchor_first():
     assert vis_cfg["lidar_projection_point_source"] == "all"
     assert vis_cfg["lidar_projection_color_mode"] == "depth"
     assert vis_cfg["lidar_projection_max_points"] == 120000
-    assert vis_cfg["lidar_projection_point_radius"] == 1
+    assert vis_cfg["lidar_projection_point_radius"] == 2
     assert vis_cfg["lidar_projection_background"] == "grayscale"
+    assert vis_cfg["lidar_projection_background_alpha"] == 0.55
+    assert vis_cfg["lidar_projection_depth_min_m"] == 5.0
+    assert vis_cfg["lidar_projection_depth_max_m"] == 120.0
 
 
 def test_stage_a_reject_reason_prefers_static_score_degradation():
@@ -396,6 +399,14 @@ def test_visual_stage_prefers_optimizer_calib_file_for_result_and_static_overlay
     assert cmd[cmd.index("--lidar-projection-point-source") + 1] == "all"
     assert "--lidar-projection-color-mode" in cmd
     assert cmd[cmd.index("--lidar-projection-color-mode") + 1] == "depth"
+    assert "--lidar-projection-point-radius" in cmd
+    assert cmd[cmd.index("--lidar-projection-point-radius") + 1] == "2"
+    assert "--lidar-projection-background-alpha" in cmd
+    assert cmd[cmd.index("--lidar-projection-background-alpha") + 1] == "0.55"
+    assert "--lidar-projection-depth-min-m" in cmd
+    assert cmd[cmd.index("--lidar-projection-depth-min-m") + 1] == "5.0"
+    assert "--lidar-projection-depth-max-m" in cmd
+    assert cmd[cmd.index("--lidar-projection-depth-max-m") + 1] == "120.0"
 
 
 def test_visual_stage_falls_back_to_config_calib_when_optimizer_calib_missing(tmp_path):

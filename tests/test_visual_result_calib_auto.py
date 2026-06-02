@@ -75,8 +75,11 @@ class VisualResultCalibAutoTest(unittest.TestCase):
                 visualization_calib_file="openlabel_calib.txt",
                 pose_source="calibration",
                 max_points=120000,
-                point_radius=1,
+                point_radius=2,
                 background="grayscale",
+                background_alpha=0.55,
+                depth_min_m=5.0,
+                depth_max_m=10.0,
             )
 
             self.assertTrue(ok)
@@ -93,6 +96,10 @@ class VisualResultCalibAutoTest(unittest.TestCase):
             self.assertEqual(payload["projected_points"], 3)
             self.assertEqual(payload["behind_count"], 1)
             self.assertEqual(payload["visualization_calib_file"], "openlabel_calib.txt")
+            self.assertEqual(payload["point_radius"], 2)
+            self.assertEqual(payload["background_alpha"], 0.55)
+            self.assertEqual(payload["depth_color_min_m"], 5.0)
+            self.assertEqual(payload["depth_color_max_m"], 10.0)
 
 
 if __name__ == "__main__":

@@ -827,6 +827,13 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     stage_a_yaw_jump_deg_ = 0.0;
     stage_a_rejected_ = false;
     stage_a_reject_reason_ = "none";
+    stage_a_pose_available_ = false;
+    stage_b_track_used_ = false;
+    stage_b_switch_used_ = false;
+    stage_b_track_skipped_reason_ = "not_evaluated";
+    stage_b_switch_skipped_reason_ = "not_evaluated";
+    stage_b_reverted_to_stage_a_ = false;
+    stage_b_guard_reason_ = "none";
     strong_label_revert_reason_ = "none";
 
     if (config_.label_assist_enabled && config_.strong_label_enabled && !strong_label_features_.empty()) {
@@ -931,6 +938,11 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
             stage_a_reject_reason_ = "no_static_residuals";
         }
     }
+    if (stage_a_attempted_ && !stage_a_rejected_ && stage_a_reject_reason_ == "none") {
+        std::copy(r_curr_, r_curr_ + 3, stage_a_r_);
+        std::copy(t_curr_, t_curr_ + 3, stage_a_t_);
+        stage_a_pose_available_ = true;
+    }
     Eigen::Matrix3d r_mat;
     ceres::AngleAxisToRotationMatrix(r_curr_, r_mat.data());
     Eigen::Vector3d t_vec(t_curr_[0], t_curr_[1], t_curr_[2]);
@@ -1006,6 +1018,8 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
     strong_switch_residual_count_ = 0;
     strong_buffer_stop_residual_count_ = 0;
     strong_label_optimizer_residual_count_ = 0;
+    strong_track_optimizer_residual_count_ = 0;
+    strong_switch_optimizer_residual_count_ = 0;
     strong_residuals_added_to_optimizer_ = false;
     strong_label_score_before_optimization_ = 0.0;
     strong_label_score_after_optimization_ = 0.0;
@@ -1073,20 +1087,42 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
             Eigen::Vector3d(t_curr_[0], t_curr_[1], t_curr_[2]));
         strong_label_score_before_optimization_ = before_stats.score;
         strong_static_score_before_optimization_ = StrongStaticScore(before_stats);
+        const bool stage_b_track_allowed = config_.strong_stage_b_use_track &&
+                                           before_stats.track_score >= config_.strong_stage_b_track_min_score;
+        const bool stage_b_switch_allowed = config_.strong_stage_b_use_switch &&
+                                            before_stats.switch_score >= config_.strong_stage_b_switch_min_score;
+        if (stage_b_track_allowed) {
+            stage_b_track_skipped_reason_ = "none";
+        } else if (!config_.strong_stage_b_use_track) {
+            stage_b_track_skipped_reason_ = "disabled";
+        } else {
+            stage_b_track_skipped_reason_ = "low_score";
+        }
+        if (stage_b_switch_allowed) {
+            stage_b_switch_skipped_reason_ = "none";
+        } else if (!config_.strong_stage_b_use_switch) {
+            stage_b_switch_skipped_reason_ = "disabled";
+        } else {
+            stage_b_switch_skipped_reason_ = "low_score";
+        }
 
         for (const auto& sf : strong_label_features_) {
             if (sf.class_type == "track") {
+                if (!stage_b_track_allowed) continue;
                 if (sf.image_points.size() < 2) continue;
                 auto* cost = new TrackPolylineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_track_weight);
                 problem.AddResidualBlock(new ceres::AutoDiffCostFunction<TrackPolylineProjectionCost, 1, 3, 3>(cost),
                                          new ceres::HuberLoss(1.0), r_curr_, t_curr_);
                 ++strong_track_residual_count_;
+                ++strong_track_optimizer_residual_count_;
             } else if (sf.class_type == "switch") {
+                if (!stage_b_switch_allowed) continue;
                 if (sf.image_points.size() < 2) continue;
                 auto* cost = new TrackPolylineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_switch_weight);
                 problem.AddResidualBlock(new ceres::AutoDiffCostFunction<TrackPolylineProjectionCost, 1, 3, 3>(cost),
                                          new ceres::HuberLoss(1.0), r_curr_, t_curr_);
                 ++strong_switch_residual_count_;
+                ++strong_switch_optimizer_residual_count_;
             } else if (sf.class_type == "catenary_pole") {
                 if (sf.image_points.size() < 2) continue;
                 auto* cost = new PoleCenterlineProjectionCost(sf, R_rect_, P_rect_, W_, H_, config_.strong_pole_weight);
@@ -1103,6 +1139,8 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
         strong_label_optimizer_residual_count_ = strong_track_residual_count_ + strong_pole_residual_count_ +
                                                  strong_switch_residual_count_ + strong_buffer_stop_residual_count_;
         strong_residuals_added_to_optimizer_ = strong_label_optimizer_residual_count_ > 0;
+        stage_b_track_used_ = strong_track_optimizer_residual_count_ > 0;
+        stage_b_switch_used_ = strong_switch_optimizer_residual_count_ > 0;
         std::cout << "[Debug][Fine] Added strong label residuals: total=" << strong_label_optimizer_residual_count_
                   << ", track=" << strong_track_residual_count_
                   << ", pole=" << strong_pole_residual_count_
@@ -1203,13 +1241,21 @@ void EdgeCalibrator::PerformGeometricRegularizedRefinement() {
         } else if (yaw_jump_deg > config_.strong_label_max_yaw_jump_deg) {
             guard_reason = "yaw_jump_exceeded";
         }
+        stage_b_guard_reason_ = guard_reason;
         if (guard_reason != "none") {
             std::cout << "[Debug][Fine] Strong label guard reverted pose: static_before="
                       << strong_static_score_before_optimization_ << ", static_after="
                       << strong_static_score_after_optimization_ << ", pose_jump_m=" << pose_jump_m
                       << ", yaw_jump_deg=" << yaw_jump_deg << std::endl;
-            std::copy(config_.init_r, config_.init_r + 3, r_curr_);
-            std::copy(config_.init_t, config_.init_t + 3, t_curr_);
+            if (stage_a_pose_available_) {
+                std::copy(stage_a_r_, stage_a_r_ + 3, r_curr_);
+                std::copy(stage_a_t_, stage_a_t_ + 3, t_curr_);
+                stage_b_reverted_to_stage_a_ = true;
+            } else {
+                std::copy(config_.init_r, config_.init_r + 3, r_curr_);
+                std::copy(config_.init_t, config_.init_t + 3, t_curr_);
+                stage_b_reverted_to_stage_a_ = false;
+            }
             strong_label_pose_reverted_ = true;
             strong_label_revert_reason_ = guard_reason;
             strong_label_score_after_optimization_ = strong_label_score_before_optimization_;
@@ -1289,12 +1335,16 @@ void EdgeCalibrator::ApplyTemporalSmoothing() {
             bd.strong_label_residual_count = static_cast<double>(strong_stats.track_count + strong_stats.pole_count + strong_stats.switch_count + strong_stats.buffer_count);
             bd.strong_residuals_added_to_optimizer = strong_residuals_added_to_optimizer_ ? 1.0 : 0.0;
             bd.strong_label_optimizer_residual_count = static_cast<double>(strong_label_optimizer_residual_count_);
+            bd.strong_track_optimizer_residual_count = static_cast<double>(strong_track_optimizer_residual_count_);
+            bd.strong_switch_optimizer_residual_count = static_cast<double>(strong_switch_optimizer_residual_count_);
+            bd.strong_track_eval_residual_count = static_cast<double>(strong_stats.track_count);
+            bd.strong_switch_eval_residual_count = static_cast<double>(strong_stats.switch_count);
             bd.strong_label_score_before_optimization = strong_label_score_before_optimization_;
             bd.strong_label_score_after_optimization = strong_label_score_after_optimization_ > 0.0 ? strong_label_score_after_optimization_ : strong_stats.score;
-            bd.strong_track_residual_count = static_cast<double>(strong_track_residual_count_ > 0 ? strong_track_residual_count_ : strong_stats.track_count);
-            bd.strong_pole_residual_count = static_cast<double>(strong_pole_residual_count_ > 0 ? strong_pole_residual_count_ : strong_stats.pole_count);
-            bd.strong_switch_residual_count = static_cast<double>(strong_switch_residual_count_ > 0 ? strong_switch_residual_count_ : strong_stats.switch_count);
-            bd.strong_buffer_stop_residual_count = static_cast<double>(strong_buffer_stop_residual_count_ > 0 ? strong_buffer_stop_residual_count_ : strong_stats.buffer_count);
+            bd.strong_track_residual_count = static_cast<double>(strong_stats.track_count);
+            bd.strong_pole_residual_count = static_cast<double>(strong_stats.pole_count);
+            bd.strong_switch_residual_count = static_cast<double>(strong_stats.switch_count);
+            bd.strong_buffer_stop_residual_count = static_cast<double>(strong_stats.buffer_count);
             bd.strong_track_score = strong_stats.track_score;
             bd.strong_pole_score = strong_stats.pole_score;
             bd.strong_switch_score = strong_stats.switch_score;
@@ -1385,11 +1435,21 @@ bool EdgeCalibrator::SaveResult() const {
     result_file << "stage_a_yaw_jump_deg: " << stage_a_yaw_jump_deg_ << "\n";
     result_file << "stage_a_rejected: " << (stage_a_rejected_ ? 1 : 0) << "\n";
     result_file << "stage_a_reject_reason: " << stage_a_reject_reason_ << "\n";
+    result_file << "stage_b_track_used: " << (stage_b_track_used_ ? 1 : 0) << "\n";
+    result_file << "stage_b_switch_used: " << (stage_b_switch_used_ ? 1 : 0) << "\n";
+    result_file << "stage_b_track_skipped_reason: " << stage_b_track_skipped_reason_ << "\n";
+    result_file << "stage_b_switch_skipped_reason: " << stage_b_switch_skipped_reason_ << "\n";
+    result_file << "stage_b_reverted_to_stage_a: " << (stage_b_reverted_to_stage_a_ ? 1 : 0) << "\n";
+    result_file << "stage_b_guard_reason: " << stage_b_guard_reason_ << "\n";
     result_file << "strong_label_revert_reason: " << strong_label_revert_reason_ << "\n";
     result_file << "strong_track_residual_count: " << last_score_breakdown_.strong_track_residual_count << "\n";
     result_file << "strong_pole_residual_count: " << last_score_breakdown_.strong_pole_residual_count << "\n";
     result_file << "strong_switch_residual_count: " << last_score_breakdown_.strong_switch_residual_count << "\n";
     result_file << "strong_buffer_stop_residual_count: " << last_score_breakdown_.strong_buffer_stop_residual_count << "\n";
+    result_file << "strong_track_optimizer_residual_count: " << last_score_breakdown_.strong_track_optimizer_residual_count << "\n";
+    result_file << "strong_switch_optimizer_residual_count: " << last_score_breakdown_.strong_switch_optimizer_residual_count << "\n";
+    result_file << "strong_track_eval_residual_count: " << last_score_breakdown_.strong_track_eval_residual_count << "\n";
+    result_file << "strong_switch_eval_residual_count: " << last_score_breakdown_.strong_switch_eval_residual_count << "\n";
     result_file << "strong_label_score: " << last_score_breakdown_.strong_label_score << "\n";
     result_file << "strong_track_score: " << last_score_breakdown_.strong_track_score << "\n";
     result_file << "strong_pole_score: " << last_score_breakdown_.strong_pole_score << "\n";

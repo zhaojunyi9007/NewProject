@@ -164,6 +164,10 @@ struct ScoreBreakdown {
     double strong_label_residual_count = 0.0;
     double strong_residuals_added_to_optimizer = 0.0;
     double strong_label_optimizer_residual_count = 0.0;
+    double strong_track_optimizer_residual_count = 0.0;
+    double strong_switch_optimizer_residual_count = 0.0;
+    double strong_track_eval_residual_count = 0.0;
+    double strong_switch_eval_residual_count = 0.0;
     double strong_label_score_before_optimization = 0.0;
     double strong_label_score_after_optimization = 0.0;
     double strong_track_residual_count = 0.0;

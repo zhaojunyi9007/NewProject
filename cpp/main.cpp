@@ -22,6 +22,8 @@ int main(int argc, char** argv) {
             << "            [--strong_label_enabled 0|1] [--strong_track_weight X] [--strong_pole_weight X]\n"
             << "            [--strong_switch_weight X] [--strong_buffer_stop_weight X]\n"
             << "            [--strong_stage_a_use_switch 0|1]\n"
+            << "            [--strong_stage_b_use_track 0|1] [--strong_stage_b_use_switch 0|1]\n"
+            << "            [--strong_stage_b_track_min_score X] [--strong_stage_b_switch_min_score X]\n"
             << "            [--strong_label_min_translation_prior_weight X] [--strong_label_rotation_prior_weight X]\n"
             << "            [--strong_label_max_pose_jump_m X] [--strong_label_max_yaw_jump_deg X]\n"
             << "            [--strong_label_static_score_tolerance X]\n"
@@ -100,6 +102,10 @@ int main(int argc, char** argv) {
             else if (a == "--strong_switch_weight" && need(i)) config.strong_switch_weight = std::atof(argv[++i]);
             else if (a == "--strong_buffer_stop_weight" && need(i)) config.strong_buffer_stop_weight = std::atof(argv[++i]);
             else if (a == "--strong_stage_a_use_switch" && need(i)) config.strong_stage_a_use_switch = std::atoi(argv[++i]) != 0;
+            else if (a == "--strong_stage_b_use_track" && need(i)) config.strong_stage_b_use_track = std::atoi(argv[++i]) != 0;
+            else if (a == "--strong_stage_b_use_switch" && need(i)) config.strong_stage_b_use_switch = std::atoi(argv[++i]) != 0;
+            else if (a == "--strong_stage_b_track_min_score" && need(i)) config.strong_stage_b_track_min_score = std::atof(argv[++i]);
+            else if (a == "--strong_stage_b_switch_min_score" && need(i)) config.strong_stage_b_switch_min_score = std::atof(argv[++i]);
             else if (a == "--strong_label_min_translation_prior_weight" && need(i)) config.strong_label_min_translation_prior_weight = std::atof(argv[++i]);
             else if (a == "--strong_label_rotation_prior_weight" && need(i)) config.strong_label_rotation_prior_weight = std::atof(argv[++i]);
             else if (a == "--strong_label_max_pose_jump_m" && need(i)) config.strong_label_max_pose_jump_m = std::atof(argv[++i]);

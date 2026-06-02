@@ -3,6 +3,7 @@ import numpy as np
 import os
 import argparse
 import sys
+import json
 
 # Ensure repo root is importable when running as a script:
 # `python tools/visualize.py ...` puts `tools/` on sys.path, not the repo root.
@@ -269,6 +270,148 @@ def load_features(feature_base, point_source="edge"):
         print(f"[Warning] 3D line features file not found: {lines_file}")
     
     return points, lines_3d
+
+
+def load_projection_points(feature_base, point_source="all"):
+    """Load dense points for final LiDAR projection without touching line features."""
+    edge_file = feature_base + "_edge_points.txt"
+    all_file = feature_base + "_points.txt"
+    if point_source == "edge":
+        candidates = [(edge_file, "edge")]
+    elif point_source == "auto":
+        candidates = [(all_file, "all"), (edge_file, "edge")]
+    else:
+        candidates = [(all_file, "all"), (edge_file, "edge")]
+
+    for path, source_name in candidates:
+        if not os.path.exists(path):
+            continue
+        points = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    vals = list(map(float, s.split()))
+                    if len(vals) >= 3:
+                        points.append(vals[:3])
+            print(f"[Info] Loaded {len(points)} LiDAR projection points from: {path}")
+            return points, source_name
+        except Exception as exc:
+            print(f"[Warning] Failed to load LiDAR projection points from {path}: {exc}")
+
+    print(f"[Warning] LiDAR projection point files not found for base: {feature_base}")
+    return [], "missing"
+
+
+def render_lidar_projection(
+    img_bgr,
+    points,
+    K,
+    R_rect,
+    P_rect,
+    R,
+    t,
+    output_path,
+    debug_path,
+    point_source_used="all",
+    visualization_calib_file="",
+    pose_source="unknown",
+    max_points=120000,
+    point_radius=1,
+    background="grayscale",
+    background_alpha=1.0,
+    depth_min_m=None,
+    depth_max_m=None,
+):
+    """Render a dense depth-colored LiDAR projection on the same camera pose used by result.png."""
+    if background == "grayscale":
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        out = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    else:
+        out = img_bgr.copy()
+    alpha = float(np.clip(background_alpha, 0.0, 1.0))
+    if alpha < 1.0:
+        out = (out.astype(np.float32) * alpha).astype(np.uint8)
+
+    h, w = out.shape[:2]
+    total_points = len(points)
+    behind_count = 0
+    oob_count = 0
+    projected = []
+
+    if total_points > 0:
+        limit = max(1, int(max_points))
+        if total_points > limit:
+            step = int(np.ceil(total_points / float(limit)))
+            sampled_points = points[::step]
+        else:
+            sampled_points = points
+
+        t_arr = np.asarray(t, dtype=np.float64).reshape(3)
+        for pt in sampled_points:
+            p = np.asarray(pt[:3], dtype=np.float64)
+            p_cam = R @ p + t_arr
+            p_rect = R_rect @ p_cam
+            z = float(p_rect[2])
+            if z < 0.1:
+                behind_count += 1
+                continue
+            uv = P_rect @ np.hstack([p_rect, 1.0])
+            if abs(float(uv[2])) < 1e-12:
+                oob_count += 1
+                continue
+            u = float(uv[0] / uv[2])
+            v = float(uv[1] / uv[2])
+            if not (0 <= u < w and 0 <= v < h):
+                oob_count += 1
+                continue
+            projected.append((int(round(u)), int(round(v)), z))
+
+    depths = [p[2] for p in projected]
+    depth_min = float(min(depths)) if depths else None
+    depth_max = float(max(depths)) if depths else None
+    depth_color_min = float(depth_min_m) if depth_min_m is not None else depth_min
+    depth_color_max = float(depth_max_m) if depth_max_m is not None else depth_max
+    if depth_color_min is not None and depth_color_max is not None and depth_color_max < depth_color_min:
+        depth_color_min, depth_color_max = depth_color_max, depth_color_min
+    radius = max(1, int(point_radius))
+    if depths and depth_color_min is not None and depth_color_max is not None:
+        denom = max(depth_color_max - depth_color_min, 1e-6)
+        for u, v, depth in projected:
+            clipped_depth = float(np.clip(depth, depth_color_min, depth_color_max))
+            norm = (clipped_depth - depth_color_min) / denom
+            color_idx = int(np.clip(255.0 * (1.0 - norm), 0, 255))
+            color = cv2.applyColorMap(np.array([[color_idx]], dtype=np.uint8), cv2.COLORMAP_TURBO)[0, 0].tolist()
+            cv2.circle(out, (u, v), radius, tuple(int(c) for c in color), -1, lineType=cv2.LINE_AA)
+
+    debug = {
+        "point_source_used": point_source_used,
+        "total_points": int(total_points),
+        "projected_points": int(len(projected)),
+        "behind_count": int(behind_count),
+        "oob_count": int(oob_count),
+        "depth_min_m": depth_min,
+        "depth_max_m": depth_max,
+        "depth_color_min_m": depth_color_min,
+        "depth_color_max_m": depth_color_max,
+        "point_radius": radius,
+        "background": background,
+        "background_alpha": alpha,
+        "visualization_calib_file": visualization_calib_file,
+        "pose_source": pose_source,
+    }
+    ok = True
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+        ok = bool(cv2.imwrite(output_path, out))
+        print(f"[Info] LiDAR projection saved: {output_path} (projected={len(projected)}/{total_points})")
+    if debug_path:
+        os.makedirs(os.path.dirname(debug_path) if os.path.dirname(debug_path) else ".", exist_ok=True)
+        with open(debug_path, "w", encoding="utf-8") as f:
+            json.dump(debug, f, indent=2, sort_keys=True)
+    return ok
 
 def project_3d_lines(img, lines_3d, K, R_rect, P_rect, R, t, draw_vertical=True):
     """
@@ -735,6 +878,26 @@ Examples:
                         help="Point subsampling factor (draw every N-th point)")
     parser.add_argument("--point_source", type=str, default="edge", choices=["edge", "all", "auto"],
                         help="Point source for visualization: edge(optimizer target), all(full points), auto(fallback).")
+    parser.add_argument("--lidar-projection-output", type=str, default="",
+                        help="Output path for dense depth-colored LiDAR projection.")
+    parser.add_argument("--lidar-projection-point-source", type=str, default="all", choices=["all", "edge", "auto"],
+                        help="Point source for dense LiDAR projection.")
+    parser.add_argument("--lidar-projection-color-mode", type=str, default="depth", choices=["depth"],
+                        help="Color mode for dense LiDAR projection.")
+    parser.add_argument("--lidar-projection-max-points", type=int, default=120000,
+                        help="Maximum LiDAR points to draw in dense projection.")
+    parser.add_argument("--lidar-projection-point-radius", type=int, default=1,
+                        help="Point radius for dense LiDAR projection.")
+    parser.add_argument("--lidar-projection-background", type=str, default="grayscale", choices=["grayscale", "rgb"],
+                        help="Background style for dense LiDAR projection.")
+    parser.add_argument("--lidar-projection-background-alpha", type=float, default=1.0,
+                        help="Brightness multiplier for dense LiDAR projection background.")
+    parser.add_argument("--lidar-projection-depth-min-m", type=float, default=None,
+                        help="Minimum depth in meters for LiDAR projection color normalization.")
+    parser.add_argument("--lidar-projection-depth-max-m", type=float, default=None,
+                        help="Maximum depth in meters for LiDAR projection color normalization.")
+    parser.add_argument("--pose-source", type=str, default="",
+                        help="Pose source label written to dense LiDAR projection debug JSON.")
     parser.add_argument("--ab_extrinsic_compare", action="store_true",
                         help="外参方向A/B验证：比较当前外参与逆外参的投影统计与叠加图。")
     parser.add_argument("--rectify_compare", action="store_true",
@@ -860,6 +1023,33 @@ Examples:
     
     print(f"[Info] Rotation (angle-axis): {r_vec}")
     print(f"[Info] Translation (meters): {t_vec}")
+
+    if args.lidar_projection_output:
+        projection_points, projection_source = load_projection_points(
+            args.feature_base,
+            point_source=args.lidar_projection_point_source,
+        )
+        projection_root, _ = os.path.splitext(args.lidar_projection_output)
+        render_lidar_projection(
+            img_clean,
+            projection_points,
+            K,
+            R_rect,
+            P_rect,
+            R,
+            t_vec,
+            args.lidar_projection_output,
+            projection_root + "_debug.json",
+            point_source_used=projection_source,
+            visualization_calib_file=args.calib_file,
+            pose_source=args.pose_source.strip() or "unknown",
+            max_points=args.lidar_projection_max_points,
+            point_radius=args.lidar_projection_point_radius,
+            background=args.lidar_projection_background,
+            background_alpha=args.lidar_projection_background_alpha,
+            depth_min_m=args.lidar_projection_depth_min_m,
+            depth_max_m=args.lidar_projection_depth_max_m,
+        )
 
     # 整流约定A/B验证（最小侵入，不改变默认主流程）
     # A: 使用R_rect（默认流程）

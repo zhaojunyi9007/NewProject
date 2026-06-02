@@ -41,6 +41,10 @@ struct EdgeCalibratorConfig {
     double strong_switch_weight = 2.0;
     double strong_buffer_stop_weight = 4.0;
     bool strong_stage_a_use_switch = false;
+    bool strong_stage_b_use_track = false;
+    bool strong_stage_b_use_switch = false;
+    double strong_stage_b_track_min_score = 0.25;
+    double strong_stage_b_switch_min_score = 0.25;
     double strong_label_min_translation_prior_weight = 50.0;
     double strong_label_rotation_prior_weight = 10.0;
     double strong_label_max_pose_jump_m = 1.0;
@@ -144,6 +148,8 @@ private:
     int strong_switch_residual_count_ = 0;
     int strong_buffer_stop_residual_count_ = 0;
     int strong_label_optimizer_residual_count_ = 0;
+    int strong_track_optimizer_residual_count_ = 0;
+    int strong_switch_optimizer_residual_count_ = 0;
     bool strong_residuals_added_to_optimizer_ = false;
     double strong_label_score_before_optimization_ = 0.0;
     double strong_label_score_after_optimization_ = 0.0;
@@ -157,6 +163,15 @@ private:
     double stage_a_yaw_jump_deg_ = 0.0;
     bool stage_a_rejected_ = false;
     std::string stage_a_reject_reason_ = "none";
+    bool stage_a_pose_available_ = false;
+    double stage_a_r_[3] = {0.0, 0.0, 0.0};
+    double stage_a_t_[3] = {0.0, 0.0, 0.0};
+    bool stage_b_track_used_ = false;
+    bool stage_b_switch_used_ = false;
+    std::string stage_b_track_skipped_reason_ = "not_evaluated";
+    std::string stage_b_switch_skipped_reason_ = "not_evaluated";
+    bool stage_b_reverted_to_stage_a_ = false;
+    std::string stage_b_guard_reason_ = "none";
     std::string strong_label_revert_reason_ = "none";
 
     CalibHistory history_;
